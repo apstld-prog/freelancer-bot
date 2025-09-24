@@ -1,4 +1,3 @@
-# migrate_telegram_id.py
 from sqlalchemy import create_engine, text
 import os
 
