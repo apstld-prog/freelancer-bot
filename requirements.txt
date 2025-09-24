@@ -1,0 +1,6 @@
+python-telegram-bot==20.3
+SQLAlchemy==2.0.20
+psycopg2-binary
+requests
+fastapi==0.110.0
+uvicorn==0.23.2
