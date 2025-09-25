@@ -5,10 +5,11 @@ import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Set
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse, urlunparse, parse_qsl, urlencode
 
 import requests
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.error import RetryAfter, TimedOut, NetworkError
 
 from db import SessionLocal, User, Keyword, JobSent
 
@@ -35,12 +36,20 @@ HTTP_BACKOFF = float(os.getenv("HTTP_BACKOFF", "1.6"))
 # Affiliate
 FREELANCER_AFFILIATE_ID = os.getenv("FREELANCER_AFFILIATE_ID", "")
 FIVERR_AFFILIATE_ID     = os.getenv("FIVERR_AFFILIATE_ID", "")
+REMOTEOK_AFFILIATE_TEMPLATE = os.getenv("REMOTEOK_AFFILIATE_TEMPLATE", "")
+WWR_AFFILIATE_TEMPLATE      = os.getenv("WWR_AFFILIATE_TEMPLATE", "")
+REMOTIVE_AFFILIATE_TEMPLATE = os.getenv("REMOTIVE_AFFILIATE_TEMPLATE", "")
 
-# Global filters (source-agnostic, applied where data available)
+# Optional UTM tagging
+UTM_SOURCE   = os.getenv("UTM_SOURCE", "")
+UTM_MEDIUM   = os.getenv("UTM_MEDIUM", "")
+UTM_CAMPAIGN = os.getenv("UTM_CAMPAIGN", "")
+
+# Global filters (source-agnostic; applied where data available)
 MAX_AGE_MIN       = int(os.getenv("MAX_AGE_MIN", "180"))
 MIN_BUDGET        = int(os.getenv("MIN_BUDGET", "0"))
-MIN_HOURLY        = float(os.getenv("MIN_HOURLY", "0"))      # hourly lower bound
-MAX_HOURLY        = float(os.getenv("MAX_HOURLY", "0"))      # 0 means "no max"
+MIN_HOURLY        = float(os.getenv("MIN_HOURLY", "0"))
+MAX_HOURLY        = float(os.getenv("MAX_HOURLY", "0"))      # 0 = no upper bound
 INCLUDE_TYPES     = {t.strip().upper() for t in os.getenv("INCLUDE_TYPES", "").split(",") if t.strip()}  # FIXED,HOURLY
 REQUIRED_SKILLS   = {s.strip().lower() for s in os.getenv("REQUIRED_SKILLS", "").split(",") if s.strip()}
 EXCLUDED_SKILLS   = {s.strip().lower() for s in os.getenv("EXCLUDED_SKILLS", "").split(",") if s.strip()}
@@ -55,6 +64,9 @@ REMOTEOK_LIMIT   = int(os.getenv("REMOTEOK_LIMIT", "30"))
 WWR_LIMIT        = int(os.getenv("WWR_LIMIT", "30"))
 REMOTIVE_LIMIT   = int(os.getenv("REMOTIVE_LIMIT", "30"))
 
+# UX toggles
+SEND_ORIGINAL_LINK_BUTTON = os.getenv("SEND_ORIGINAL_LINK_BUTTON", "1") == "1"  # show both affiliate & original
+
 # ------------------------------------------------------------------------------
 # Logging
 # ------------------------------------------------------------------------------
@@ -62,13 +74,16 @@ log_level = logging.DEBUG if DEBUG else logging.INFO
 logging.basicConfig(level=log_level, format="%(asctime)s [worker] %(levelname)s: %(message)s")
 logger = logging.getLogger("jobs-worker")
 
+# Telegram bot
 bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 if not BOT_TOKEN:
     logger.warning("BOT_TOKEN is empty! Worker cannot send Telegram messages.")
 
+# Single shared HTTP session (keeps connections, cookies, etc.)
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/1.5"})
 # ==============================================================================
-# Helpers
-# ==============================================================================
+
 def utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
@@ -97,32 +112,62 @@ def within_age(ts: Optional[int], max_age_min: int) -> bool:
     age_min = (ts_now() - ts) / 60.0
     return age_min <= max_age_min
 
-def build_affiliate_link(platform: str, job_url: str) -> str:
-    p = (platform or "").lower()
-    if p == "freelancer" and FREELANCER_AFFILIATE_ID:
-        return f"https://www.freelancer.com/get/{FREELANCER_AFFILIATE_ID}"
-    if p == "fiverr" and FIVERR_AFFILIATE_ID:
-        return f"https://track.fiverr.com/visit/?bta={FIVERR_AFFILIATE_ID}&brand=fiverrcpa&url={quote_plus(job_url)}"
-    return job_url
-
-# Hourly filter helper
 def hourly_ok(rate: Optional[float]) -> bool:
     if rate is None:
-        return True  # if we don't know, don't drop
+        return True
     if rate < MIN_HOURLY:
         return False
     if MAX_HOURLY > 0 and rate > MAX_HOURLY:
         return False
     return True
 
-# ==============================================================================
-# HTTP helpers
-# ==============================================================================
+def add_utm(url: str) -> str:
+    if not (UTM_SOURCE or UTM_MEDIUM or UTM_CAMPAIGN):
+        return url
+    try:
+        u = urlparse(url)
+        q = dict(parse_qsl(u.query))
+        if UTM_SOURCE and "utm_source" not in q:
+            q["utm_source"] = UTM_SOURCE
+        if UTM_MEDIUM and "utm_medium" not in q:
+            q["utm_medium"] = UTM_MEDIUM
+        if UTM_CAMPAIGN and "utm_campaign" not in q:
+            q["utm_campaign"] = UTM_CAMPAIGN
+        return urlunparse(u._replace(query=urlencode(q)))
+    except Exception:
+        return url
+
+def template_affiliate(template: str, job_url: str) -> str:
+    if not template:
+        return job_url
+    try:
+        return template.format(url=quote_plus(job_url))
+    except Exception:
+        return job_url
+
+def build_affiliate_link(platform: str, job_url: str) -> str:
+    p = (platform or "").lower()
+    # Native
+    if p == "freelancer" and FREELANCER_AFFILIATE_ID:
+        return f"https://www.freelancer.com/get/{FREELANCER_AFFILIATE_ID}"
+    if p == "fiverr" and FIVERR_AFFILIATE_ID:
+        return f"https://track.fiverr.com/visit/?bta={FIVERR_AFFILIATE_ID}&brand=fiverrcpa&url={quote_plus(job_url)}"
+    # Templates
+    if p == "remoteok" and REMOTEOK_AFFILIATE_TEMPLATE:
+        return template_affiliate(REMOTEOK_AFFILIATE_TEMPLATE, job_url)
+    if p == "weworkremotely" and WWR_AFFILIATE_TEMPLATE:
+        return template_affiliate(WWR_AFFILIATE_TEMPLATE, job_url)
+    if p == "remotive" and REMOTIVE_AFFILIATE_TEMPLATE:
+        return template_affiliate(REMOTIVE_AFFILIATE_TEMPLATE, job_url)
+    # Fallback add UTM
+    return add_utm(job_url)
+
+# --- HTTP helpers using shared SESSION ------------------------------------------------
 def http_json(url: str, params: Optional[dict] = None, headers: Optional[dict] = None) -> Optional[dict]:
-    h = {"Accept": "application/json", "User-Agent": "FreelancerAlertsBot/1.3"}; h.update(headers or {})
+    h = {"Accept": "application/json"}; h.update(headers or {})
     for attempt in range(1, HTTP_RETRIES + 1):
         try:
-            r = requests.get(url, params=params, headers=h, timeout=HTTP_TIMEOUT)
+            r = SESSION.get(url, params=params, headers=h, timeout=HTTP_TIMEOUT)
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -131,10 +176,10 @@ def http_json(url: str, params: Optional[dict] = None, headers: Optional[dict] =
     return None
 
 def http_text(url: str, params: Optional[dict] = None, headers: Optional[dict] = None) -> Optional[str]:
-    h = {"User-Agent": "FreelancerAlertsBot/1.3"}; h.update(headers or {})
+    h = {}; h.update(headers or {})
     for attempt in range(1, HTTP_RETRIES + 1):
         try:
-            r = requests.get(url, params=params, headers=h, timeout=HTTP_TIMEOUT)
+            r = SESSION.get(url, params=params, headers=h, timeout=HTTP_TIMEOUT)
             r.raise_for_status()
             return r.text
         except Exception as e:
@@ -143,7 +188,7 @@ def http_text(url: str, params: Optional[dict] = None, headers: Optional[dict] =
     return None
 
 # ==============================================================================
-# FREELANCER.COM
+# FREELANCER.COM (real)
 # ==============================================================================
 FREELANCER_API = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 
@@ -205,42 +250,32 @@ def fetch_freelancer(keyword: str, limit: int, pages: int) -> List[Dict]:
                 continue
             seen.add(pid)
 
-            # timestamps
             ts = int(p.get("time_updated") or p.get("time_submitted") or 0)
             if not within_age(ts if ts else None, MAX_AGE_MIN):
                 continue
 
-            # budget / hourly
             budget = p.get("budget") or {}
             bmin = budget.get("minimum")
-            btype = (budget.get("type") or "").upper()
-
+            ptype = fl_project_type(p) or "UNKNOWN"
             if bmin is not None and isinstance(bmin, (int, float)) and bmin < MIN_BUDGET:
                 continue
-
-            ptype = fl_project_type(p) or "UNKNOWN"
             if INCLUDE_TYPES and ptype not in INCLUDE_TYPES:
                 continue
-
-            # Rough hourly threshold: if explicitly hourly, treat minimum as hourly min (API has limited structure)
             if ptype == "HOURLY":
                 hr_min = None
                 try:
-                    # Some payloads expose hourly minimum in "budget" minimum (no fx conversion)
                     hr_min = float(bmin) if bmin is not None else None
                 except Exception:
                     hr_min = None
                 if not hourly_ok(hr_min):
                     continue
 
-            # skills filter
             skills = fl_project_skills(p)
             if REQUIRED_SKILLS and not REQUIRED_SKILLS.issubset(skills):
                 continue
             if EXCLUDED_SKILLS and (EXCLUDED_SKILLS & skills):
                 continue
 
-            # text keywords
             txt = norm_text(p.get("title"), p.get("preview_description"))
             if not keyword_hit(txt, REQUIRED_KEYWORDS, EXCLUDED_KEYWORDS):
                 continue
@@ -251,12 +286,13 @@ def fetch_freelancer(keyword: str, limit: int, pages: int) -> List[Dict]:
                 "url": fl_project_url(p),
                 "country": fl_project_country(p) or "ANY",
                 "platform": "freelancer",
+                "original_url": fl_project_url(p),
             })
-        time.sleep(0.3)
+        time.sleep(0.25)
     return items
 
 # ==============================================================================
-# REMOTEOK
+# REMOTEOK (real)
 # ==============================================================================
 REMOTEOK_API = "https://remoteok.com/api"
 
@@ -280,8 +316,10 @@ def fetch_remoteok(keyword: str, cap: int) -> List[Dict]:
         url = obj.get("url") or obj.get("apply_url") or obj.get("canonical_url") or ""
         ts = None
         if obj.get("epoch"):
-            try: ts = int(obj["epoch"])
-            except Exception: ts = None
+            try:
+                ts = int(obj["epoch"])
+            except Exception:
+                ts = None
 
         text_all = norm_text(title, company, desc, keyword)
         if keyword and keyword.lower() not in text_all:
@@ -297,6 +335,7 @@ def fetch_remoteok(keyword: str, cap: int) -> List[Dict]:
             "url": url or "https://remoteok.com",
             "country": "ANY",
             "platform": "remoteok",
+            "original_url": url or "https://remoteok.com",
         })
         if len(out) >= cap:
             break
@@ -334,13 +373,14 @@ def fetch_wwr(keyword: str, cap: int) -> List[Dict]:
             "url": link or "https://weworkremotely.com",
             "country": "ANY",
             "platform": "weworkremotely",
+            "original_url": link or "https://weworkremotely.com",
         })
         if len(out) >= cap:
             break
     return out
 
 # ==============================================================================
-# REMOTIVE (real API)
+# REMOTIVE (real)
 # ==============================================================================
 REMOTIVE_API = "https://remotive.com/api/remote-jobs"
 
@@ -360,10 +400,8 @@ def fetch_remotive(keyword: str, cap: int) -> List[Dict]:
         url = j.get("url") or j.get("job_url") or ""
         pub = j.get("publication_date")
         ts = None
-        # publication_date is ISO8601, try to parse quickly
         try:
             if pub:
-                # '2025-09-25T10:12:34+00:00'
                 ts = int(datetime.fromisoformat(pub.replace("Z", "+00:00")).timestamp())
         except Exception:
             ts = None
@@ -376,13 +414,13 @@ def fetch_remotive(keyword: str, cap: int) -> List[Dict]:
         if not within_age(ts, MAX_AGE_MIN):
             continue
 
-        # Remotive sometimes lists salary in 'salary' field like '$40k – $60k' (not parsed here).
         out.append({
             "id": f"rmt-{j.get('id')}",
             "title": f"{title} @ {company}".strip() or "Remotive job",
             "url": url or "https://remotive.com/remote-jobs",
             "country": "ANY",
             "platform": "remotive",
+            "original_url": url or "https://remotive.com/remote-jobs",
         })
         if len(out) >= cap:
             break
@@ -399,6 +437,7 @@ def mock_jobs(keyword: str, n: int = 3) -> List[Dict]:
         "url": "https://www.freelancer.com",
         "country": "ANY",
         "platform": "mock",
+        "original_url": "https://www.freelancer.com",
     } for i in range(n)]
 
 # ==============================================================================
@@ -432,9 +471,13 @@ def fetch_jobs(keyword: str, user_countries_csv: Optional[str]) -> List[Dict]:
 # ==============================================================================
 # SEND
 # ==============================================================================
+def _truncate(text: str, limit: int = 3800) -> str:
+    return text if len(text) <= limit else text[:limit - 10] + "…"
+
 def send_job(uid: int, job: Dict):
     platform = (job.get("platform") or "").lower()
-    affiliate = build_affiliate_link(platform, job.get("url") or "")
+    base_link = job.get("url") or ""
+    affiliate = build_affiliate_link(platform, base_link)
 
     text = (
         f"🚀 New Opportunity: {job.get('title')}\n"
@@ -442,7 +485,9 @@ def send_job(uid: int, job: Dict):
         f"🧭 Platform: {platform.title() if platform else 'N/A'}\n"
         f"🔗 Link: {affiliate}"
     )
-    kb = InlineKeyboardMarkup([
+    text = _truncate(text)
+
+    buttons = [
         [
             InlineKeyboardButton("⭐ Keep", callback_data=f"save:{job['id']}"),
             InlineKeyboardButton("🙈 Dismiss", callback_data=f"dismiss:{job['id']}"),
@@ -454,9 +499,30 @@ def send_job(uid: int, job: Dict):
             ),
             InlineKeyboardButton("🌐 Open", url=affiliate),
         ]
-    ])
-    if bot:
-        bot.send_message(chat_id=uid, text=text, reply_markup=kb)
+    ]
+    if SEND_ORIGINAL_LINK_BUTTON and job.get("original_url"):
+        buttons.append([InlineKeyboardButton("🔗 Original", url=job["original_url"])])
+
+    kb = InlineKeyboardMarkup(buttons)
+
+    if not bot:
+        return
+
+    # Telegram rate-limit safe sending
+    for attempt in range(1, 4):
+        try:
+            bot.send_message(chat_id=uid, text=text, reply_markup=kb, disable_web_page_preview=True)
+            return
+        except RetryAfter as ra:
+            wait = max(1, int(getattr(ra, "retry_after", 3)))
+            logger.warning(f"[telegram] RetryAfter {wait}s for user={uid}")
+            time.sleep(wait)
+        except (TimedOut, NetworkError) as te:
+            logger.warning(f"[telegram] network timeout ({attempt}/3): {te}")
+            time.sleep(2 * attempt)
+        except Exception as e:
+            logger.exception(f"[telegram] send failed user={uid}: {e}")
+            return
 
 # ==============================================================================
 # MAIN LOOP
@@ -517,8 +583,7 @@ def run_worker():
     logger.info(
         f"Worker start :: DEBUG={DEBUG} MOCK_JOBS={MOCK_JOBS} INTERVAL={WORKER_INTERVAL}s | "
         f"SOURCES: FL={FREELANCER_ENABLED} ROK={REMOTEOK_ENABLED} WWR={WWR_ENABLED} RMT={REMOTIVE_ENABLED} | "
-        f"FILTERS: MAX_AGE_MIN={MAX_AGE_MIN} MIN_BUDGET={MIN_BUDGET} HOURLY=[{MIN_HOURLY},{MAX_HOURLY or '∞'}] TYPES={','.join(INCLUDE_TYPES) if INCLUDE_TYPES else 'ANY'} | "
-        f"REQ_SKILLS={','.join(REQUIRED_SKILLS) if REQUIRED_SKILLS else '-'} EXC_SKILLS={','.join(EXCLUDED_SKILLS) if EXCLUDED_SKILLS else '-'}"
+        f"FILTERS: MAX_AGE_MIN={MAX_AGE_MIN} MIN_BUDGET={MIN_BUDGET} HOURLY=[{MIN_HOURLY},{MAX_HOURLY or '∞'}] TYPES={','.join(INCLUDE_TYPES) if INCLUDE_TYPES else 'ANY'}"
     )
     while True:
         t0 = time.time()
