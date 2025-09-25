@@ -169,8 +169,6 @@ def build_affiliate_link(platform: str, job_url: str) -> str:
 # ==============================================================================
 # HTTP helpers
 # ==============================================================================
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode  # ensure imported above
-
 def http_json(url: str, params: Optional[dict] = None, headers: Optional[dict] = None) -> Optional[dict]:
     h = {"Accept": "application/json"}
     if headers: h.update(headers)
@@ -583,7 +581,7 @@ def send_job(uid: int, job: Dict):
             return
 
 # ==============================================================================
-# KEYWORD EXPANSION (NEW)
+# KEYWORD EXPANSION (FIXED)
 # ==============================================================================
 _SPLIT_RE = re.compile(r"[,\n]+")
 
@@ -593,10 +591,11 @@ def expand_keywords(keywords: List[str]) -> List[str]:
     for kw in keywords:
         if not kw:
             continue
-        parts = [p.strip() for p in _ SPLIT_RE.split(kw) if p.strip()]
+        parts = [p.strip() for p in _SPLIT_RE.split(kw) if p.strip()]
         for p in parts:
-            if p.lower() not in seen:
-                seen.add(p.lower())
+            key = p.lower()
+            if key not in seen:
+                seen.add(key)
                 expanded.append(p)
     return expanded
 
@@ -607,7 +606,7 @@ def process_user(db, user: User):
     uid = user.telegram_id
     rows = db.query(Keyword).filter_by(user_id=user.id).all()
     raw_keywords = [k.keyword for k in rows]
-    keywords = expand_keywords(raw_keywords)  # <-- expand comma/newline separated
+    keywords = expand_keywords(raw_keywords)  # expand comma/newline separated
     logger.info(f"Scanning user={uid} keywords={keywords or ['<none>']} countries={user.countries or 'ALL'}")
 
     if not keywords:
