@@ -9,7 +9,7 @@ from urllib.parse import quote_plus, urlparse, urlunparse, parse_qsl, urlencode
 
 import requests
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.error import RetryAfter, TimedOut, NetworkError
+from telegram.error import RetryAfter, TimedOut, NetworkError, Conflict
 
 from db import SessionLocal, User, Keyword, JobSent
 
@@ -25,6 +25,7 @@ MOCK_JOBS = os.getenv("MOCK_JOBS", "0") == "1"
 # Sources toggles
 FREELANCER_ENABLED = os.getenv("FREELANCER_ENABLED", "1") == "1"
 REMOTEOK_ENABLED   = os.getenv("REMOTEOK_ENABLED", "1") == "1"
+REMOTEOK_USE_RSS   = os.getenv("REMOTEOK_USE_RSS", "1") == "1"  # fallback if API fails
 WWR_ENABLED        = os.getenv("WWR_ENABLED", "1") == "1"
 REMOTIVE_ENABLED   = os.getenv("REMOTIVE_ENABLED", "1") == "1"
 
@@ -79,11 +80,13 @@ bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 if not BOT_TOKEN:
     logger.warning("BOT_TOKEN is empty! Worker cannot send Telegram messages.")
 
-# Single shared HTTP session (keeps connections, cookies, etc.)
+# Shared HTTP session
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/1.5"})
-# ==============================================================================
+SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/1.6 (+https://github.com/)"})
 
+# ==============================================================================
+# Helpers
+# ==============================================================================
 def utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
@@ -159,12 +162,15 @@ def build_affiliate_link(platform: str, job_url: str) -> str:
         return template_affiliate(WWR_AFFILIATE_TEMPLATE, job_url)
     if p == "remotive" and REMOTIVE_AFFILIATE_TEMPLATE:
         return template_affiliate(REMOTIVE_AFFILIATE_TEMPLATE, job_url)
-    # Fallback add UTM
+    # Fallback UTM
     return add_utm(job_url)
 
-# --- HTTP helpers using shared SESSION ------------------------------------------------
+# ==============================================================================
+# HTTP helpers
+# ==============================================================================
 def http_json(url: str, params: Optional[dict] = None, headers: Optional[dict] = None) -> Optional[dict]:
-    h = {"Accept": "application/json"}; h.update(headers or {})
+    h = {"Accept": "application/json"}; 
+    if headers: h.update(headers)
     for attempt in range(1, HTTP_RETRIES + 1):
         try:
             r = SESSION.get(url, params=params, headers=h, timeout=HTTP_TIMEOUT)
@@ -176,7 +182,8 @@ def http_json(url: str, params: Optional[dict] = None, headers: Optional[dict] =
     return None
 
 def http_text(url: str, params: Optional[dict] = None, headers: Optional[dict] = None) -> Optional[str]:
-    h = {}; h.update(headers or {})
+    h = {}
+    if headers: h.update(headers)
     for attempt in range(1, HTTP_RETRIES + 1):
         try:
             r = SESSION.get(url, params=params, headers=h, timeout=HTTP_TIMEOUT)
@@ -188,7 +195,7 @@ def http_text(url: str, params: Optional[dict] = None, headers: Optional[dict] =
     return None
 
 # ==============================================================================
-# FREELANCER.COM (real)
+# FREELANCER.COM
 # ==============================================================================
 FREELANCER_API = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 
@@ -280,26 +287,31 @@ def fetch_freelancer(keyword: str, limit: int, pages: int) -> List[Dict]:
             if not keyword_hit(txt, REQUIRED_KEYWORDS, EXCLUDED_KEYWORDS):
                 continue
 
+            url = fl_project_url(p)
             items.append({
                 "id": f"fre-{pid}",
                 "title": p.get("title") or "Untitled project",
-                "url": fl_project_url(p),
+                "url": url,
                 "country": fl_project_country(p) or "ANY",
                 "platform": "freelancer",
-                "original_url": fl_project_url(p),
+                "original_url": url,
             })
         time.sleep(0.25)
     return items
 
 # ==============================================================================
-# REMOTEOK (real)
+# REMOTEOK (API + RSS fallback)
 # ==============================================================================
 REMOTEOK_API = "https://remoteok.com/api"
+REMOTEOK_RSS = "https://remoteok.com/remote-jobs.rss"
 
-def fetch_remoteok(keyword: str, cap: int) -> List[Dict]:
-    if not REMOTEOK_ENABLED:
-        return []
-    txt = http_text(REMOTEOK_API)
+def fetch_remoteok_api(keyword: str, cap: int) -> List[Dict]:
+    # Some sites block without “nice” headers
+    headers = {
+        "Accept": "application/json",
+        "Referer": "https://remoteok.com/",
+    }
+    txt = http_text(REMOTEOK_API, headers=headers)
     if not txt:
         return []
     try:
@@ -316,10 +328,8 @@ def fetch_remoteok(keyword: str, cap: int) -> List[Dict]:
         url = obj.get("url") or obj.get("apply_url") or obj.get("canonical_url") or ""
         ts = None
         if obj.get("epoch"):
-            try:
-                ts = int(obj["epoch"])
-            except Exception:
-                ts = None
+            try: ts = int(obj["epoch"])
+            except Exception: ts = None
 
         text_all = norm_text(title, company, desc, keyword)
         if keyword and keyword.lower() not in text_all:
@@ -340,6 +350,50 @@ def fetch_remoteok(keyword: str, cap: int) -> List[Dict]:
         if len(out) >= cap:
             break
     return out
+
+def fetch_remoteok_rss(keyword: str, cap: int) -> List[Dict]:
+    headers = {
+        "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+        "Referer": "https://remoteok.com/",
+    }
+    xml = http_text(REMOTEOK_RSS, headers=headers)
+    if not xml:
+        return []
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        return []
+    items = root.findall("./channel/item")
+    out: List[Dict] = []
+    for it in items:
+        title = (it.findtext("title") or "").strip()
+        link  = (it.findtext("link") or "").strip()
+        desc  = (it.findtext("description") or "").strip()
+        text_all = norm_text(title, desc, keyword)
+        if keyword and keyword.lower() not in text_all:
+            continue
+        if not keyword_hit(text_all, REQUIRED_KEYWORDS, EXCLUDED_KEYWORDS):
+            continue
+        out.append({
+            "id": f"rokrss-{hash(link)}",
+            "title": title or "RemoteOK job",
+            "url": link or "https://remoteok.com",
+            "country": "ANY",
+            "platform": "remoteok",
+            "original_url": link or "https://remoteok.com",
+        })
+        if len(out) >= cap:
+            break
+    return out
+
+def fetch_remoteok(keyword: str, cap: int) -> List[Dict]:
+    if not REMOTEOK_ENABLED:
+        return []
+    items = fetch_remoteok_api(keyword, cap)
+    if not items and REMOTEOK_USE_RSS:
+        logger.info("[remoteok] API empty/blocked → trying RSS fallback")
+        items = fetch_remoteok_rss(keyword, cap)
+    return items
 
 # ==============================================================================
 # WE WORK REMOTELY (RSS)
@@ -508,7 +562,6 @@ def send_job(uid: int, job: Dict):
     if not bot:
         return
 
-    # Telegram rate-limit safe sending
     for attempt in range(1, 4):
         try:
             bot.send_message(chat_id=uid, text=text, reply_markup=kb, disable_web_page_preview=True)
@@ -517,6 +570,10 @@ def send_job(uid: int, job: Dict):
             wait = max(1, int(getattr(ra, "retry_after", 3)))
             logger.warning(f"[telegram] RetryAfter {wait}s for user={uid}")
             time.sleep(wait)
+        except Conflict as cf:
+            # Another process is polling getUpdates. Log and skip send (worker continues).
+            logger.error(f"[telegram] Conflict (another getUpdates running). Ensure only one polling/webhook consumer is active. Details: {cf}")
+            return
         except (TimedOut, NetworkError) as te:
             logger.warning(f"[telegram] network timeout ({attempt}/3): {te}")
             time.sleep(2 * attempt)
@@ -558,7 +615,6 @@ def process_user(db, user: User):
                 continue
             dedup_ids.add(jid)
 
-            # per-user persisted dedup
             if db.query(JobSent).filter_by(user_id=user.id, job_id=jid).first():
                 logger.debug(f"user={uid} job_id={jid} already sent; skip")
                 continue
@@ -582,7 +638,7 @@ def process_user(db, user: User):
 def run_worker():
     logger.info(
         f"Worker start :: DEBUG={DEBUG} MOCK_JOBS={MOCK_JOBS} INTERVAL={WORKER_INTERVAL}s | "
-        f"SOURCES: FL={FREELANCER_ENABLED} ROK={REMOTEOK_ENABLED} WWR={WWR_ENABLED} RMT={REMOTIVE_ENABLED} | "
+        f"SOURCES: FL={FREELANCER_ENABLED} ROK={REMOTEOK_ENABLED} WWR={WWR_ENABLED} RMT={REMOTIVE_ENABLED} (ROK_RSS={REMOTEOK_USE_RSS}) | "
         f"FILTERS: MAX_AGE_MIN={MAX_AGE_MIN} MIN_BUDGET={MIN_BUDGET} HOURLY=[{MIN_HOURLY},{MAX_HOURLY or '∞'}] TYPES={','.join(INCLUDE_TYPES) if INCLUDE_TYPES else 'ANY'}"
     )
     while True:
