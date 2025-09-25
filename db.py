@@ -1,42 +1,88 @@
 import os
-from sqlalchemy import Column, Integer, String, ForeignKey, Text, create_engine, UniqueConstraint
+from sqlalchemy import (
+    Column,
+    Integer,
+    BigInteger,
+    String,
+    Text,
+    ForeignKey,
+    UniqueConstraint,
+    create_engine,
+)
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-DATABASE_URL = os.getenv("DB_URL")
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(bind=engine)
+# --------------------------------------------------------------------
+# Database URL
+# Example:
+#   postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME
+# --------------------------------------------------------------------
+DB_URL = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DB_URL (or DATABASE_URL) is not set in environment variables.")
+
+engine = create_engine(DB_URL, pool_pre_ping=True, future=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 Base = declarative_base()
 
+
+# --------------------------------------------------------------------
+# Models
+# --------------------------------------------------------------------
 class User(Base):
     __tablename__ = "users"
+
     id = Column(Integer, primary_key=True)
-    telegram_id = Column(Integer, unique=True, index=True)
-    countries = Column(String, nullable=True)
-    proposal_template = Column(Text, nullable=True)  # NEW: store user's proposal template
+    # Telegram can exceed INT range, so use BIGINT
+    telegram_id = Column(BigInteger, unique=True, nullable=False)
+    countries = Column(String(255), nullable=True)           # e.g. "US,UK" or "ALL"
+    proposal_template = Column(Text, nullable=True)
+
+    keywords = relationship("Keyword", back_populates="user", cascade="all, delete-orphan")
 
 class Keyword(Base):
     __tablename__ = "keywords"
+
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    keyword = Column(String)
-    user = relationship("User")
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    keyword = Column(String(255), nullable=False)
+
+    user = relationship("User", back_populates="keywords")
     __table_args__ = (UniqueConstraint("user_id", "keyword", name="uq_user_keyword"),)
 
 class JobSent(Base):
     __tablename__ = "jobs_sent"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    job_id = Column(String)
-    user = relationship("User")
-    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_user_jobsent"),)
 
-class SavedJob(Base):
-    __tablename__ = "saved_jobs"
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    job_id = Column(String)
-    user = relationship("User")
-    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_user_savedjob"),)
+    user_id = Column(Integer, nullable=False)
+    job_id = Column(String(255), nullable=False)
 
-# Create tables (idempotent)
-Base.metadata.create_all(engine)
+    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_user_job_sent"),)
+
+class JobSaved(Base):
+    __tablename__ = "jobs_saved"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    job_id = Column(String(255), nullable=False)
+
+    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_user_job_saved"),)
+
+class JobDismissed(Base):
+    __tablename__ = "jobs_dismissed"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    job_id = Column(String(255), nullable=False)
+
+    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_user_job_dismissed"),)
+
+
+# --------------------------------------------------------------------
+# Auto create tables (idempotent)
+# --------------------------------------------------------------------
+def init_db():
+    Base.metadata.create_all(bind=engine)
+
+# Initialize on import
+init_db()
