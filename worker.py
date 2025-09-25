@@ -563,7 +563,7 @@ def fetch_jobicy(keyword: str, cap: int) -> List[Dict]:
 # ==============================================================================
 # NODESK (RSS)
 # ==============================================================================
-NODESK_RSS = "https://nodesk.co/remote-jobs/rss/"
+NODESK_RSS = "https://nodesk.co/remote-jobs/feed/"
 
 def fetch_nodesk(keyword: str, cap: int) -> List[Dict]:
     if not NODESK_ENABLED:
