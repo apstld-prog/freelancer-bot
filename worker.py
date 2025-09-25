@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import logging
@@ -82,7 +83,7 @@ if not BOT_TOKEN:
 
 # Shared HTTP session
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/1.6 (+https://github.com/)"})
+SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/1.7 (+https://github.com/)"})
 
 # ==============================================================================
 # Helpers
@@ -168,8 +169,10 @@ def build_affiliate_link(platform: str, job_url: str) -> str:
 # ==============================================================================
 # HTTP helpers
 # ==============================================================================
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode  # ensure imported above
+
 def http_json(url: str, params: Optional[dict] = None, headers: Optional[dict] = None) -> Optional[dict]:
-    h = {"Accept": "application/json"}; 
+    h = {"Accept": "application/json"}
     if headers: h.update(headers)
     for attempt in range(1, HTTP_RETRIES + 1):
         try:
@@ -306,7 +309,6 @@ REMOTEOK_API = "https://remoteok.com/api"
 REMOTEOK_RSS = "https://remoteok.com/remote-jobs.rss"
 
 def fetch_remoteok_api(keyword: str, cap: int) -> List[Dict]:
-    # Some sites block without “nice” headers
     headers = {
         "Accept": "application/json",
         "Referer": "https://remoteok.com/",
@@ -571,8 +573,7 @@ def send_job(uid: int, job: Dict):
             logger.warning(f"[telegram] RetryAfter {wait}s for user={uid}")
             time.sleep(wait)
         except Conflict as cf:
-            # Another process is polling getUpdates. Log and skip send (worker continues).
-            logger.error(f"[telegram] Conflict (another getUpdates running). Ensure only one polling/webhook consumer is active. Details: {cf}")
+            logger.error(f"[telegram] Conflict (another getUpdates running). Ensure only one polling/webhook is active. Details: {cf}")
             return
         except (TimedOut, NetworkError) as te:
             logger.warning(f"[telegram] network timeout ({attempt}/3): {te}")
@@ -582,12 +583,31 @@ def send_job(uid: int, job: Dict):
             return
 
 # ==============================================================================
+# KEYWORD EXPANSION (NEW)
+# ==============================================================================
+_SPLIT_RE = re.compile(r"[,\n]+")
+
+def expand_keywords(keywords: List[str]) -> List[str]:
+    expanded: List[str] = []
+    seen: Set[str] = set()
+    for kw in keywords:
+        if not kw:
+            continue
+        parts = [p.strip() for p in _ SPLIT_RE.split(kw) if p.strip()]
+        for p in parts:
+            if p.lower() not in seen:
+                seen.add(p.lower())
+                expanded.append(p)
+    return expanded
+
+# ==============================================================================
 # MAIN LOOP
 # ==============================================================================
 def process_user(db, user: User):
     uid = user.telegram_id
     rows = db.query(Keyword).filter_by(user_id=user.id).all()
-    keywords = [k.keyword for k in rows]
+    raw_keywords = [k.keyword for k in rows]
+    keywords = expand_keywords(raw_keywords)  # <-- expand comma/newline separated
     logger.info(f"Scanning user={uid} keywords={keywords or ['<none>']} countries={user.countries or 'ALL'}")
 
     if not keywords:
