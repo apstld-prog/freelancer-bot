@@ -9,8 +9,7 @@ from typing import List, Dict, Optional, Set
 from urllib.parse import quote_plus, urlparse, urlunparse, parse_qsl, urlencode
 
 import requests
-from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.error import RetryAfter, TimedOut, NetworkError, Conflict
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 from db import SessionLocal, User, Keyword, JobSent
 
@@ -32,7 +31,7 @@ REMOTIVE_ENABLED       = os.getenv("REMOTIVE_ENABLED", "1") == "1"
 REMOTECO_ENABLED       = os.getenv("REMOTECO_ENABLED", "0") == "1"   # default off (timeouts)
 JOBICY_ENABLED         = os.getenv("JOBICY_ENABLED", "1") == "1"
 NODESK_ENABLED         = os.getenv("NODESK_ENABLED", "1") == "1"
-WORKINGNOMADS_ENABLED  = os.getenv("WORKINGNOMADS_ENABLED", "0") == "1"  # Atom
+WORKINGNOMADS_ENABLED  = os.getenv("WORKINGNOMADS_ENABLED", "0") == "1"  # Atom; set 0 if 404
 
 # HTTP/retry
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "15"))
@@ -84,14 +83,12 @@ log_level = logging.DEBUG if DEBUG else logging.INFO
 logging.basicConfig(level=log_level, format="%(asctime)s [worker] %(levelname)s: %(message)s")
 logger = logging.getLogger("jobs-worker")
 
-# Telegram bot
-bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
-if not BOT_TOKEN:
-    logger.warning("BOT_TOKEN is empty! Worker cannot send Telegram messages.")
+# Telegram REST endpoint (sync, no async warnings)
+TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # Shared HTTP session
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/2.1 (+https://github.com/)"})
+SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/2.2 (+https://github.com/)"})
 
 
 # ==============================================================================
@@ -499,7 +496,7 @@ def fetch_remotive(keyword: str, cap: int) -> List[Dict]:
 
 
 # ==============================================================================
-# REMOTE.CO (RSS - optional, can timeout on some providers)
+# REMOTE.CO (RSS - optional, can timeout)
 # ==============================================================================
 REMOTECO_FEEDS = [
     "https://remote.co/remote-jobs/developer/feed/",
@@ -580,7 +577,7 @@ def fetch_nodesk(keyword: str, cap: int) -> List[Dict]:
 
 
 # ==============================================================================
-# WORKING NOMADS (ATOM)
+# WORKING NOMADS (ATOM) — may 404, keep toggleable
 # ==============================================================================
 WORKINGNOMADS_ATOM = "https://www.workingnomads.com/jobs.atom"
 
@@ -592,18 +589,15 @@ def fetch_atom_generic(feed_url: str, platform: str, keyword: str, cap: int) -> 
         root = ET.fromstring(xml)
     except Exception:
         return []
-    # Atom namespace handling
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     entries = root.findall(".//atom:entry", ns)
     out: List[Dict] = []
     for e in entries:
         title = (e.findtext("atom:title", default="", namespaces=ns) or "").strip()
-        # link can be <link href="...">
         link_el = e.find("atom:link", ns)
         link = ""
         if link_el is not None:
             link = (link_el.get("href") or "").strip()
-        # summary/content optional
         summary = (e.findtext("atom:summary", default="", namespaces=ns) or
                    e.findtext("atom:content", default="", namespaces=ns) or "").strip()
         updated = e.findtext("atom:updated", default="", namespaces=ns)
@@ -681,7 +675,6 @@ def fetch_jobs(keyword: str, user_countries_csv: Optional[str]) -> List[Dict]:
         if WORKINGNOMADS_ENABLED:
             jobs.extend(fetch_workingnomads(keyword, WORKNOMADS_LIMIT))
 
-    # User-specific country filter (ANY always allowed)
     user_countries = countries_list(user_countries_csv)
     if user_countries:
         before = len(jobs)
@@ -693,8 +686,35 @@ def fetch_jobs(keyword: str, user_countries_csv: Optional[str]) -> List[Dict]:
 
 
 # ==============================================================================
-# SEND
+# SEND (sync via Telegram HTTP API)
 # ==============================================================================
+def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None):
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN is empty; cannot send Telegram messages.")
+        return
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+        "parse_mode": "HTML",
+    }
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    for attempt in range(1, 4):
+        try:
+            r = SESSION.post(f"{TG_API}/sendMessage", data=payload, timeout=HTTP_TIMEOUT)
+            if r.status_code == 409:
+                logger.error("[telegram] Conflict (another getUpdates running). Ensure only one polling/webhook is active.")
+                return
+            r.raise_for_status()
+            return
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"[telegram] send failed ({attempt}/3): {e}")
+            time.sleep(2 * attempt)
+        except Exception as e:
+            logger.exception(f"[telegram] unexpected error: {e}")
+            return
+
 def send_job(uid: int, job: Dict):
     platform = (job.get("platform") or "").lower()
     base_link = job.get("url") or ""
@@ -703,7 +723,7 @@ def send_job(uid: int, job: Dict):
     affiliate = build_affiliate_link(platform, base_link)
 
     text = (
-        f"🚀 New Opportunity: {job.get('title')}\n"
+        f"🚀 <b>New Opportunity</b>: {job.get('title')}\n"
         f"🌍 Country: {job.get('country') or 'ANY'}\n"
         f"🧭 Platform: {platform.title() if platform else 'N/A'}\n"
         f"🔗 Link: {affiliate}"
@@ -712,42 +732,22 @@ def send_job(uid: int, job: Dict):
 
     buttons = [
         [
-            InlineKeyboardButton("⭐ Keep", callback_data=f"save:{job['id']}"),
-            InlineKeyboardButton("🙈 Dismiss", callback_data=f"dismiss:{job['id']}"),
+            {"text": "⭐ Keep", "callback_data": f"save:{job['id']}"},
+            {"text": "🙈 Dismiss", "callback_data": f"dismiss:{job['id']}"},
         ],
         [
-            InlineKeyboardButton(
-                "✍️ Proposal",
-                callback_data=f"proposal:{job['id']}|{platform}|{affiliate}|{quote_plus(job.get('title') or '')}"
-            ),
-            InlineKeyboardButton("🌐 Open", url=affiliate),
+            {
+                "text": "✍️ Proposal",
+                "callback_data": f"proposal:{job['id']}|{platform}|{affiliate}|{quote_plus(job.get('title') or '')}"
+            },
+            {"text": "🌐 Open", "url": affiliate},
         ]
     ]
     if SEND_ORIGINAL_LINK_BUTTON and job.get("original_url"):
-        buttons.append([InlineKeyboardButton("🔗 Original", url=job["original_url"])])
+        buttons.append([{"text": "🔗 Original", "url": job["original_url"]}])
 
-    kb = InlineKeyboardMarkup(buttons)
-
-    if not bot:
-        return
-
-    for attempt in range(1, 4):
-        try:
-            bot.send_message(chat_id=uid, text=text, reply_markup=kb, disable_web_page_preview=True)
-            return
-        except RetryAfter as ra:
-            wait = max(1, int(getattr(ra, "retry_after", 3)))
-            logger.warning(f"[telegram] RetryAfter {wait}s for user={uid}")
-            time.sleep(wait)
-        except Conflict as cf:
-            logger.error(f"[telegram] Conflict (another getUpdates running). Ensure only one polling/webhook is active. Details: {cf}")
-            return
-        except (TimedOut, NetworkError) as te:
-            logger.warning(f"[telegram] network timeout ({attempt}/3): {te}")
-            time.sleep(2 * attempt)
-        except Exception as e:
-            logger.exception(f"[telegram] send failed user={uid}: {e}")
-            return
+    reply_markup = {"inline_keyboard": buttons}
+    tg_send_message(uid, text, reply_markup)
 
 
 # ==============================================================================
@@ -858,7 +858,4 @@ def run_worker():
         time.sleep(sleep_for)
 
 if __name__ == "__main__":
-    try:
-        run_worker()
-    except KeyboardInterrupt:
-        logger.info("Worker stopped.")
+    run_worker()

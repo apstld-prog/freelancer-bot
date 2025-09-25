@@ -26,7 +26,6 @@ logger = logging.getLogger("freelancer-bot")
 _SPLIT_RE = re.compile(r"[,\n]+")
 
 def normalize_kw_list(text: str) -> List[str]:
-    """Split by comma/newline, strip, drop empties, keep order unique (case-insensitive)."""
     out: List[str] = []
     seen = set()
     for part in _SPLIT_RE.split(text or ""):
@@ -56,7 +55,6 @@ def list_keywords(db, user_id: int) -> List[str]:
     return [r.keyword for r in rows]
 
 def find_keyword_row(db, user_id: int, name_ci: str) -> Optional[Keyword]:
-    # case-insensitive match
     for row in db.query(Keyword).filter_by(user_id=user_id).all():
         if row.keyword.lower() == name_ci.lower():
             return row
@@ -66,19 +64,19 @@ def find_keyword_row(db, user_id: int, name_ci: str) -> Optional[Keyword]:
 WELCOME = (
     "👋 Welcome to Freelancer Alerts Bot!\n\n"
     "Commands:\n"
-    "/addkeyword <word[,word2,...]> – Track jobs by keyword (comma-separated allowed)\n"
+    "/addkeyword <word[,word2,...]> – Add keywords (comma-separated)\n"
     "/keywords – List your keywords\n"
     "/delkeyword <word> – Delete a keyword\n"
     "/editkeyword <old> -> <new> – Rename a keyword\n"
-    "/clearkeywords – Delete all keywords (confirmation required)\n"
-    "/setcountry <US,UK,DE> – Filter by country list (or ALL)\n"
-    "/mysettings – View your filters\n"
+    "/clearkeywords – Delete all keywords (confirmation)\n"
+    "/setcountry <US,UK,DE> – Country filter (or ALL)\n"
+    "/mysettings – Show your filters\n"
     "/setproposal <text> – Save your proposal template\n"
     "   Placeholders: {job_title}, {experience}, {stack}, {availability}, {step1}, {step2}, {step3}, {budget_time}, {portfolio}, {name}\n"
-    "/savejob <job_id> – Save a job (from inline button \"Keep\")\n"
-    "/dismissjob <job_id> – Mute a job (from inline button \"Dismiss\")\n"
+    "/savejob <job_id> – Save a job (same as ⭐ Keep)\n"
+    "/dismissjob <job_id> – Dismiss a job (same as 🙈 Dismiss)\n"
     "/clearjob <job_id> – Alias of /dismissjob\n\n"
-    "Tip: Alerts include inline buttons ⭐ Keep / 🙈 Dismiss / ✍️ Proposal."
+    "Tips: Alerts have inline buttons ⭐ Keep / 🙈 Dismiss / ✍️ Proposal."
 )
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,7 +168,6 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def editkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # format: /editkeyword old -> new
     text = " ".join(context.args)
     m = re.match(r"(.+?)\s*->\s*(.+)", text) if text else None
     if not m:
@@ -184,7 +181,6 @@ async def editkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = find_keyword_row(db, user.id, old)
         if not row:
             return await update.effective_message.reply_text(f"Not found: {old}")
-        # Avoid duplicates
         exists = find_keyword_row(db, user.id, new)
         if exists and exists.id != row.id:
             return await update.effective_message.reply_text(f"'{new}' already exists.")
@@ -195,7 +191,6 @@ async def editkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # confirmation via inline button
     kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Yes, delete all", callback_data="conf:clear_kws"),
           InlineKeyboardButton("Cancel", callback_data="conf:cancel")]]
@@ -231,7 +226,6 @@ async def setproposal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# Save / Dismiss / Clear job (manual commands to complement buttons)
 async def savejob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await reply_usage(update, "Usage: /savejob <job_id>")
     job_id = context.args[0]
@@ -259,10 +253,8 @@ async def dismissjob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def clearjob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Alias of dismiss
     return await dismissjob_cmd(update, context)
 
-# Inline button callbacks (Keep/Dismiss/Proposal)
 async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -288,7 +280,6 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text(f"🙈 Dismissed job: {jid}")
 
         elif data.startswith("proposal:"):
-            # proposal:<job_id>|<platform>|<link>|<title>
             try:
                 _, payload = data.split(":", 1)
                 job_id, platform, link, title_enc = payload.split("|", 3)
@@ -312,7 +303,6 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# --------- Application boot ---------
 def main():
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN is empty.")
@@ -322,7 +312,6 @@ def main():
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
-
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("setcountry", setcountry_cmd))
     app.add_handler(CommandHandler("setproposal", setproposal_cmd))
@@ -341,7 +330,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^(save:|dismiss:|proposal:)"))
     app.add_handler(CallbackQueryHandler(confirm_cb, pattern=r"^conf:(clear_kws|cancel)$"))
 
-    # Polling (ensure only one instance runs!)
+    # IMPORTANT: single polling instance
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
