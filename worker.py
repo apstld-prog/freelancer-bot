@@ -26,13 +26,13 @@ MOCK_JOBS = os.getenv("MOCK_JOBS", "0") == "1"
 # Sources toggles
 FREELANCER_ENABLED     = os.getenv("FREELANCER_ENABLED", "1") == "1"
 REMOTEOK_ENABLED       = os.getenv("REMOTEOK_ENABLED", "0") == "1"
-REMOTEOK_USE_RSS       = os.getenv("REMOTEOK_USE_RSS", "1") == "1"  # fallback if API fails
+REMOTEOK_USE_RSS       = os.getenv("REMOTEOK_USE_RSS", "1") == "1"
 WWR_ENABLED            = os.getenv("WWR_ENABLED", "1") == "1"
 REMOTIVE_ENABLED       = os.getenv("REMOTIVE_ENABLED", "1") == "1"
-REMOTECO_ENABLED       = os.getenv("REMOTECO_ENABLED", "1") == "1"
+REMOTECO_ENABLED       = os.getenv("REMOTECO_ENABLED", "0") == "1"   # default off (timeouts)
 JOBICY_ENABLED         = os.getenv("JOBICY_ENABLED", "1") == "1"
 NODESK_ENABLED         = os.getenv("NODESK_ENABLED", "1") == "1"
-WORKINGNOMADS_ENABLED  = os.getenv("WORKINGNOMADS_ENABLED", "1") == "1"
+WORKINGNOMADS_ENABLED  = os.getenv("WORKINGNOMADS_ENABLED", "0") == "1"  # Atom
 
 # HTTP/retry
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "15"))
@@ -52,7 +52,7 @@ UTM_MEDIUM   = os.getenv("UTM_MEDIUM", "")
 UTM_CAMPAIGN = os.getenv("UTM_CAMPAIGN", "")
 
 # Global filters (source-agnostic; applied where data available)
-MAX_AGE_MIN       = int(os.getenv("MAX_AGE_MIN", "1440"))  # 24h για να βλέπεις πιο εύκολα ροή
+MAX_AGE_MIN       = int(os.getenv("MAX_AGE_MIN", "1440"))
 MIN_BUDGET        = int(os.getenv("MIN_BUDGET", "0"))
 MIN_HOURLY        = float(os.getenv("MIN_HOURLY", "0"))
 MAX_HOURLY        = float(os.getenv("MAX_HOURLY", "0"))      # 0 = no upper bound
@@ -75,7 +75,7 @@ NODESK_LIMIT     = int(os.getenv("NODESK_LIMIT", "60"))
 WORKNOMADS_LIMIT = int(os.getenv("WORKNOMADS_LIMIT", "60"))
 
 # UX toggles
-SEND_ORIGINAL_LINK_BUTTON = os.getenv("SEND_ORIGINAL_LINK_BUTTON", "1") == "1"  # show both affiliate & original
+SEND_ORIGINAL_LINK_BUTTON = os.getenv("SEND_ORIGINAL_LINK_BUTTON", "1") == "1"
 
 # ------------------------------------------------------------------------------
 # Logging
@@ -91,7 +91,8 @@ if not BOT_TOKEN:
 
 # Shared HTTP session
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/2.0 (+https://github.com/)"})
+SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/2.1 (+https://github.com/)"})
+
 
 # ==============================================================================
 # Helpers
@@ -177,6 +178,7 @@ def build_affiliate_link(platform: str, job_url: str) -> str:
 def _truncate(text: str, limit: int = 3800) -> str:
     return text if len(text) <= limit else text[:limit - 10] + "…"
 
+
 # ==============================================================================
 # HTTP helpers
 # ==============================================================================
@@ -205,6 +207,7 @@ def http_text(url: str, params: Optional[dict] = None, headers: Optional[dict] =
             logger.warning(f"[http_text] GET failed ({attempt}/{HTTP_RETRIES}): {e}")
             backoff_sleep(attempt)
     return None
+
 
 # ==============================================================================
 # FREELANCER.COM
@@ -311,6 +314,7 @@ def fetch_freelancer(keyword: str, limit: int, pages: int) -> List[Dict]:
         time.sleep(0.25)
     return items
 
+
 # ==============================================================================
 # REMOTEOK (API + RSS fallback)
 # ==============================================================================
@@ -406,6 +410,7 @@ def fetch_remoteok(keyword: str, cap: int) -> List[Dict]:
         items = fetch_remoteok_rss(keyword, cap)
     return items
 
+
 # ==============================================================================
 # WE WORK REMOTELY (RSS)
 # ==============================================================================
@@ -443,6 +448,7 @@ def fetch_wwr(keyword: str, cap: int) -> List[Dict]:
         if len(out) >= cap:
             break
     return out
+
 
 # ==============================================================================
 # REMOTIVE (JSON API)
@@ -491,10 +497,10 @@ def fetch_remotive(keyword: str, cap: int) -> List[Dict]:
             break
     return out
 
+
 # ==============================================================================
-# REMOTE.CO (RSS, πολλαπλά feeds)
+# REMOTE.CO (RSS - optional, can timeout on some providers)
 # ==============================================================================
-# Μπορείς να προσαρμόσεις κατηγορίες εδώ (developer/design/marketing/support/product/sales/ops/qa/customer-service κ.λπ.)
 REMOTECO_FEEDS = [
     "https://remote.co/remote-jobs/developer/feed/",
     "https://remote.co/remote-jobs/design/feed/",
@@ -550,6 +556,7 @@ def fetch_remoteco(keyword: str, cap: int) -> List[Dict]:
             break
     return out[:cap]
 
+
 # ==============================================================================
 # JOBICY (RSS)
 # ==============================================================================
@@ -560,8 +567,9 @@ def fetch_jobicy(keyword: str, cap: int) -> List[Dict]:
         return []
     return fetch_rss_generic(JOBICY_RSS, "jobicy", keyword, cap)
 
+
 # ==============================================================================
-# NODESK (RSS)
+# NODESK (RSS) — fixed to /feed/
 # ==============================================================================
 NODESK_RSS = "https://nodesk.co/remote-jobs/feed/"
 
@@ -570,15 +578,67 @@ def fetch_nodesk(keyword: str, cap: int) -> List[Dict]:
         return []
     return fetch_rss_generic(NODESK_RSS, "nodesk", keyword, cap)
 
+
 # ==============================================================================
-# WORKING NOMADS (RSS)
+# WORKING NOMADS (ATOM)
 # ==============================================================================
-WORKINGNOMADS_RSS = "https://www.workingnomads.com/jobs.rss"
+WORKINGNOMADS_ATOM = "https://www.workingnomads.com/jobs.atom"
+
+def fetch_atom_generic(feed_url: str, platform: str, keyword: str, cap: int) -> List[Dict]:
+    xml = http_text(feed_url, headers={"Accept": "application/atom+xml,application/xml;q=0.9,*/*;q=0.8"})
+    if not xml:
+        return []
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        return []
+    # Atom namespace handling
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    entries = root.findall(".//atom:entry", ns)
+    out: List[Dict] = []
+    for e in entries:
+        title = (e.findtext("atom:title", default="", namespaces=ns) or "").strip()
+        # link can be <link href="...">
+        link_el = e.find("atom:link", ns)
+        link = ""
+        if link_el is not None:
+            link = (link_el.get("href") or "").strip()
+        # summary/content optional
+        summary = (e.findtext("atom:summary", default="", namespaces=ns) or
+                   e.findtext("atom:content", default="", namespaces=ns) or "").strip()
+        updated = e.findtext("atom:updated", default="", namespaces=ns)
+        ts = None
+        try:
+            if updated:
+                ts = int(datetime.fromisoformat(updated.replace("Z", "+00:00")).timestamp())
+        except Exception:
+            ts = None
+
+        text_all = norm_text(title, summary, keyword)
+        if keyword and keyword.lower() not in text_all:
+            continue
+        if not keyword_hit(text_all, REQUIRED_KEYWORDS, EXCLUDED_KEYWORDS):
+            continue
+        if not within_age(ts, MAX_AGE_MIN):
+            continue
+
+        out.append({
+            "id": f"{platform[:3]}-{hash(link or title)}",
+            "title": title or f"{platform.title()} job",
+            "url": link or "",
+            "country": "ANY",
+            "platform": platform.lower(),
+            "original_url": link or "",
+        })
+        if len(out) >= cap:
+            break
+    return out
 
 def fetch_workingnomads(keyword: str, cap: int) -> List[Dict]:
     if not WORKINGNOMADS_ENABLED:
         return []
-    return fetch_rss_generic(WORKINGNOMADS_RSS, "workingnomads", keyword, cap)
+    return fetch_atom_generic(WORKINGNOMADS_ATOM, "workingnomads", keyword, cap)
+
 
 # ==============================================================================
 # MOCK (for tests)
@@ -593,6 +653,7 @@ def mock_jobs(keyword: str, n: int = 3) -> List[Dict]:
         "platform": "mock",
         "original_url": "https://www.freelancer.com",
     } for i in range(n)]
+
 
 # ==============================================================================
 # AGGREGATOR
@@ -629,6 +690,7 @@ def fetch_jobs(keyword: str, user_countries_csv: Optional[str]) -> List[Dict]:
         logger.debug(f"[filter] countries={user_countries} kept {len(jobs)}/{before} jobs")
 
     return jobs
+
 
 # ==============================================================================
 # SEND
@@ -687,6 +749,7 @@ def send_job(uid: int, job: Dict):
             logger.exception(f"[telegram] send failed user={uid}: {e}")
             return
 
+
 # ==============================================================================
 # KEYWORD EXPANSION
 # ==============================================================================
@@ -706,6 +769,7 @@ def expand_keywords(keywords: List[str]) -> List[str]:
                 expanded.append(p)
     return expanded
 
+
 # ==============================================================================
 # MAIN LOOP
 # ==============================================================================
@@ -720,7 +784,7 @@ def process_user(db, user: User):
         return
 
     sent_this_loop = 0
-    dedup_ids: Set[str] = set()  # cross-keyword dedup in this loop
+    dedup_ids: Set[str] = set()
 
     for kw in keywords:
         try:
