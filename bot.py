@@ -1,209 +1,348 @@
-import logging
 import os
-from urllib.parse import unquote_plus
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
-from db import SessionLocal, User, Keyword, JobSent, SavedJob
+import logging
+import re
+from typing import List, Optional
 
-logging.basicConfig(level=logging.INFO)
-TOKEN = os.getenv("BOT_TOKEN")
-
-DEFAULT_TEMPLATE = (
-    "Hello,\n\n"
-    "I’m interested in **{job_title}**.\n\n"
-    "Why me:\n"
-    "• Relevant experience: {experience}\n"
-    "• Tech stack: {stack}\n"
-    "• Availability: {availability}\n\n"
-    "Outline:\n"
-    "1) {step1}\n"
-    "2) {step2}\n"
-    "3) {step3}\n\n"
-    "Budget & timeline: {budget_time}\n"
-    "Portfolio: {portfolio}\n\n"
-    "Regards,\n"
-    "{name}\n"
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
 )
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    db = SessionLocal()
-    user = db.query(User).filter_by(telegram_id=user_id).first()
+from db import SessionLocal, User, Keyword, JobSaved, JobDismissed
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+DEBUG = os.getenv("DEBUG", "0") == "1"
+
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG else logging.INFO,
+    format="%(asctime)s [bot] %(levelname)s: %(message)s",
+)
+logger = logging.getLogger("freelancer-bot")
+
+# --------- Helpers ---------
+_SPLIT_RE = re.compile(r"[,\n]+")
+
+def normalize_kw_list(text: str) -> List[str]:
+    """Split by comma/newline, strip, drop empties, keep order unique (case-insensitive)."""
+    out: List[str] = []
+    seen = set()
+    for part in _SPLIT_RE.split(text or ""):
+        p = part.strip()
+        if not p:
+            continue
+        low = p.lower()
+        if low not in seen:
+            seen.add(low)
+            out.append(p)
+    return out
+
+async def reply_usage(update: Update, text: str):
+    await update.effective_message.reply_text(text)
+
+async def ensure_user(db, tg_id: int) -> User:
+    user = db.query(User).filter_by(telegram_id=tg_id).first()
     if not user:
-        user = User(telegram_id=user_id)
+        user = User(telegram_id=tg_id)
         db.add(user)
         db.commit()
-    db.close()
-    await update.message.reply_text(
-        "👋 Welcome to Freelancer Alerts Bot!\n\n"
-        "Commands:\n"
-        "/addkeyword <word> → Track jobs by keyword\n"
-        "/setcountry <US,UK,DE> → Filter by country list\n"
-        "/mysettings → View your filters\n"
-        "/setproposal <text> → Save your proposal template\n"
-        "   Placeholders you can use: {job_title}, {experience}, {stack}, {availability}, {step1}, {step2}, {step3}, {budget_time}, {portfolio}, {name}\n"
-        "/savejob <job_id> → Save a job\n"
-        "/dismissjob <job_id> → Dismiss/mute a job\n"
-        "/clearjob <job_id> → Alias of /dismissjob\n\n"
-        "Tip: Job alerts include inline buttons ⭐ Keep / 🙈 Dismiss / ✍️ Proposal."
-    )
+        db.refresh(user)
+    return user
 
-async def addkeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /addkeyword <keyword>")
-        return
-    keyword = " ".join(context.args)
-    user_id = update.effective_user.id
+def list_keywords(db, user_id: int) -> List[str]:
+    rows = db.query(Keyword).filter_by(user_id=user_id).order_by(Keyword.id.asc()).all()
+    return [r.keyword for r in rows]
+
+def find_keyword_row(db, user_id: int, name_ci: str) -> Optional[Keyword]:
+    # case-insensitive match
+    for row in db.query(Keyword).filter_by(user_id=user_id).all():
+        if row.keyword.lower() == name_ci.lower():
+            return row
+    return None
+
+# --------- Commands ---------
+WELCOME = (
+    "👋 Welcome to Freelancer Alerts Bot!\n\n"
+    "Commands:\n"
+    "/addkeyword <word[,word2,...]> – Track jobs by keyword (comma-separated allowed)\n"
+    "/keywords – List your keywords\n"
+    "/delkeyword <word> – Delete a keyword\n"
+    "/editkeyword <old> -> <new> – Rename a keyword\n"
+    "/clearkeywords – Delete all keywords (confirmation required)\n"
+    "/setcountry <US,UK,DE> – Filter by country list (or ALL)\n"
+    "/mysettings – View your filters\n"
+    "/setproposal <text> – Save your proposal template\n"
+    "   Placeholders: {job_title}, {experience}, {stack}, {availability}, {step1}, {step2}, {step3}, {budget_time}, {portfolio}, {name}\n"
+    "/savejob <job_id> – Save a job (from inline button \"Keep\")\n"
+    "/dismissjob <job_id> – Mute a job (from inline button \"Dismiss\")\n"
+    "/clearjob <job_id> – Alias of /dismissjob\n\n"
+    "Tip: Alerts include inline buttons ⭐ Keep / 🙈 Dismiss / ✍️ Proposal."
+)
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(WELCOME)
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(WELCOME)
+
+async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
-    user = db.query(User).filter_by(telegram_id=user_id).first()
-    exists = db.query(Keyword).filter_by(user_id=user.id, keyword=keyword).first()
-    if not exists:
-        db.add(Keyword(user_id=user.id, keyword=keyword))
-        db.commit()
-    db.close()
-    await update.message.reply_text(f"✅ Keyword added: {keyword}")
-
-async def setcountry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /setcountry <US,UK,DE>")
-        return
-    countries = ",".join(context.args).upper().replace(" ", "")
-    user_id = update.effective_user.id
-    db = SessionLocal()
-    user = db.query(User).filter_by(telegram_id=user_id).first()
-    user.countries = countries
-    db.commit()
-    db.close()
-    await update.message.reply_text(f"🌍 Countries set: {countries}")
-
-async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    db = SessionLocal()
-    user = db.query(User).filter_by(telegram_id=user_id).first()
-    keywords = [k.keyword for k in db.query(Keyword).filter_by(user_id=user.id).all()]
-    saved_count = db.query(SavedJob).filter_by(user_id=user.id).count()
-    db.close()
-    await update.message.reply_text(
-        f"🔑 Keywords: {', '.join(keywords) if keywords else 'None'}\n"
-        f"🌍 Countries: {user.countries or 'All'}\n"
-        f"⭐ Saved jobs: {saved_count}\n"
-        f"📝 Has proposal template: {'Yes' if user.proposal_template else 'No'}"
-    )
-
-async def setproposal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save user's proposal template (full text after the command)."""
-    user_id = update.effective_user.id
-    text = (update.message.text or "").split(" ", 1)
-    if len(text) < 2 or not text[1].strip():
-        await update.message.reply_text(
-            "Usage: /setproposal <your template text>\n\n"
-            "Example:\n"
-            "/setproposal Hello, I can help with {job_title}. I have {experience} and use {stack}. Budget/time: {budget_time}.\n"
-            "Portfolio: {portfolio}\n"
-            "Thanks, {name}"
+    try:
+        user = await ensure_user(db, update.effective_user.id)
+        kws = list_keywords(db, user.id)
+        countries = user.countries or "ALL"
+        tmpl = (user.proposal_template or "(none)")[:250]
+        await update.effective_message.reply_text(
+            f"🛠 Settings\n"
+            f"• Keywords: {', '.join(kws) if kws else '(none)'}\n"
+            f"• Countries: {countries}\n"
+            f"• Proposal template: {tmpl}"
         )
-        return
-    template = text[1].strip()
-    db = SessionLocal()
-    user = db.query(User).filter_by(telegram_id=user_id).first()
-    user.proposal_template = template
-    db.commit()
-    db.close()
-    await update.message.reply_text("✅ Proposal template saved.")
+    finally:
+        db.close()
 
-async def savejob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /savejob <job_id>")
-        return
-    job_id = context.args[0]
-    user_id = update.effective_user.id
+async def setcountry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args:
+        return await reply_usage(update, "Usage: /setcountry <US,UK,DE> or ALL")
+    value = " ".join(args).strip()
     db = SessionLocal()
-    user = db.query(User).filter_by(telegram_id=user_id).first()
-    if not db.query(SavedJob).filter_by(user_id=user.id, job_id=job_id).first():
-        db.add(SavedJob(user_id=user.id, job_id=job_id))
+    try:
+        user = await ensure_user(db, update.effective_user.id)
+        user.countries = value.upper()
         db.commit()
-    db.close()
-    await update.message.reply_text(f"⭐ Saved job {job_id}")
+        await update.effective_message.reply_text(f"✅ Countries set to: {user.countries}")
+    finally:
+        db.close()
 
-async def dismissjob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /dismissjob <job_id>")
-        return
-    job_id = context.args[0]
-    user_id = update.effective_user.id
+        return await reply_usage(update, "Usage: /addkeyword <keyword[,keyword2,...]>")
+    raw = " ".join(context.args)
+    to_add = normalize_kw_list(raw)
     db = SessionLocal()
-    user = db.query(User).filter_by(telegram_id=user_id).first()
-    if not db.query(JobSent).filter_by(user_id=user.id, job_id=job_id).first():
-        db.add(JobSent(user_id=user.id, job_id=job_id))
+    added = []
+    try:
+        user = await ensure_user(db, update.effective_user.id)
+        existing_ci = {k.lower() for k in list_keywords(db, user.id)}
+        for kw in to_add:
+            if kw.lower() in existing_ci:
+                continue
+            row = Keyword(user_id=user.id, keyword=kw)
+            db.add(row)
+            added.append(kw)
         db.commit()
-    db.close()
-    await update.message.reply_text(f"🙈 Dismissed job {job_id} (won't notify again)")
+        if added:
+            await update.effective_message.reply_text(f"✅ Keyword(s) added: {', '.join(added)}")
+        else:
+            await update.effective_message.reply_text("ℹ️ Nothing to add (already present).")
+    finally:
+        db.close()
 
-async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    try:
+        user = await ensure_user(db, update.effective_user.id)
+        kws = list_keywords(db, user.id)
+        if not kws:
+            await update.effective_message.reply_text("No keywords yet. Add with /addkeyword <word>.")
+        else:
+            await update.effective_message.reply_text("📎 Your keywords:\n• " + "\n• ".join(kws))
+    finally:
+        db.close()
+
+async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await reply_usage(update, "Usage: /delkeyword <keyword>")
+    name = " ".join(context.args).strip()
+    db = SessionLocal()
+    try:
+        user = await ensure_user(db, update.effective_user.id)
+        row = find_keyword_row(db, user.id, name)
+        if not row:
+            return await update.effective_message.reply_text(f"Not found: {name}")
+        db.delete(row)
+        db.commit()
+        await update.effective_message.reply_text(f"🗑 Deleted keyword: {row.keyword}")
+    finally:
+        db.close()
+
+async def editkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # format: /editkeyword old -> new
+    text = " ".join(context.args)
+    m = re.match(r"(.+?)\s*->\s*(.+)", text) if text else None
+    if not m:
+        return await reply_usage(update, "Usage: /editkeyword <old> -> <new>")
+    old, new = m.group(1).strip(), m.group(2).strip()
+    if not new:
+        return await reply_usage(update, "New keyword cannot be empty.")
+    db = SessionLocal()
+    try:
+        user = await ensure_user(db, update.effective_user.id)
+        row = find_keyword_row(db, user.id, old)
+        if not row:
+            return await update.effective_message.reply_text(f"Not found: {old}")
+        # Avoid duplicates
+        exists = find_keyword_row(db, user.id, new)
+        if exists and exists.id != row.id:
+            return await update.effective_message.reply_text(f"'{new}' already exists.")
+        row.keyword = new
+        db.commit()
+        await update.effective_message.reply_text(f"✏️ Renamed: {old} → {new}")
+    finally:
+        db.close()
+
+async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # confirmation via inline button
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Yes, delete all", callback_data="conf:clear_kws"),
+          InlineKeyboardButton("Cancel", callback_data="conf:cancel")]]
+    )
+    await update.effective_message.reply_text("⚠️ Delete ALL your keywords?", reply_markup=kb)
+
+async def confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data = q.data or ""
-    user_id = q.from_user.id
+    if data == "conf:cancel":
+        return await q.edit_message_text("Cancelled.")
+    if data == "conf:clear_kws":
+        db = SessionLocal()
+        try:
+            user = await ensure_user(db, q.from_user.id)
+            db.query(Keyword).filter_by(user_id=user.id).delete(synchronize_session=False)
+            db.commit()
+            await q.edit_message_text("🧹 All keywords deleted.")
+        finally:
+            db.close()
+
+async def setproposal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await reply_usage(update, "Usage: /setproposal <your proposal template>")
+    text = " ".join(context.args)
     db = SessionLocal()
-    user = db.query(User).filter_by(telegram_id=user_id).first()
+    try:
+        user = await ensure_user(db, update.effective_user.id)
+        user.proposal_template = text
+        db.commit()
+        await update.effective_message.reply_text("✅ Proposal template saved.")
+    finally:
+        db.close()
 
-    if data.startswith("save:"):
-        jid = data.split(":", 1)[1]
-        if not db.query(SavedJob).filter_by(user_id=user.id, job_id=jid).first():
-            db.add(SavedJob(user_id=user.id, job_id=jid))
+# Save / Dismiss / Clear job (manual commands to complement buttons)
+async def savejob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args: return await reply_usage(update, "Usage: /savejob <job_id>")
+    job_id = context.args[0]
+    db = SessionLocal()
+    try:
+        user = await ensure_user(db, update.effective_user.id)
+        if not db.query(JobSaved).filter_by(user_id=user.id, job_id=job_id).first():
+            db.add(JobSaved(user_id=user.id, job_id=job_id))
             db.commit()
-        await q.edit_message_reply_markup(reply_markup=None)
-        await q.message.reply_text(f"⭐ Saved job {jid}")
+        await update.effective_message.reply_text(f"⭐ Saved job: {job_id}")
+    finally:
+        db.close()
 
-    elif data.startswith("dismiss:"):
-        jid = data.split(":", 1)[1]
-        if not db.query(JobSent).filter_by(user_id=user.id, job_id=jid).first():
-            db.add(JobSent(user_id=user.id, job_id=jid))
+async def dismissjob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args: return await reply_usage(update, "Usage: /dismissjob <job_id>")
+    job_id = context.args[0]
+    db = SessionLocal()
+    try:
+        user = await ensure_user(db, update.effective_user.id)
+        if not db.query(JobDismissed).filter_by(user_id=user.id, job_id=job_id).first():
+            db.add(JobDismissed(user_id=user.id, job_id=job_id))
             db.commit()
-        await q.edit_message_reply_markup(reply_markup=None)
-        await q.message.reply_text(f"🙈 Dismissed job {jid}")
+        await update.effective_message.reply_text(f"🙈 Dismissed job: {job_id}")
+    finally:
+        db.close()
 
-    elif data.startswith("proposal:"):
-        # data format: proposal:<job_id>|<platform>|<affiliate_link>|<encoded_title>
-        payload = data.split(":", 1)[1]
-        parts = payload.split("|")
-        job_id = parts[0] if len(parts) > 0 else ""
-        platform = parts[1] if len(parts) > 1 else ""
-        link = parts[2] if len(parts) > 2 else ""
-        job_title = unquote_plus(parts[3]) if len(parts) > 3 else "the job"
+async def clearjob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Alias of dismiss
+    return await dismissjob_cmd(update, context)
 
-        template = user.proposal_template or DEFAULT_TEMPLATE
-        # Replace placeholders with simple defaults; user can customize via /setproposal
-        filled = template.format(
-            job_title=job_title,
-            experience="3+ years with similar projects",
-            stack="Python, Telegram, APIs",
-            availability="immediately",
-            step1="Clarify requirements",
-            step2="Implement & test",
-            step3="Deliver & support",
-            budget_time="to be discussed after details",
-            portfolio="(link here)",
-            name=q.from_user.first_name or "Freelancer",
-        )
+# Inline button callbacks (Keep/Dismiss/Proposal)
+async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data or ""
+    db = SessionLocal()
+    try:
+        user = await ensure_user(db, q.from_user.id)
 
-        await q.message.reply_text(
-            "✍️ *Your Proposal Draft* (copy & paste into the platform):\n\n" + filled,
-            parse_mode="Markdown"
-        )
+        if data.startswith("save:"):
+            jid = data.split(":", 1)[1]
+            if not db.query(JobSaved).filter_by(user_id=user.id, job_id=jid).first():
+                db.add(JobSaved(user_id=user.id, job_id=jid))
+                db.commit()
+            await q.edit_message_reply_markup(reply_markup=None)
+            await q.message.reply_text(f"⭐ Saved job: {jid}")
 
-    db.close()
+        elif data.startswith("dismiss:"):
+            jid = data.split(":", 1)[1]
+            if not db.query(JobDismissed).filter_by(user_id=user.id, job_id=jid).first():
+                db.add(JobDismissed(user_id=user.id, job_id=jid))
+                db.commit()
+            await q.edit_message_reply_markup(reply_markup=None)
+            await q.message.reply_text(f"🙈 Dismissed job: {jid}")
 
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("addkeyword", addkeyword))
-app.add_handler(CommandHandler("setcountry", setcountry))
-app.add_handler(CommandHandler("mysettings", mysettings))
-app.add_handler(CommandHandler("setproposal", setproposal))
-app.add_handler(CommandHandler("savejob", savejob_cmd))
-app.add_handler(CommandHandler("dismissjob", dismissjob_cmd))
-app.add_handler(CommandHandler("clearjob", dismissjob_cmd))  # alias
-app.add_handler(CallbackQueryHandler(on_button))
+        elif data.startswith("proposal:"):
+            # proposal:<job_id>|<platform>|<link>|<title>
+            try:
+                _, payload = data.split(":", 1)
+                job_id, platform, link, title_enc = payload.split("|", 3)
+            except Exception:
+                return
+            title = re.sub(r"\s+", " ", re.sub(r"%[0-9A-Fa-f]{2}", " ", title_enc))
+            tmpl = user.proposal_template or "Hello,\nI’m interested in {job_title}.\nBest regards,"
+            msg = tmpl.format(
+                job_title=title,
+                experience="",
+                stack="",
+                availability="",
+                step1="",
+                step2="",
+                step3="",
+                budget_time="",
+                portfolio="",
+                name="",
+            )
+            await q.message.reply_text(f"✍️ Proposal draft:\n\n{msg}")
+    finally:
+        db.close()
+
+# --------- Application boot ---------
+def main():
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN is empty.")
+        raise SystemExit(1)
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+
+    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
+    app.add_handler(CommandHandler("setcountry", setcountry_cmd))
+    app.add_handler(CommandHandler("setproposal", setproposal_cmd))
+
+    app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
+    app.add_handler(CommandHandler("keywords", keywords_cmd))
+    app.add_handler(CommandHandler("listkeywords", keywords_cmd))
+    app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
+    app.add_handler(CommandHandler("editkeyword", editkeyword_cmd))
+    app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
+
+    app.add_handler(CommandHandler("savejob", savejob_cmd))
+    app.add_handler(CommandHandler("dismissjob", dismissjob_cmd))
+    app.add_handler(CommandHandler("clearjob", clearjob_cmd))
+
+    app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^(save:|dismiss:|proposal:)"))
+    app.add_handler(CallbackQueryHandler(confirm_cb, pattern=r"^conf:(clear_kws|cancel)$"))
+
+    # Polling (ensure only one instance runs!)
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    app.run_polling()
+    main()
