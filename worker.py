@@ -24,11 +24,15 @@ DEBUG = os.getenv("DEBUG", "0") == "1"
 MOCK_JOBS = os.getenv("MOCK_JOBS", "0") == "1"
 
 # Sources toggles
-FREELANCER_ENABLED = os.getenv("FREELANCER_ENABLED", "1") == "1"
-REMOTEOK_ENABLED   = os.getenv("REMOTEOK_ENABLED", "1") == "1"
-REMOTEOK_USE_RSS   = os.getenv("REMOTEOK_USE_RSS", "1") == "1"  # fallback if API fails
-WWR_ENABLED        = os.getenv("WWR_ENABLED", "1") == "1"
-REMOTIVE_ENABLED   = os.getenv("REMOTIVE_ENABLED", "1") == "1"
+FREELANCER_ENABLED     = os.getenv("FREELANCER_ENABLED", "1") == "1"
+REMOTEOK_ENABLED       = os.getenv("REMOTEOK_ENABLED", "0") == "1"
+REMOTEOK_USE_RSS       = os.getenv("REMOTEOK_USE_RSS", "1") == "1"  # fallback if API fails
+WWR_ENABLED            = os.getenv("WWR_ENABLED", "1") == "1"
+REMOTIVE_ENABLED       = os.getenv("REMOTIVE_ENABLED", "1") == "1"
+REMOTECO_ENABLED       = os.getenv("REMOTECO_ENABLED", "1") == "1"
+JOBICY_ENABLED         = os.getenv("JOBICY_ENABLED", "1") == "1"
+NODESK_ENABLED         = os.getenv("NODESK_ENABLED", "1") == "1"
+WORKINGNOMADS_ENABLED  = os.getenv("WORKINGNOMADS_ENABLED", "1") == "1"
 
 # HTTP/retry
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "15"))
@@ -48,7 +52,7 @@ UTM_MEDIUM   = os.getenv("UTM_MEDIUM", "")
 UTM_CAMPAIGN = os.getenv("UTM_CAMPAIGN", "")
 
 # Global filters (source-agnostic; applied where data available)
-MAX_AGE_MIN       = int(os.getenv("MAX_AGE_MIN", "180"))
+MAX_AGE_MIN       = int(os.getenv("MAX_AGE_MIN", "1440"))  # 24h για να βλέπεις πιο εύκολα ροή
 MIN_BUDGET        = int(os.getenv("MIN_BUDGET", "0"))
 MIN_HOURLY        = float(os.getenv("MIN_HOURLY", "0"))
 MAX_HOURLY        = float(os.getenv("MAX_HOURLY", "0"))      # 0 = no upper bound
@@ -57,14 +61,18 @@ REQUIRED_SKILLS   = {s.strip().lower() for s in os.getenv("REQUIRED_SKILLS", "")
 EXCLUDED_SKILLS   = {s.strip().lower() for s in os.getenv("EXCLUDED_SKILLS", "").split(",") if s.strip()}
 REQUIRED_KEYWORDS = [s.strip().lower() for s in os.getenv("REQUIRED_KEYWORDS", "").split(",") if s.strip()]
 EXCLUDED_KEYWORDS = [s.strip().lower() for s in os.getenv("EXCLUDED_KEYWORDS", "").split(",") if s.strip()]
-MAX_SEND_PER_LOOP = int(os.getenv("MAX_SEND_PER_LOOP", "8"))
+MAX_SEND_PER_LOOP = int(os.getenv("MAX_SEND_PER_LOOP", "12"))
 
 # Per-source pagination/limits
 FREELANCER_LIMIT = int(os.getenv("FREELANCER_LIMIT", "20"))
 FREELANCER_PAGES = int(os.getenv("FREELANCER_PAGES", "2"))
 REMOTEOK_LIMIT   = int(os.getenv("REMOTEOK_LIMIT", "30"))
-WWR_LIMIT        = int(os.getenv("WWR_LIMIT", "30"))
-REMOTIVE_LIMIT   = int(os.getenv("REMOTIVE_LIMIT", "30"))
+WWR_LIMIT        = int(os.getenv("WWR_LIMIT", "40"))
+REMOTIVE_LIMIT   = int(os.getenv("REMOTIVE_LIMIT", "40"))
+REMOTECO_LIMIT   = int(os.getenv("REMOTECO_LIMIT", "60"))
+JOBICY_LIMIT     = int(os.getenv("JOBICY_LIMIT", "60"))
+NODESK_LIMIT     = int(os.getenv("NODESK_LIMIT", "60"))
+WORKNOMADS_LIMIT = int(os.getenv("WORKNOMADS_LIMIT", "60"))
 
 # UX toggles
 SEND_ORIGINAL_LINK_BUTTON = os.getenv("SEND_ORIGINAL_LINK_BUTTON", "1") == "1"  # show both affiliate & original
@@ -83,7 +91,7 @@ if not BOT_TOKEN:
 
 # Shared HTTP session
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/1.7 (+https://github.com/)"})
+SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/2.0 (+https://github.com/)"})
 
 # ==============================================================================
 # Helpers
@@ -165,6 +173,9 @@ def build_affiliate_link(platform: str, job_url: str) -> str:
         return template_affiliate(REMOTIVE_AFFILIATE_TEMPLATE, job_url)
     # Fallback UTM
     return add_utm(job_url)
+
+def _truncate(text: str, limit: int = 3800) -> str:
+    return text if len(text) <= limit else text[:limit - 10] + "…"
 
 # ==============================================================================
 # HTTP helpers
@@ -434,7 +445,7 @@ def fetch_wwr(keyword: str, cap: int) -> List[Dict]:
     return out
 
 # ==============================================================================
-# REMOTIVE (real)
+# REMOTIVE (JSON API)
 # ==============================================================================
 REMOTIVE_API = "https://remotive.com/api/remote-jobs"
 
@@ -481,6 +492,95 @@ def fetch_remotive(keyword: str, cap: int) -> List[Dict]:
     return out
 
 # ==============================================================================
+# REMOTE.CO (RSS, πολλαπλά feeds)
+# ==============================================================================
+# Μπορείς να προσαρμόσεις κατηγορίες εδώ (developer/design/marketing/support/product/sales/ops/qa/customer-service κ.λπ.)
+REMOTECO_FEEDS = [
+    "https://remote.co/remote-jobs/developer/feed/",
+    "https://remote.co/remote-jobs/design/feed/",
+    "https://remote.co/remote-jobs/marketing/feed/",
+    "https://remote.co/remote-jobs/customer-service/feed/",
+    "https://remote.co/remote-jobs/product/feed/",
+    "https://remote.co/remote-jobs/sales/feed/",
+    "https://remote.co/remote-jobs/writing/feed/",
+    "https://remote.co/remote-jobs/project-manager/feed/",
+    "https://remote.co/remote-jobs/qa/feed/",
+    "https://remote.co/remote-jobs/data/feed/",
+]
+
+def fetch_rss_generic(feed_url: str, platform: str, keyword: str, cap: int) -> List[Dict]:
+    xml = http_text(feed_url, headers={"Accept": "application/rss+xml,application/xml;q=0.9,*/*;q=0.8"})
+    if not xml:
+        return []
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        return []
+    items = root.findall("./channel/item")
+    out: List[Dict] = []
+    for it in items:
+        title = (it.findtext("title") or "").strip()
+        link  = (it.findtext("link") or "").strip()
+        desc  = (it.findtext("description") or "").strip()
+        text_all = norm_text(title, desc, keyword)
+        if keyword and keyword.lower() not in text_all:
+            continue
+        if not keyword_hit(text_all, REQUIRED_KEYWORDS, EXCLUDED_KEYWORDS):
+            continue
+        out.append({
+            "id": f"{platform[:3]}-{hash(link)}",
+            "title": title or f"{platform.title()} job",
+            "url": link or "",
+            "country": "ANY",
+            "platform": platform.lower(),
+            "original_url": link or "",
+        })
+        if len(out) >= cap:
+            break
+    return out
+
+def fetch_remoteco(keyword: str, cap: int) -> List[Dict]:
+    if not REMOTECO_ENABLED:
+        return []
+    out: List[Dict] = []
+    per_feed = max(5, cap // max(1, len(REMOTECO_FEEDS)))
+    for feed in REMOTECO_FEEDS:
+        out.extend(fetch_rss_generic(feed, "remote.co", keyword, per_feed))
+        if len(out) >= cap:
+            break
+    return out[:cap]
+
+# ==============================================================================
+# JOBICY (RSS)
+# ==============================================================================
+JOBICY_RSS = "https://jobicy.com/?feed=job_feed"
+
+def fetch_jobicy(keyword: str, cap: int) -> List[Dict]:
+    if not JOBICY_ENABLED:
+        return []
+    return fetch_rss_generic(JOBICY_RSS, "jobicy", keyword, cap)
+
+# ==============================================================================
+# NODESK (RSS)
+# ==============================================================================
+NODESK_RSS = "https://nodesk.co/remote-jobs/rss/"
+
+def fetch_nodesk(keyword: str, cap: int) -> List[Dict]:
+    if not NODESK_ENABLED:
+        return []
+    return fetch_rss_generic(NODESK_RSS, "nodesk", keyword, cap)
+
+# ==============================================================================
+# WORKING NOMADS (RSS)
+# ==============================================================================
+WORKINGNOMADS_RSS = "https://www.workingnomads.com/jobs.rss"
+
+def fetch_workingnomads(keyword: str, cap: int) -> List[Dict]:
+    if not WORKINGNOMADS_ENABLED:
+        return []
+    return fetch_rss_generic(WORKINGNOMADS_RSS, "workingnomads", keyword, cap)
+
+# ==============================================================================
 # MOCK (for tests)
 # ==============================================================================
 def mock_jobs(keyword: str, n: int = 3) -> List[Dict]:
@@ -511,6 +611,14 @@ def fetch_jobs(keyword: str, user_countries_csv: Optional[str]) -> List[Dict]:
             jobs.extend(fetch_wwr(keyword, WWR_LIMIT))
         if REMOTIVE_ENABLED:
             jobs.extend(fetch_remotive(keyword, REMOTIVE_LIMIT))
+        if REMOTECO_ENABLED:
+            jobs.extend(fetch_remoteco(keyword, REMOTECO_LIMIT))
+        if JOBICY_ENABLED:
+            jobs.extend(fetch_jobicy(keyword, JOBICY_LIMIT))
+        if NODESK_ENABLED:
+            jobs.extend(fetch_nodesk(keyword, NODESK_LIMIT))
+        if WORKINGNOMADS_ENABLED:
+            jobs.extend(fetch_workingnomads(keyword, WORKNOMADS_LIMIT))
 
     # User-specific country filter (ANY always allowed)
     user_countries = countries_list(user_countries_csv)
@@ -525,12 +633,11 @@ def fetch_jobs(keyword: str, user_countries_csv: Optional[str]) -> List[Dict]:
 # ==============================================================================
 # SEND
 # ==============================================================================
-def _truncate(text: str, limit: int = 3800) -> str:
-    return text if len(text) <= limit else text[:limit - 10] + "…"
-
 def send_job(uid: int, job: Dict):
     platform = (job.get("platform") or "").lower()
     base_link = job.get("url") or ""
+    if not base_link:
+        return
     affiliate = build_affiliate_link(platform, base_link)
 
     text = (
@@ -581,7 +688,7 @@ def send_job(uid: int, job: Dict):
             return
 
 # ==============================================================================
-# KEYWORD EXPANSION (FIXED)
+# KEYWORD EXPANSION
 # ==============================================================================
 _SPLIT_RE = re.compile(r"[,\n]+")
 
@@ -606,7 +713,7 @@ def process_user(db, user: User):
     uid = user.telegram_id
     rows = db.query(Keyword).filter_by(user_id=user.id).all()
     raw_keywords = [k.keyword for k in rows]
-    keywords = expand_keywords(raw_keywords)  # expand comma/newline separated
+    keywords = expand_keywords(raw_keywords)
     logger.info(f"Scanning user={uid} keywords={keywords or ['<none>']} countries={user.countries or 'ALL'}")
 
     if not keywords:
@@ -657,8 +764,10 @@ def process_user(db, user: User):
 def run_worker():
     logger.info(
         f"Worker start :: DEBUG={DEBUG} MOCK_JOBS={MOCK_JOBS} INTERVAL={WORKER_INTERVAL}s | "
-        f"SOURCES: FL={FREELANCER_ENABLED} ROK={REMOTEOK_ENABLED} WWR={WWR_ENABLED} RMT={REMOTIVE_ENABLED} (ROK_RSS={REMOTEOK_USE_RSS}) | "
-        f"FILTERS: MAX_AGE_MIN={MAX_AGE_MIN} MIN_BUDGET={MIN_BUDGET} HOURLY=[{MIN_HOURLY},{MAX_HOURLY or '∞'}] TYPES={','.join(INCLUDE_TYPES) if INCLUDE_TYPES else 'ANY'}"
+        f"SOURCES: FL={FREELANCER_ENABLED} ROK={REMOTEOK_ENABLED} WWR={WWR_ENABLED} RMT={REMOTIVE_ENABLED} "
+        f"RCO={REMOTECO_ENABLED} JBC={JOBICY_ENABLED} NOD={NODESK_ENABLED} WKN={WORKINGNOMADS_ENABLED} "
+        f"(ROK_RSS={REMOTEOK_USE_RSS}) | FILTERS: MAX_AGE_MIN={MAX_AGE_MIN} MIN_BUDGET={MIN_BUDGET} "
+        f"HOURLY=[{MIN_HOURLY},{MAX_HOURLY or '∞'}] TYPES={','.join(INCLUDE_TYPES) if INCLUDE_TYPES else 'ANY'}"
     )
     while True:
         t0 = time.time()
