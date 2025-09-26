@@ -7,9 +7,9 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Set
 from urllib.parse import quote_plus, urlparse, urlunparse, parse_qsl, urlencode
+from html import escape as html_escape
 
 import requests
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 from db import SessionLocal, User, Keyword, JobSent
 
@@ -28,41 +28,39 @@ REMOTEOK_ENABLED       = os.getenv("REMOTEOK_ENABLED", "0") == "1"
 REMOTEOK_USE_RSS       = os.getenv("REMOTEOK_USE_RSS", "1") == "1"
 WWR_ENABLED            = os.getenv("WWR_ENABLED", "1") == "1"
 REMOTIVE_ENABLED       = os.getenv("REMOTIVE_ENABLED", "1") == "1"
-REMOTECO_ENABLED       = os.getenv("REMOTECO_ENABLED", "0") == "1"   # default off (timeouts)
+REMOTECO_ENABLED       = os.getenv("REMOTECO_ENABLED", "0") == "1"
 JOBICY_ENABLED         = os.getenv("JOBICY_ENABLED", "1") == "1"
 NODESK_ENABLED         = os.getenv("NODESK_ENABLED", "1") == "1"
-WORKINGNOMADS_ENABLED  = os.getenv("WORKINGNOMADS_ENABLED", "0") == "1"  # Atom; set 0 if 404
+WORKINGNOMADS_ENABLED  = os.getenv("WORKINGNOMADS_ENABLED", "0") == "1"
 
 # HTTP/retry
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "15"))
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
 HTTP_BACKOFF = float(os.getenv("HTTP_BACKOFF", "1.6"))
 
-# Affiliate
+# Affiliate / UTM
 FREELANCER_AFFILIATE_ID = os.getenv("FREELANCER_AFFILIATE_ID", "")
 FIVERR_AFFILIATE_ID     = os.getenv("FIVERR_AFFILIATE_ID", "")
 REMOTEOK_AFFILIATE_TEMPLATE = os.getenv("REMOTEOK_AFFILIATE_TEMPLATE", "")
 WWR_AFFILIATE_TEMPLATE      = os.getenv("WWR_AFFILIATE_TEMPLATE", "")
 REMOTIVE_AFFILIATE_TEMPLATE = os.getenv("REMOTIVE_AFFILIATE_TEMPLATE", "")
-
-# Optional UTM tagging
 UTM_SOURCE   = os.getenv("UTM_SOURCE", "")
 UTM_MEDIUM   = os.getenv("UTM_MEDIUM", "")
 UTM_CAMPAIGN = os.getenv("UTM_CAMPAIGN", "")
 
-# Global filters (source-agnostic; applied where data available)
+# Global filters
 MAX_AGE_MIN       = int(os.getenv("MAX_AGE_MIN", "1440"))
 MIN_BUDGET        = int(os.getenv("MIN_BUDGET", "0"))
 MIN_HOURLY        = float(os.getenv("MIN_HOURLY", "0"))
 MAX_HOURLY        = float(os.getenv("MAX_HOURLY", "0"))      # 0 = no upper bound
-INCLUDE_TYPES     = {t.strip().upper() for t in os.getenv("INCLUDE_TYPES", "").split(",") if t.strip()}  # FIXED,HOURLY
+INCLUDE_TYPES     = {t.strip().upper() for t in os.getenv("INCLUDE_TYPES", "").split(",") if t.strip()}
 REQUIRED_SKILLS   = {s.strip().lower() for s in os.getenv("REQUIRED_SKILLS", "").split(",") if s.strip()}
 EXCLUDED_SKILLS   = {s.strip().lower() for s in os.getenv("EXCLUDED_SKILLS", "").split(",") if s.strip()}
 REQUIRED_KEYWORDS = [s.strip().lower() for s in os.getenv("REQUIRED_KEYWORDS", "").split(",") if s.strip()]
 EXCLUDED_KEYWORDS = [s.strip().lower() for s in os.getenv("EXCLUDED_KEYWORDS", "").split(",") if s.strip()]
 MAX_SEND_PER_LOOP = int(os.getenv("MAX_SEND_PER_LOOP", "12"))
 
-# Per-source pagination/limits
+# Per-source limits
 FREELANCER_LIMIT = int(os.getenv("FREELANCER_LIMIT", "20"))
 FREELANCER_PAGES = int(os.getenv("FREELANCER_PAGES", "2"))
 REMOTEOK_LIMIT   = int(os.getenv("REMOTEOK_LIMIT", "30"))
@@ -83,13 +81,12 @@ log_level = logging.DEBUG if DEBUG else logging.INFO
 logging.basicConfig(level=log_level, format="%(asctime)s [worker] %(levelname)s: %(message)s")
 logger = logging.getLogger("jobs-worker")
 
-# Telegram REST endpoint (sync, no async warnings)
+# Telegram REST endpoint (sync)
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Shared HTTP session
+# HTTP session
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/2.2 (+https://github.com/)"})
-
+SESSION.headers.update({"User-Agent": "FreelancerAlertsBot/2.3 (+https://github.com/)"})
 
 # ==============================================================================
 # Helpers
@@ -175,6 +172,10 @@ def build_affiliate_link(platform: str, job_url: str) -> str:
 def _truncate(text: str, limit: int = 3800) -> str:
     return text if len(text) <= limit else text[:limit - 10] + "…"
 
+def safe_url(u: str) -> str:
+    if u and (u.startswith("http://") or u.startswith("https://")):
+        return u
+    return ""
 
 # ==============================================================================
 # HTTP helpers
@@ -205,7 +206,6 @@ def http_text(url: str, params: Optional[dict] = None, headers: Optional[dict] =
             backoff_sleep(attempt)
     return None
 
-
 # ==============================================================================
 # FREELANCER.COM
 # ==============================================================================
@@ -217,9 +217,10 @@ def fl_project_country(p: dict) -> Optional[str]:
         return None
     loc = owner.get("location") or {}
     country = loc.get("country") or {}
-    code = country.get("code")
-    name = country.get("name")
-    return (code or name or None) and str((code or name)).upper()
+    code = (country.get("code") or "") if isinstance(country, dict) else ""
+    name = (country.get("name") or "") if isinstance(country, dict) else ""
+    value = (code or name).upper()
+    return value or "ANY"
 
 def fl_project_url(p: dict) -> str:
     seo_url = p.get("seo_url")
@@ -230,12 +231,10 @@ def fl_project_url(p: dict) -> str:
 
 def fl_project_type(p: dict) -> Optional[str]:
     t = (p.get("type") or "").upper()
-    if t in {"FIXED", "HOURLY"}:
-        return t
+    if t in {"FIXED", "HOURLY"}: return t
     b = p.get("budget") or {}
     t2 = (b.get("type") or "").upper()
-    if t2 in {"FIXED", "HOURLY"}:
-        return t2
+    if t2 in {"FIXED", "HOURLY"}: return t2
     return None
 
 def fl_project_skills(p: dict) -> Set[str]:
@@ -304,13 +303,12 @@ def fetch_freelancer(keyword: str, limit: int, pages: int) -> List[Dict]:
                 "id": f"fre-{pid}",
                 "title": p.get("title") or "Untitled project",
                 "url": url,
-                "country": fl_project_country(p) or "ANY",
+                "country": fl_project_country(p),
                 "platform": "freelancer",
                 "original_url": url,
             })
         time.sleep(0.25)
     return items
-
 
 # ==============================================================================
 # REMOTEOK (API + RSS fallback)
@@ -319,10 +317,7 @@ REMOTEOK_API = "https://remoteok.com/api"
 REMOTEOK_RSS = "https://remoteok.com/remote-jobs.rss"
 
 def fetch_remoteok_api(keyword: str, cap: int) -> List[Dict]:
-    headers = {
-        "Accept": "application/json",
-        "Referer": "https://remoteok.com/",
-    }
+    headers = {"Accept": "application/json", "Referer": "https://remoteok.com/"}
     txt = http_text(REMOTEOK_API, headers=headers)
     if not txt:
         return []
@@ -337,7 +332,7 @@ def fetch_remoteok_api(keyword: str, cap: int) -> List[Dict]:
         title = obj.get("position") or obj.get("title") or ""
         company = obj.get("company") or ""
         desc = obj.get("description") or ""
-        url = obj.get("url") or obj.get("apply_url") or obj.get("canonical_url") or ""
+        url = safe_url(obj.get("url") or obj.get("apply_url") or obj.get("canonical_url") or "")
         ts = None
         if obj.get("epoch"):
             try: ts = int(obj["epoch"])
@@ -364,10 +359,7 @@ def fetch_remoteok_api(keyword: str, cap: int) -> List[Dict]:
     return out
 
 def fetch_remoteok_rss(keyword: str, cap: int) -> List[Dict]:
-    headers = {
-        "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
-        "Referer": "https://remoteok.com/",
-    }
+    headers = {"Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8", "Referer": "https://remoteok.com/"}
     xml = http_text(REMOTEOK_RSS, headers=headers)
     if not xml:
         return []
@@ -379,7 +371,7 @@ def fetch_remoteok_rss(keyword: str, cap: int) -> List[Dict]:
     out: List[Dict] = []
     for it in items:
         title = (it.findtext("title") or "").strip()
-        link  = (it.findtext("link") or "").strip()
+        link  = safe_url((it.findtext("link") or "").strip())
         desc  = (it.findtext("description") or "").strip()
         text_all = norm_text(title, desc, keyword)
         if keyword and keyword.lower() not in text_all:
@@ -387,7 +379,7 @@ def fetch_remoteok_rss(keyword: str, cap: int) -> List[Dict]:
         if not keyword_hit(text_all, REQUIRED_KEYWORDS, EXCLUDED_KEYWORDS):
             continue
         out.append({
-            "id": f"rokrss-{hash(link)}",
+            "id": f"rokrss-{hash(link or title)}",
             "title": title or "RemoteOK job",
             "url": link or "https://remoteok.com",
             "country": "ANY",
@@ -406,7 +398,6 @@ def fetch_remoteok(keyword: str, cap: int) -> List[Dict]:
         logger.info("[remoteok] API empty/blocked → trying RSS fallback")
         items = fetch_remoteok_rss(keyword, cap)
     return items
-
 
 # ==============================================================================
 # WE WORK REMOTELY (RSS)
@@ -427,7 +418,7 @@ def fetch_wwr(keyword: str, cap: int) -> List[Dict]:
     out: List[Dict] = []
     for it in items:
         title = (it.findtext("title") or "").strip()
-        link  = (it.findtext("link") or "").strip()
+        link  = safe_url((it.findtext("link") or "").strip())
         desc  = (it.findtext("description") or "").strip()
         text_all = norm_text(title, desc, keyword)
         if keyword and keyword.lower() not in text_all:
@@ -435,7 +426,7 @@ def fetch_wwr(keyword: str, cap: int) -> List[Dict]:
         if not keyword_hit(text_all, REQUIRED_KEYWORDS, EXCLUDED_KEYWORDS):
             continue
         out.append({
-            "id": f"wwr-{hash(link)}",
+            "id": f"wwr-{hash(link or title)}",
             "title": title or "WWR job",
             "url": link or "https://weworkremotely.com",
             "country": "ANY",
@@ -445,7 +436,6 @@ def fetch_wwr(keyword: str, cap: int) -> List[Dict]:
         if len(out) >= cap:
             break
     return out
-
 
 # ==============================================================================
 # REMOTIVE (JSON API)
@@ -465,7 +455,7 @@ def fetch_remotive(keyword: str, cap: int) -> List[Dict]:
         title = j.get("title") or ""
         company = j.get("company_name") or ""
         desc = j.get("description") or ""
-        url = j.get("url") or j.get("job_url") or ""
+        url = safe_url(j.get("url") or j.get("job_url") or "")
         pub = j.get("publication_date")
         ts = None
         try:
@@ -494,9 +484,8 @@ def fetch_remotive(keyword: str, cap: int) -> List[Dict]:
             break
     return out
 
-
 # ==============================================================================
-# REMOTE.CO (RSS - optional, can timeout)
+# REMOTE.CO (RSS - optional)
 # ==============================================================================
 REMOTECO_FEEDS = [
     "https://remote.co/remote-jobs/developer/feed/",
@@ -523,7 +512,7 @@ def fetch_rss_generic(feed_url: str, platform: str, keyword: str, cap: int) -> L
     out: List[Dict] = []
     for it in items:
         title = (it.findtext("title") or "").strip()
-        link  = (it.findtext("link") or "").strip()
+        link  = safe_url((it.findtext("link") or "").strip())
         desc  = (it.findtext("description") or "").strip()
         text_all = norm_text(title, desc, keyword)
         if keyword and keyword.lower() not in text_all:
@@ -531,7 +520,7 @@ def fetch_rss_generic(feed_url: str, platform: str, keyword: str, cap: int) -> L
         if not keyword_hit(text_all, REQUIRED_KEYWORDS, EXCLUDED_KEYWORDS):
             continue
         out.append({
-            "id": f"{platform[:3]}-{hash(link)}",
+            "id": f"{platform[:3]}-{hash(link or title)}",
             "title": title or f"{platform.title()} job",
             "url": link or "",
             "country": "ANY",
@@ -553,7 +542,6 @@ def fetch_remoteco(keyword: str, cap: int) -> List[Dict]:
             break
     return out[:cap]
 
-
 # ==============================================================================
 # JOBICY (RSS)
 # ==============================================================================
@@ -563,7 +551,6 @@ def fetch_jobicy(keyword: str, cap: int) -> List[Dict]:
     if not JOBICY_ENABLED:
         return []
     return fetch_rss_generic(JOBICY_RSS, "jobicy", keyword, cap)
-
 
 # ==============================================================================
 # NODESK (RSS) — fixed to /feed/
@@ -575,9 +562,8 @@ def fetch_nodesk(keyword: str, cap: int) -> List[Dict]:
         return []
     return fetch_rss_generic(NODESK_RSS, "nodesk", keyword, cap)
 
-
 # ==============================================================================
-# WORKING NOMADS (ATOM) — may 404, keep toggleable
+# WORKING NOMADS (ATOM)
 # ==============================================================================
 WORKINGNOMADS_ATOM = "https://www.workingnomads.com/jobs.atom"
 
@@ -597,7 +583,7 @@ def fetch_atom_generic(feed_url: str, platform: str, keyword: str, cap: int) -> 
         link_el = e.find("atom:link", ns)
         link = ""
         if link_el is not None:
-            link = (link_el.get("href") or "").strip()
+            link = safe_url((link_el.get("href") or "").strip())
         summary = (e.findtext("atom:summary", default="", namespaces=ns) or
                    e.findtext("atom:content", default="", namespaces=ns) or "").strip()
         updated = e.findtext("atom:updated", default="", namespaces=ns)
@@ -633,7 +619,6 @@ def fetch_workingnomads(keyword: str, cap: int) -> List[Dict]:
         return []
     return fetch_atom_generic(WORKINGNOMADS_ATOM, "workingnomads", keyword, cap)
 
-
 # ==============================================================================
 # MOCK (for tests)
 # ==============================================================================
@@ -647,7 +632,6 @@ def mock_jobs(keyword: str, n: int = 3) -> List[Dict]:
         "platform": "mock",
         "original_url": "https://www.freelancer.com",
     } for i in range(n)]
-
 
 # ==============================================================================
 # AGGREGATOR
@@ -684,14 +668,13 @@ def fetch_jobs(keyword: str, user_countries_csv: Optional[str]) -> List[Dict]:
 
     return jobs
 
-
 # ==============================================================================
 # SEND (sync via Telegram HTTP API)
 # ==============================================================================
 def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None):
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN is empty; cannot send Telegram messages.")
-        return
+        return False
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -703,52 +686,64 @@ def tg_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None
     for attempt in range(1, 4):
         try:
             r = SESSION.post(f"{TG_API}/sendMessage", data=payload, timeout=HTTP_TIMEOUT)
-            if r.status_code == 409:
-                logger.error("[telegram] Conflict (another getUpdates running). Ensure only one polling/webhook is active.")
-                return
-            r.raise_for_status()
-            return
+            if r.status_code >= 400:
+                try:
+                    msg = r.json()
+                except Exception:
+                    msg = {"raw": r.text}
+                logger.warning(f"[telegram] send failed ({attempt}/3): {r.status_code} {msg}")
+                if r.status_code == 409:
+                    logger.error("[telegram] Conflict (another getUpdates running). Ensure only one polling/webhook is active.")
+                    return False
+                time.sleep(2 * attempt)
+                continue
+            return True
         except requests.exceptions.RequestException as e:
             logger.warning(f"[telegram] send failed ({attempt}/3): {e}")
             time.sleep(2 * attempt)
         except Exception as e:
             logger.exception(f"[telegram] unexpected error: {e}")
-            return
+            return False
+    return False
 
 def send_job(uid: int, job: Dict):
     platform = (job.get("platform") or "").lower()
-    base_link = job.get("url") or ""
+    base_link = safe_url(job.get("url") or "")
     if not base_link:
         return
-    affiliate = build_affiliate_link(platform, base_link)
+    affiliate = safe_url(build_affiliate_link(platform, base_link)) or base_link
 
-    text = (
-        f"🚀 <b>New Opportunity</b>: {job.get('title')}\n"
-        f"🌍 Country: {job.get('country') or 'ANY'}\n"
-        f"🧭 Platform: {platform.title() if platform else 'N/A'}\n"
-        f"🔗 Link: {affiliate}"
+    title = html_escape(job.get("title") or "New Opportunity")
+    country = html_escape(job.get("country") or "ANY")
+    plat = html_escape(platform.title() if platform else "N/A")
+    link_for_text = html_escape(affiliate)
+
+    text = _truncate(
+        f"🚀 <b>New Opportunity</b>: {title}\n"
+        f"🌍 Country: {country}\n"
+        f"🧭 Platform: {plat}\n"
+        f"🔗 Link: {link_for_text}"
     )
-    text = _truncate(text)
 
+    # SHORT callback_data (<=64 bytes). ΜΟΝΟ το job_id.
+    jid = job.get("id", "")[:50]  # κόψε προληπτικά
     buttons = [
         [
-            {"text": "⭐ Keep", "callback_data": f"save:{job['id']}"},
-            {"text": "🙈 Dismiss", "callback_data": f"dismiss:{job['id']}"},
+            {"text": "⭐ Keep", "callback_data": f"save:{jid}"},
+            {"text": "🙈 Dismiss", "callback_data": f"dismiss:{jid}"},
         ],
         [
-            {
-                "text": "✍️ Proposal",
-                "callback_data": f"proposal:{job['id']}|{platform}|{affiliate}|{quote_plus(job.get('title') or '')}"
-            },
+            {"text": "✍️ Proposal", "callback_data": f"proposal:{jid}"},
             {"text": "🌐 Open", "url": affiliate},
         ]
     ]
     if SEND_ORIGINAL_LINK_BUTTON and job.get("original_url"):
-        buttons.append([{"text": "🔗 Original", "url": job["original_url"]}])
+        orig = safe_url(job["original_url"])
+        if orig:
+            buttons.append([{"text": "🔗 Original", "url": orig}])
 
-    reply_markup = {"inline_keyboard": buttons}
-    tg_send_message(uid, text, reply_markup)
-
+    ok = tg_send_message(uid, text, {"inline_keyboard": buttons})
+    return ok
 
 # ==============================================================================
 # KEYWORD EXPANSION
@@ -768,7 +763,6 @@ def expand_keywords(keywords: List[str]) -> List[str]:
                 seen.add(key)
                 expanded.append(p)
     return expanded
-
 
 # ==============================================================================
 # MAIN LOOP
@@ -809,21 +803,24 @@ def process_user(db, user: User):
                 logger.debug(f"user={uid} job_id={jid} already sent; skip")
                 continue
 
+            ok = False
             try:
-                send_job(uid, job)
+                ok = send_job(uid, job)
+            except Exception as te:
+                logger.exception(f"Telegram send exception user={uid} job_id={jid}: {te}")
+
+            if ok:
                 sent_this_loop += 1
                 logger.info(f"sent job_id={jid} to user={uid} (platform={job.get('platform')}, country={job.get('country')})")
-            except Exception as te:
-                logger.exception(f"Telegram send failed user={uid} job_id={jid}: {te}")
-                continue
-
-            try:
-                db.add(JobSent(user_id=user.id, job_id=jid))
-                db.commit()
-                logger.debug(f"marked job_id={jid} as sent for user={uid}")
-            except Exception as se:
-                db.rollback()
-                logger.exception(f"DB commit failed user={uid} job_id={jid}: {se}")
+                try:
+                    db.add(JobSent(user_id=user.id, job_id=jid))
+                    db.commit()
+                    logger.debug(f"marked job_id={jid} as sent for user={uid}")
+                except Exception as se:
+                    db.rollback()
+                    logger.exception(f"DB commit failed user={uid} job_id={jid}: {se}")
+            else:
+                logger.warning(f"failed to send job_id={jid} to user={uid}")
 
 def run_worker():
     logger.info(

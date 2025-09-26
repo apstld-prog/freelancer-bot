@@ -22,8 +22,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger("freelancer-bot")
 
-# --------- Helpers ---------
 _SPLIT_RE = re.compile(r"[,\n]+")
+
+WELCOME = (
+    "👋 Welcome to Freelancer Alerts Bot!\n\n"
+    "Commands:\n"
+    "/addkeyword <word[,word2,...]> – Add keywords (comma-separated)\n"
+    "/keywords – List your keywords\n"
+    "/delkeyword <word> – Delete a keyword\n"
+    "/editkeyword <old> -> <new> – Rename a keyword\n"
+    "/clearkeywords – Delete all keywords (confirmation)\n"
+    "/setcountry <US,UK,DE> – Country filter (or ALL)\n"
+    "/mysettings – Show your filters\n"
+    "/setproposal <text> – Save your proposal template\n"
+    "   Placeholders: {job_title}, {experience}, {stack}, {availability}, {step1}, {step2}, {step3}, {budget_time}, {portfolio}, {name}\n"
+    "/savejob <job_id> – Save a job\n"
+    "/dismissjob <job_id> – Dismiss a job\n"
+)
 
 def normalize_kw_list(text: str) -> List[str]:
     out: List[str] = []
@@ -60,25 +75,7 @@ def find_keyword_row(db, user_id: int, name_ci: str) -> Optional[Keyword]:
             return row
     return None
 
-# --------- Commands ---------
-WELCOME = (
-    "👋 Welcome to Freelancer Alerts Bot!\n\n"
-    "Commands:\n"
-    "/addkeyword <word[,word2,...]> – Add keywords (comma-separated)\n"
-    "/keywords – List your keywords\n"
-    "/delkeyword <word> – Delete a keyword\n"
-    "/editkeyword <old> -> <new> – Rename a keyword\n"
-    "/clearkeywords – Delete all keywords (confirmation)\n"
-    "/setcountry <US,UK,DE> – Country filter (or ALL)\n"
-    "/mysettings – Show your filters\n"
-    "/setproposal <text> – Save your proposal template\n"
-    "   Placeholders: {job_title}, {experience}, {stack}, {availability}, {step1}, {step2}, {step3}, {budget_time}, {portfolio}, {name}\n"
-    "/savejob <job_id> – Save a job (same as ⭐ Keep)\n"
-    "/dismissjob <job_id> – Dismiss a job (same as 🙈 Dismiss)\n"
-    "/clearjob <job_id> – Alias of /dismissjob\n\n"
-    "Tips: Alerts have inline buttons ⭐ Keep / 🙈 Dismiss / ✍️ Proposal."
-)
-
+# Commands
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(WELCOME)
 
@@ -228,7 +225,7 @@ async def setproposal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def savejob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await reply_usage(update, "Usage: /savejob <job_id>")
-    job_id = context.args[0]
+    job_id = context.args[0][:64]
     db = SessionLocal()
     try:
         user = await ensure_user(db, update.effective_user.id)
@@ -241,7 +238,7 @@ async def savejob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def dismissjob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await reply_usage(update, "Usage: /dismissjob <job_id>")
-    job_id = context.args[0]
+    job_id = context.args[0][:64]
     db = SessionLocal()
     try:
         user = await ensure_user(db, update.effective_user.id)
@@ -264,7 +261,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = await ensure_user(db, q.from_user.id)
 
         if data.startswith("save:"):
-            jid = data.split(":", 1)[1]
+            jid = data.split(":", 1)[1][:64]
             if not db.query(JobSaved).filter_by(user_id=user.id, job_id=jid).first():
                 db.add(JobSaved(user_id=user.id, job_id=jid))
                 db.commit()
@@ -272,7 +269,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text(f"⭐ Saved job: {jid}")
 
         elif data.startswith("dismiss:"):
-            jid = data.split(":", 1)[1]
+            jid = data.split(":", 1)[1][:64]
             if not db.query(JobDismissed).filter_by(user_id=user.id, job_id=jid).first():
                 db.add(JobDismissed(user_id=user.id, job_id=jid))
                 db.commit()
@@ -280,15 +277,10 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text(f"🙈 Dismissed job: {jid}")
 
         elif data.startswith("proposal:"):
-            try:
-                _, payload = data.split(":", 1)
-                job_id, platform, link, title_enc = payload.split("|", 3)
-            except Exception:
-                return
-            title = re.sub(r"\s+", " ", re.sub(r"%[0-9A-Fa-f]{2}", " ", title_enc))
-            tmpl = user.proposal_template or "Hello,\nI’m interested in {job_title}.\nBest regards,"
+            jid = data.split(":", 1)[1][:64]
+            tmpl = user.proposal_template or "Hello,\nI’m interested in this opportunity (Job ID: {job_id}).\nBest regards,"
             msg = tmpl.format(
-                job_title=title,
+                job_title="",
                 experience="",
                 stack="",
                 availability="",
@@ -298,6 +290,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 budget_time="",
                 portfolio="",
                 name="",
+                job_id=jid,
             )
             await q.message.reply_text(f"✍️ Proposal draft:\n\n{msg}")
     finally:
@@ -330,7 +323,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^(save:|dismiss:|proposal:)"))
     app.add_handler(CallbackQueryHandler(confirm_cb, pattern=r"^conf:(clear_kws|cancel)$"))
 
-    # IMPORTANT: single polling instance
+    # Single polling instance
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
