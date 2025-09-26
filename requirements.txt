@@ -4,3 +4,5 @@ psycopg2-binary>=2.9
 fastapi>=0.115
 uvicorn>=0.30
 aiohttp>=3.9
+feedparser>=6.0
+PyYAML>=6.0
