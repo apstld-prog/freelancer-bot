@@ -31,6 +31,23 @@ logger.info(f"python-telegram-bot version: {getattr(telegram, '__version__', 'un
 
 _SPLIT_RE = re.compile(r"[,\n]+")
 
+# --------- Platforms (lists for /help, /mysettings) ---------
+PLATFORM_LIST = [
+    "🌍 *Global Freelancing*: Freelancer.com, PeoplePerHour (UK), Malt (FR/EU), Workana (ES/EU/LatAm), Fiverr Affiliates, Upwork",
+    "🇬🇷 *Greek Job Boards*: JobFind.gr, Skywalker.gr, Kariera.gr",
+]
+
+# --------- Platforms by country code (used by /platforms) ---------
+PLATFORM_COUNTRY_MAP: Dict[str, List[str]] = {
+    "GLOBAL": ["freelancer", "peopleperhour", "malt", "workana", "fiverr", "upwork"],
+    "GR": ["jobfind", "skywalker", "kariera", "freelancer", "peopleperhour"],
+    "UK": ["peopleperhour", "freelancer", "upwork"],
+    "FR": ["malt", "freelancer", "upwork"],
+    "DE": ["malt", "freelancer", "freelancermap"],
+    "ES": ["workana", "freelancer", "peopleperhour"],
+    "IT": ["malt", "freelancer", "peopleperhour"],
+}
+
 WELCOME = (
     "👋 *Welcome to Freelancer Alerts Bot!*\n\n"
     "Get real-time job alerts based on your keywords and country filters.\n\n"
@@ -42,26 +59,21 @@ HELP = (
     "1️⃣ Add keywords with `/addkeyword python, telegram`\n"
     "2️⃣ Set your countries with `/setcountry US,UK` (or `ALL`)\n"
     "3️⃣ Save a proposal template with `/setproposal <text>`\n"
-    "   Placeholders you can use: {job_title}, {experience}, {stack}, {availability}, {step1}, {step2}, {step3}, {budget_time}, {portfolio}, {name}\n"
+    "   Placeholders: {job_title}, {experience}, {stack}, {availability}, {step1}, {step2}, {step3}, {budget_time}, {portfolio}, {name}\n"
     "4️⃣ When a job arrives you can:\n"
     "   • ⭐ Save it\n"
     "   • 🙈 Dismiss it\n"
     "   • 💼 Proposal → *direct affiliate link to job*\n"
     "   • 🔗 Original → *same affiliate-wrapped job link*\n\n"
-    "⚙️ `/mysettings` to check filters.  🧪 `/selftest` for a test job.  🌍 `/platforms [CC]` to see platforms by country."
+    "⚙️ `/mysettings` to check filters.\n"
+    "🧪 `/selftest` for a test job.\n"
+    "🌍 `/platforms [CC]` to see platforms by country (e.g. `/platforms GR`).\n\n"
+    "📡 *Platforms currently supported:*\n" + "\n".join(PLATFORM_LIST)
 )
 
-# ------- platforms map shown to users (informative only) -------
-PLATFORM_COUNTRY_MAP: Dict[str, List[str]] = {
-    "GLOBAL": ["freelancer", "peopleperhour", "malt", "workana"],
-    "GR": ["freelancer", "peopleperhour", "malt", "workana"],   # can be extended with local feeds
-    "UK": ["peopleperhour", "freelancer"],
-    "FR": ["malt", "freelancer"],
-    "DE": ["freelancer", "malt"],
-    "ES": ["workana", "freelancer", "peopleperhour"],
-    "IT": ["freelancer", "peopleperhour", "malt"],
-}
-
+# ---------------------------
+# Helpers
+# ---------------------------
 def normalize_kw_list(text: str) -> List[str]:
     out, seen = [], set()
     for part in _SPLIT_RE.split(text or ""):
@@ -95,6 +107,9 @@ def main_menu_markup() -> InlineKeyboardMarkup:
         ]
     )
 
+# ---------------------------
+# Commands
+# ---------------------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(WELCOME, reply_markup=main_menu_markup(), parse_mode="Markdown")
 
@@ -106,15 +121,12 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = await ensure_user(db, update.effective_user.id)
         kws = list_keywords(db, user.id)
-        countries = user.countries or "ALL"
-        tmpl = (user.proposal_template or "(none)")[:250]
-        await update.effective_message.reply_text(
-            f"🛠 *Your Settings*\n"
-            f"• Keywords: {', '.join(kws) if kws else '(none)'}\n"
-            f"• Countries: {countries}\n"
-            f"• Proposal template: {tmpl}",
-            parse_mode="Markdown",
-        )
+        txt = "🛠 *Your Settings*\n\n"
+        txt += f"• Keywords: {', '.join(kws) if kws else '(none)'}\n"
+        txt += f"• Countries: {user.countries or 'ALL'}\n"
+        txt += f"• Proposal template: {(user.proposal_template or '(none)')}\n\n"
+        txt += "📡 *Platforms monitored:*\n" + "\n".join(PLATFORM_LIST)
+        await update.effective_message.reply_text(txt, parse_mode="Markdown")
     finally:
         db.close()
 
@@ -145,9 +157,9 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = await ensure_user(db, update.effective_user.id)
         existing = set(k.lower() for k in list_keywords(db, user.id))
         for kw in new_kws:
-            if kw.lower() in existing: continue
-            from db import Keyword as Kw
-            db.add(Kw(user_id=user.id, keyword=kw)); added.append(kw)
+            if kw.lower() in existing: 
+                continue
+            db.add(Keyword(user_id=user.id, keyword=kw)); added.append(kw)
         db.commit()
         await update.effective_message.reply_text(
             f"{'✅ Added: ' + ', '.join(added) if added else 'No new keywords (duplicates).'}"
@@ -183,8 +195,7 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = None
         for k in list_keywords(db, user.id):
             if k.lower() == name.lower():
-                from db import Keyword as Kw
-                row = db.query(Kw).filter_by(user_id=user.id, keyword=k).first()
+                row = db.query(Keyword).filter_by(user_id=user.id, keyword=k).first()
                 break
         if not row:
             return await update.effective_message.reply_text(f"Not found: {name}")
@@ -234,7 +245,9 @@ async def dismissjob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# --- menu + confirm callbacks ---
+# ---------------------------
+# Menu / confirm callbacks
+# ---------------------------
 async def confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -243,8 +256,7 @@ async def confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db = SessionLocal()
         try:
             user = await ensure_user(db, update.effective_user.id)
-            from db import Keyword as Kw
-            db.query(Kw).filter_by(user_id=user.id).delete()
+            db.query(Keyword).filter_by(user_id=user.id).delete()
             db.commit()
             await q.edit_message_text("✅ All keywords cleared.")
         finally:
@@ -263,7 +275,9 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu:help":
         await help_cmd(update, context)
 
-# --- diagnostics ---
+# ---------------------------
+# Diagnostics & platforms
+# ---------------------------
 async def version_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         f"🧪 Runtime\n"
@@ -288,34 +302,40 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🧪 *Self-Test Job*\n\nThis is a test message to verify buttons and affiliate wrapping.\n\n🔗 [View Job]({})".format(aff_url)
     await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown", disable_web_page_preview=True)
 
-# --- list platforms by country ---
 async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cc = (context.args[0].upper() if context.args else "GLOBAL")
     platforms = PLATFORM_COUNTRY_MAP.get(cc) or PLATFORM_COUNTRY_MAP["GLOBAL"]
     lines = [f"🌍 *Platforms for {cc}*"] + [f"• {p}" for p in platforms]
     await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
+# ---------------------------
+# Main
+# ---------------------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Core
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
-    app.add_handler(CommandHandler("setcountry", setcountry_cmd))
-    app.add_handler(CommandHandler("setproposal", setproposal_cmd))
     app.add_handler(CommandHandler("version", version_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
     app.add_handler(CommandHandler("platforms", platforms_cmd))
 
+    # Settings & keywords
+    app.add_handler(CommandHandler("setcountry", setcountry_cmd))
+    app.add_handler(CommandHandler("setproposal", setproposal_cmd))
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app.add_handler(CommandHandler("keywords", keywords_cmd))
     app.add_handler(CommandHandler("listkeywords", keywords_cmd))
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
 
+    # Job actions (manual)
     app.add_handler(CommandHandler("savejob", savejob_cmd))
     app.add_handler(CommandHandler("dismissjob", dismissjob_cmd))
 
+    # Callbacks
     app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(confirm_cb, pattern=r"^conf:(clear_kws|cancel)$"))
 
