@@ -1,19 +1,17 @@
 import os
 from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
 import uvicorn
-
-PORT = int(os.getenv("PORT", "10000"))
 
 app = FastAPI()
 
-@app.get("/", response_class=PlainTextResponse)
-def root():
-    return "OK"
-
-@app.get("/healthz", response_class=PlainTextResponse)
+@app.get("/healthz")
 def healthz():
-    return "healthy"
+    return {"ok": True}
+
+@app.get("/")
+def root():
+    return {"service": "freelancer-bot", "status": "running"}
 
 if __name__ == "__main__":
-    uvicorn.run("server:app", host="0.0.0.0", port=PORT, reload=False)
+    port = int(os.getenv("PORT", "10000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)

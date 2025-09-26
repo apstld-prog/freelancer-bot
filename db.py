@@ -13,8 +13,7 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 # --------------------------------------------------------------------
 # Database URL
-# Example:
-#   postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME
+# Environment: DB_URL or DATABASE_URL
 # --------------------------------------------------------------------
 DB_URL = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
 if not DB_URL:
@@ -33,12 +32,17 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True)
-    # Telegram can exceed INT range, so use BIGINT
+    # Telegram IDs can exceed INT range; use BIGINT
     telegram_id = Column(BigInteger, unique=True, nullable=False)
-    countries = Column(String(255), nullable=True)           # e.g. "US,UK" or "ALL"
+
+    # Comma-separated country codes, e.g. "US,UK" or "ALL"
+    countries = Column(String(255), nullable=True)
+
+    # Saved proposal template text
     proposal_template = Column(Text, nullable=True)
 
     keywords = relationship("Keyword", back_populates="user", cascade="all, delete-orphan")
+
 
 class Keyword(Base):
     __tablename__ = "keywords"
@@ -48,7 +52,9 @@ class Keyword(Base):
     keyword = Column(String(255), nullable=False)
 
     user = relationship("User", back_populates="keywords")
+
     __table_args__ = (UniqueConstraint("user_id", "keyword", name="uq_user_keyword"),)
+
 
 class JobSent(Base):
     __tablename__ = "jobs_sent"
@@ -59,6 +65,7 @@ class JobSent(Base):
 
     __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_user_job_sent"),)
 
+
 class JobSaved(Base):
     __tablename__ = "jobs_saved"
 
@@ -67,6 +74,7 @@ class JobSaved(Base):
     job_id = Column(String(255), nullable=False)
 
     __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_user_job_saved"),)
+
 
 class JobDismissed(Base):
     __tablename__ = "jobs_dismissed"
@@ -79,10 +87,11 @@ class JobDismissed(Base):
 
 
 # --------------------------------------------------------------------
-# Auto create tables (idempotent)
+# Auto-create tables (idempotent)
 # --------------------------------------------------------------------
 def init_db():
     Base.metadata.create_all(bind=engine)
+
 
 # Initialize on import
 init_db()
