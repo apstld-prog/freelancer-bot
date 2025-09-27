@@ -1,6 +1,7 @@
 import os
 from sqlalchemy import (
-    Column, Integer, BigInteger, String, Text, ForeignKey, UniqueConstraint, create_engine, DateTime, Boolean
+    Column, Integer, BigInteger, String, Text, ForeignKey, UniqueConstraint,
+    create_engine, DateTime, Boolean
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from sqlalchemy.sql import func
@@ -33,7 +34,7 @@ class JobSent(Base):
     __tablename__ = "jobs_sent"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, nullable=False)
-    job_id = Column(String(255), nullable=False)   # source-specific id OR fingerprint
+    job_id = Column(String(255), nullable=False)   # fingerprint or source-specific id
     __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_user_job_sent"),)
 
 class JobSaved(Base):
@@ -50,20 +51,25 @@ class JobDismissed(Base):
     job_id = Column(String(255), nullable=False)
     __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_user_job_dismissed"),)
 
-# NEW: global dedup fingerprints
+# --- Global dedup fingerprints (αν το χρησιμοποιείς ήδη) ---
 class JobFingerprint(Base):
     __tablename__ = "job_fingerprints"
     id = Column(Integer, primary_key=True)
-    # stable fingerprint across sources (e.g., normalized title+desc hash)
     fingerprint = Column(String(64), unique=True, nullable=False)
-    # canonical URL we prefer to send (ideally from affiliate-enabled source)
     canonical_url = Column(Text, nullable=False)
-    source = Column(String(50), nullable=False)  # e.g., 'freelancer','malt','pph'
+    source = Column(String(50), nullable=False)
     title = Column(Text, nullable=True)
     country = Column(String(10), nullable=True)
     has_affiliate = Column(Boolean, default=False, nullable=False)
     first_seen = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+# --- NEW: App-level locks για να μην τρέχουν 2 pollers ---
+class AppLock(Base):
+    __tablename__ = "app_locks"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(64), unique=True, nullable=False)   # π.χ. 'polling'
+    acquired_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 def init_db():
     Base.metadata.create_all(bind=engine)
