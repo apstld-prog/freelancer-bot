@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[start] launching web(server) + worker..."
+echo "[start] launching web(server) + bot + worker..."
 
-start_bg() {
-  local name="$1"; shift
-  (stdbuf -oL -eL "$@" 2>&1 | awk -v p="[$name] " '{ print p $0; fflush() }') &
-  echo $!
-}
+# Το Render ορίζει αυτόματα το $PORT. Βάζουμε default για local.
+export PORT="${PORT:-10000}"
+export PYTHONUNBUFFERED=1
 
-server_pid=$(start_bg server python server.py)
-worker_pid=$(start_bg worker python worker.py)
+# 1) Web server (ASGI) – ΠΡΕΠΕΙ να ακούει στο $PORT
+#    Αν το app σου είναι "app" μέσα στο server.py (FastAPI/Starlette), αφήνεις όπως είναι:
+python -m uvicorn server:app --host 0.0.0.0 --port "$PORT" --log-level info &
+SERVER_PID=$!
 
-trap "kill $server_pid $worker_pid 2>/dev/null || true" SIGINT SIGTERM
-wait -n || true
-kill $server_pid $worker_pid 2>/dev/null || true
-wait || true
+# 2) Telegram bot (webhook mode – δεν χρειάζεται port)
+python bot.py &
+BOT_PID=$!
+
+# 3) Worker (RSS/JSON fetch + notifications)
+python worker.py &
+WORKER_PID=$!
+
+# Αν πέσει ένα, τερματίζουμε καθαρά
+trap 'echo "[start] terminating children: $SERVER_PID $BOT_PID $WORKER_PID"; kill $SERVER_PID $BOT_PID $WORKER_PID 2>/dev/null || true' EXIT
+
+# Περιμένουμε οποιοδήποτε process να τερματίσει και βγαίνουμε με το status του
+wait -n $SERVER_PID $BOT_PID $WORKER_PID
+exit $?
