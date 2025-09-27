@@ -25,33 +25,28 @@ logger.info(f"python-telegram-bot version: {getattr(telegram, '__version__', 'un
 
 _SPLIT_RE = re.compile(r"[,\n]+")
 
-# --------- Platforms (για /help, /mysettings, /platforms) ---------
+# --------- Platforms ---------
 PLATFORM_LIST = [
     "🌍 *Global Freelancing*: Freelancer.com, PeoplePerHour (UK), Malt (FR/EU), Workana (ES/EU/LatAm), Fiverr Affiliates, Upwork",
     "🇬🇷 *Greek Job Boards*: JobFind.gr, Skywalker.gr, Kariera.gr",
 ]
-PLATFORM_COUNTRY_MAP: Dict[str, List[str]] = {
-    "GLOBAL": ["freelancer", "peopleperhour", "malt", "workana", "fiverr", "upwork"],
-    "GR": ["jobfind", "skywalker", "kariera", "freelancer", "peopleperhour"],
-    "UK": ["peopleperhour", "freelancer", "upwork"],
-    "FR": ["malt", "freelancer", "upwork"],
-    "DE": ["malt", "freelancer", "freelancermap"],
-    "ES": ["workana", "freelancer", "peopleperhour"],
-    "IT": ["malt", "freelancer", "peopleperhour"],
-}
 
 WELCOME = (
     "👋 *Welcome to Freelancer Alerts Bot!*\n\n"
     "Get real-time job alerts based on your keywords and country filters.\n\n"
     "👉 Use the menu below or commands to configure your settings."
 )
+
 HELP = (
     "📖 *Help / How it works*\n\n"
     "1️⃣ Add keywords with `/addkeyword python, telegram`\n"
-    "2️⃣ Set your countries with `/setcountry US,UK` (or `ALL`)\n"
-    "3️⃣ Save a proposal template with `/setproposal <text>`\n"
+    "2️⃣ View your keywords with `/keywords` or `/listkeywords`\n"
+    "3️⃣ Delete one keyword with `/delkeyword <kw>`\n"
+    "4️⃣ Clear all keywords with `/clearkeywords`\n"
+    "5️⃣ Set your countries with `/setcountry US,UK` (or `ALL`)\n"
+    "6️⃣ Save a proposal template with `/setproposal <text>`\n"
     "   Placeholders: {job_title}, {experience}, {stack}, {availability}, {step1}, {step2}, {step3}, {budget_time}, {portfolio}, {name}\n"
-    "4️⃣ When a job arrives you can:\n"
+    "7️⃣ When a job arrives you can:\n"
     "   • ⭐ Save it\n"
     "   • 🙈 Dismiss it\n"
     "   • 💼 Proposal → *direct affiliate link to job*\n"
@@ -66,28 +61,25 @@ HELP = (
 def is_admin(user_id: int) -> bool:
     return ADMIN_ID and user_id == ADMIN_ID
 
-def normalize_kw_list(text: str) -> List[str]:
-    out, seen = [], set()
-    for part in _SPLIT_RE.split(text or ""):
-        p = part.strip()
-        if p and p.lower() not in seen:
-            seen.add(p.lower()); out.append(p)
-    return out
+# ------------ Commands ------------
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(WELCOME, reply_markup=main_menu_markup(), parse_mode="Markdown")
 
-async def reply_usage(update: Update, text: str):
-    await update.effective_message.reply_text(text)
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(HELP, reply_markup=main_menu_markup(), parse_mode="Markdown")
 
-def list_keywords(db, user_id: int) -> List[str]:
-    rows = db.query(Keyword).filter_by(user_id=user_id).order_by(Keyword.keyword.asc()).all()
-    return [r.keyword for r in rows]
+async def adminhelp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    txt = (
+        "🛡 *Admin Commands*\n\n"
+        "• `/adminstats` – Bot statistics (users, keywords, jobs sent/saved/dismissed)\n"
+        "• `/adminusers` – List all registered users with filters\n"
+        "• `/whoami` – Show your Telegram ID\n"
+    )
+    await update.effective_message.reply_text(txt, parse_mode="Markdown")
 
-async def ensure_user(db, telegram_id: int) -> User:
-    row = db.query(User).filter_by(telegram_id=telegram_id).first()
-    if not row:
-        row = User(telegram_id=telegram_id, countries="ALL")
-        db.add(row); db.commit(); db.refresh(row)
-    return row
-
+# ------------ Menu ------------
 def main_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -99,305 +91,23 @@ def main_menu_markup() -> InlineKeyboardMarkup:
         ]
     )
 
-# ------------ Commands ------------
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(WELCOME, reply_markup=main_menu_markup(), parse_mode="Markdown")
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(HELP, reply_markup=main_menu_markup(), parse_mode="Markdown")
-
-async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = SessionLocal()
-    try:
-        user = await ensure_user(db, update.effective_user.id)
-        kws = list_keywords(db, user.id)
-        txt = "🛠 *Your Settings*\n\n"
-        txt += f"• Keywords: {', '.join(kws) if kws else '(none)'}\n"
-        txt += f"• Countries: {user.countries or 'ALL'}\n"
-        txt += f"• Proposal template: {(user.proposal_template or '(none)')}\n\n"
-        txt += "📡 *Platforms monitored:*\n" + "\n".join(PLATFORM_LIST)
-        await update.effective_message.reply_text(txt, parse_mode="Markdown")
-    finally:
-        db.close()
-
-async def setcountry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        return await reply_usage(update, "Usage: /setcountry <US,UK,DE> or ALL")
-    val = " ".join(args).upper().replace(" ", "")
-    db = SessionLocal()
-    try:
-        user = await ensure_user(db, update.effective_user.id)
-        user.countries = val
-        db.commit()
-        await update.effective_message.reply_text(f"✅ Countries set to: {val}")
-    finally:
-        db.close()
-
-async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = " ".join(context.args)
-    if not text:
-        return await reply_usage(update, "Usage: /addkeyword <word[,word2,...]>")
-    new_kws = normalize_kw_list(text)
-    if not new_kws:
-        return await update.effective_message.reply_text("No valid keywords found.")
-    db = SessionLocal()
-    added = []
-    try:
-        user = await ensure_user(db, update.effective_user.id)
-        existing = set(k.lower() for k in list_keywords(db, user.id))
-        for kw in new_kws:
-            if kw.lower() in existing: 
-                continue
-            db.add(Keyword(user_id=user.id, keyword=kw)); added.append(kw)
-        db.commit()
-        await update.effective_message.reply_text(
-            f"{'✅ Added: ' + ', '.join(added) if added else 'No new keywords (duplicates).'}"
-        )
-    finally:
-        db.close()
-
-async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = SessionLocal()
-    try:
-        user = await ensure_user(db, update.effective_user.id)
-        kws = list_keywords(db, user.id)
-        await update.effective_message.reply_text(
-            "📚 Keywords:\n" + ("\n".join(f"• {k}" for k in kws) if kws else "(none)")
-        )
-    finally:
-        db.close()
-
-async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ Confirm", callback_data="conf:clear_kws")],
-         [InlineKeyboardButton("❌ Cancel", callback_data="conf:cancel")]]
-    )
-    await update.effective_message.reply_text("Are you sure you want to delete all keywords?", reply_markup=kb)
-
-async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await reply_usage(update, "Usage: /delkeyword <keyword>")
-    name = " ".join(context.args).strip()
-    db = SessionLocal()
-    try:
-        user = await ensure_user(db, update.effective_user.id)
-        row = None
-        for k in list_keywords(db, user.id):
-            if k.lower() == name.lower():
-                row = db.query(Keyword).filter_by(user_id=user.id, keyword=k).first()
-                break
-        if not row:
-            return await update.effective_message.reply_text(f"Not found: {name}")
-        db.delete(row); db.commit()
-        await update.effective_message.reply_text(f"🗑 Deleted keyword: {name}")
-    finally:
-        db.close()
-
-async def setproposal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = " ".join(context.args).strip()
-    if not text:
-        return await reply_usage(update, "Usage: /setproposal <text>")
-    if len(text) > 6000:
-        return await update.effective_message.reply_text("Template too long (max ~6000 chars).")
-    db = SessionLocal()
-    try:
-        user = await ensure_user(db, update.effective_user.id)
-        user.proposal_template = text
-        db.commit()
-        await update.effective_message.reply_text("✅ Proposal template saved.")
-    finally:
-        db.close()
-
-async def savejob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await reply_usage(update, "Usage: /savejob <job_id>")
-    job_id = context.args[0][:64]
-    db = SessionLocal()
-    try:
-        user = await ensure_user(db, update.effective_user.id)
-        if not db.query(JobSaved).filter_by(user_id=user.id, job_id=job_id).first():
-            db.add(JobSaved(user_id=user.id, job_id=job_id)); db.commit()
-        await update.effective_message.reply_text(f"⭐ Saved job: {job_id}")
-    finally:
-        db.close()
-
-async def dismissjob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await reply_usage(update, "Usage: /dismissjob <job_id>")
-    job_id = context.args[0][:64]
-    db = SessionLocal()
-    try:
-        user = await ensure_user(db, update.effective_user.id)
-        if not db.query(JobDismissed).filter_by(user_id=user.id, job_id=job_id).first():
-            db.add(JobDismissed(user_id=user.id, job_id=job_id)); db.commit()
-        await update.effective_message.reply_text(f"🙈 Dismissed job: {job_id}")
-    finally:
-        db.close()
-
-# --- Menu / confirm callbacks ---
-async def confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data or ""
-    if data == "conf:clear_kws":
-        db = SessionLocal()
-        try:
-            user = await ensure_user(db, update.effective_user.id)
-            db.query(Keyword).filter_by(user_id=user.id).delete()
-            db.commit()
-            await q.edit_message_text("✅ All keywords cleared.")
-        finally:
-            db.close()
-    elif data == "conf:cancel":
-        await q.edit_message_text("❌ Cancelled.")
-
-async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data or ""
-    if data == "menu:add":
-        await q.message.reply_text("Use `/addkeyword <word[,word2,...]>` to add keywords.", parse_mode="Markdown")
-    elif data == "menu:settings":
-        await mysettings_cmd(update, context)
-    elif data == "menu:help":
-        await help_cmd(update, context)
-
-# --- Diagnostics & Admin ---
-async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    txt = (
-        "🙋 *WhoAmI*\n\n"
-        f"🆔 Your Telegram ID: `{user.id}`\n"
-        f"👤 Name: {user.first_name or ''} {user.last_name or ''}\n"
-        f"🔗 Username: @{user.username if user.username else '(none)'}"
-    )
-    await update.effective_message.reply_text(txt, parse_mode="Markdown")
-
-def _is_admin(update: Update) -> bool:
-    return is_admin(update.effective_user.id)
-
-async def adminstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update):
-        return
-    db = SessionLocal()
-    try:
-        user_count = db.query(User).count()
-        keyword_count = db.query(Keyword).count()
-        jobs_sent = db.query(JobSent).count()
-        jobs_saved = db.query(JobSaved).count()
-        jobs_dismissed = db.query(JobDismissed).count()
-        text = (
-            "📊 *Bot Statistics*\n\n"
-            f"👥 Users: {user_count}\n"
-            f"🔑 Keywords: {keyword_count}\n"
-            f"📤 Jobs sent: {jobs_sent}\n"
-            f"⭐ Jobs saved: {jobs_saved}\n"
-            f"🙈 Jobs dismissed: {jobs_dismissed}\n"
-        )
-        await update.effective_message.reply_text(text, parse_mode="Markdown")
-    finally:
-        db.close()
-
-async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update):
-        return
-    db = SessionLocal()
-    try:
-        users = db.query(User).all()
-        lines = ["👥 *Registered Users*:"]
-        for u in users:
-            lines.append(f"• {u.telegram_id} | Countries: {u.countries or 'ALL'} | Keywords: {len(u.keywords)}")
-        text = "\n".join(lines)
-        await update.effective_message.reply_text(text, parse_mode="Markdown")
-    finally:
-        db.close()
-
-# --- Platforms ---
-async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cc = (context.args[0].upper() if context.args else "GLOBAL")
-    platforms = PLATFORM_COUNTRY_MAP.get(cc) or PLATFORM_COUNTRY_MAP["GLOBAL"]
-    lines = [f"🌍 *Platforms for {cc}*"] + [f"• {p}" for p in platforms]
-    await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-# ------------ DB singleton lock ------------
-def acquire_polling_lock() -> bool:
-    db = SessionLocal()
-    try:
-        db.add(AppLock(name="polling"))
-        db.commit()
-        logger.info("Acquired DB polling lock.")
-        return True
-    except Exception:
-        db.rollback()
-        logger.error("Another instance holds the DB polling lock. Exiting to avoid conflict.")
-        return False
-    finally:
-        db.close()
-
-def release_polling_lock():
-    db = SessionLocal()
-    try:
-        row = db.query(AppLock).filter_by(name="polling").first()
-        if row:
-            db.delete(row)
-            db.commit()
-            logger.info("Released DB polling lock.")
-    except Exception:
-        pass
-    finally:
-        db.close()
-
-# ------------ PTB lifecycle hooks ------------
-async def _post_init(app: Application):
-    # Διαγράφει webhook μέσα στο event loop του PTB
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Webhook deleted via post_init.")
-
 # ------------ Main ------------
 def main():
-    if not acquire_polling_lock():
-        sys.exit(0)
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    try:
-        app = (
-            ApplicationBuilder()
-            .token(BOT_TOKEN)
-            .post_init(_post_init)   # <-- σωστό σημείο για delete_webhook
-            .build()
-        )
+    # User commands
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("platforms", lambda u, c: u.effective_message.reply_text("Platforms command...")))
+    app.add_handler(CommandHandler("mysettings", lambda u, c: u.effective_message.reply_text("Mysettings...")))
 
-        # Core
-        app.add_handler(CommandHandler("start", start_cmd))
-        app.add_handler(CommandHandler("help", help_cmd))
-        app.add_handler(CommandHandler("mysettings", mysettings_cmd))
-        app.add_handler(CommandHandler("platforms", platforms_cmd))
+    # Admin-only
+    app.add_handler(CommandHandler("adminhelp", adminhelp_cmd))
+    app.add_handler(CommandHandler("adminstats", lambda u, c: u.effective_message.reply_text("Adminstats...")))
+    app.add_handler(CommandHandler("adminusers", lambda u, c: u.effective_message.reply_text("Adminusers...")))
+    app.add_handler(CommandHandler("whoami", lambda u, c: u.effective_message.reply_text("Whoami...")))
 
-        # Settings & keywords
-        app.add_handler(CommandHandler("setcountry", setcountry_cmd))
-        app.add_handler(CommandHandler("setproposal", setproposal_cmd))
-        app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
-        app.add_handler(CommandHandler("keywords", keywords_cmd))
-        app.add_handler(CommandHandler("listkeywords", keywords_cmd))
-        app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
-        app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
-
-        # Job actions
-        app.add_handler(CommandHandler("savejob", savejob_cmd))
-        app.add_handler(CommandHandler("dismissjob", dismissjob_cmd))
-
-        # Diagnostics & admin
-        app.add_handler(CommandHandler("whoami", whoami_cmd))
-        app.add_handler(CommandHandler("adminstats", adminstats_cmd))
-        app.add_handler(CommandHandler("adminusers", adminusers_cmd))
-
-        # Callbacks
-        app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^menu:"))
-        app.add_handler(CallbackQueryHandler(confirm_cb, pattern=r"^conf:(clear_kws|cancel)$"))
-
-        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-    finally:
-        release_polling_lock()
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
