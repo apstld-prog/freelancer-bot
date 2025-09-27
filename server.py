@@ -12,37 +12,58 @@ logger = logging.getLogger("server")
 
 app = FastAPI(title="freelancer-bot server")
 
-# Build PTB Application (ΔΕΝ κάνουμε polling εδώ)
+# Build the PTB Application ONCE (no polling here)
 tg_app = build_application()
 
-# --------- Basic health ---------
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")  # e.g. https://freelancer-bot-xxxx.onrender.com
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
+WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
+
 @app.get("/")
 async def root():
     return JSONResponse({"ok": True, "service": "freelancer-bot"})
 
-# --------- Webhook setup ---------
-PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")  # π.χ. https://freelancer-bot-ns7s.onrender.com
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
-WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
-
 @app.on_event("startup")
-async def setup_webhook_if_configured():
-    # Αν έχεις PUBLIC_URL, θα κάνουμε αυτόματο set webhook στο startup.
-    if not PUBLIC_URL:
-        logger.info("PUBLIC_URL not set — skipping automatic webhook setup.")
-        return
-    try:
-        url = f"{PUBLIC_URL}{WEBHOOK_PATH}"
-        # Πρώτα καθαρίζουμε τυχόν παλιό webhook και μετά ορίζουμε νέο
-        await tg_app.bot.delete_webhook()
-        await tg_app.bot.set_webhook(url=url, drop_pending_updates=True)
-        logger.info("Webhook set to %s", url)
-    except Exception as e:
-        logger.warning("Failed to set webhook automatically: %s", e)
+async def on_startup():
+    """
+    Properly initialize and start the PTB Application so that process_update() can be used.
+    Also, if PUBLIC_URL is set, reset & set the webhook to our endpoint.
+    """
+    # Initialize + Start PTB Application
+    await tg_app.initialize()
+    await tg_app.start()
+    logger.info("PTB Application initialized and started (webhook mode).")
 
-# --------- Telegram webhook endpoint ---------
+    # Optionally set webhook (if PUBLIC_URL provided)
+    if PUBLIC_URL:
+        try:
+            url = f"{PUBLIC_URL}{WEBHOOK_PATH}"
+            await tg_app.bot.delete_webhook()
+            await tg_app.bot.set_webhook(url=url, drop_pending_updates=True)
+            logger.info("Webhook set to %s", url)
+        except Exception as e:
+            logger.warning("Failed to set webhook automatically: %s", e)
+    else:
+        logger.info("PUBLIC_URL not set — skipping automatic webhook setup.")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    """
+    Properly stop and shutdown the PTB Application.
+    """
+    try:
+        await tg_app.stop()
+        await tg_app.shutdown()
+        logger.info("PTB Application stopped and shutdown.")
+    except Exception as e:
+        logger.warning("Error during PTB shutdown: %s", e)
+
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
+    """
+    Telegram will POST updates here. We parse the Update and hand it to PTB.
+    We don't await processing to keep the endpoint fast; we schedule it on the event loop.
+    """
     try:
         data = await request.json()
     except Exception:
@@ -54,9 +75,14 @@ async def telegram_webhook(request: Request):
         logger.warning("Failed to parse Update: %s", e)
         raise HTTPException(status_code=400, detail="Bad Update payload")
 
-    # Επεξεργασία update από το PTB
+    # Ensure app is initialized (defensive; should already be from startup hook)
+    if not tg_app._initialized:  # PTB internal flag, safe check
+        await tg_app.initialize()
+        await tg_app.start()
+        logger.info("PTB Application lazily initialized due to webhook hit.")
+
+    # Process update asynchronously
     try:
-        # Δεν μπλοκάρουμε το request — τρέχουμε την επεξεργασία ασύγχρονα
         asyncio.create_task(tg_app.process_update(update))
     except Exception as e:
         logger.error("process_update error: %s", e)
