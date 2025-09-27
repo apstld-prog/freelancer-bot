@@ -2,16 +2,20 @@ import os
 import logging
 import asyncio
 import hashlib
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
+
 import aiohttp
 import feedparser
-
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+
 from db import SessionLocal, User, Keyword, JobSent, JobFingerprint
 
-# --- Core config ---
+# -------------------- Config --------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 AFFILIATE_PREFIX = os.getenv("AFFILIATE_PREFIX", "https://affiliate-network.com/?url=")
+FETCH_INTERVAL_SEC = int(os.getenv("FETCH_INTERVAL_SEC", "60"))
+
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN is not set.")
 
@@ -19,32 +23,31 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [worker] %(levelname
 logger = logging.getLogger("freelancer-worker")
 bot = Bot(BOT_TOKEN)
 
-# --- ENV: comma-separated feed URLs per source ---
+# --- ENV feeds (comma-separated URLs) ---
 # International
 FREELANCER_RSS_URLS = [u.strip() for u in os.getenv("FREELANCER_RSS_URLS", "").split(",") if u.strip()]
 PPH_RSS_URLS         = [u.strip() for u in os.getenv("PPH_RSS_URLS", "").split(",") if u.strip()]
 MALT_RSS_URLS        = [u.strip() for u in os.getenv("MALT_RSS_URLS", "").split(",") if u.strip()]
 WORKANA_JSON_URLS    = [u.strip() for u in os.getenv("WORKANA_JSON_URLS", "").split(",") if u.strip()]
 
-# Greece (placeholders – βάλε τα δικά σου RSS endpoints όταν τα πάρεις)
+# Greece
 JOBFIND_RSS_URLS     = [u.strip() for u in os.getenv("JOBFIND_RSS_URLS", "").split(",") if u.strip()]
 SKYWALKER_RSS_URLS   = [u.strip() for u in os.getenv("SKYWALKER_RSS_URLS", "").split(",") if u.strip()]
 KARIERA_RSS_URLS     = [u.strip() for u in os.getenv("KARIERA_RSS_URLS", "").split(",") if u.strip()]
 
-# --- Source priority (affiliate first, μετά rank) ---
+# --- Source priority (affiliate first, then rank) ---
 SOURCE_PRIORITY = {
     # source: (has_affiliate, rank)
     "freelancer":     (True,  1),
     "peopleperhour":  (True,  2),
     "malt":           (False, 3),
     "workana":        (False, 4),
-    # Greece (συνήθως χωρίς affiliate)
     "jobfind":        (False, 5),
     "skywalker":      (False, 6),
     "kariera":        (False, 7),
 }
 
-# --- Region map (χρησιμοποιείται συμπληρωματικά στα country φίλτρα) ---
+# --- Source -> region (used by secondary country filter) ---
 SOURCE_REGION = {
     "freelancer": "GLOBAL",
     "peopleperhour": "UK",
@@ -55,9 +58,12 @@ SOURCE_REGION = {
     "kariera": "GR",
 }
 
-# -------------- Helpers --------------
+# -------------------- Helpers --------------------
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
 def affiliate_wrap(url: str) -> str:
-    return f"{AFFILIATE_PREFIX}{url}"
+    return f"{AFFILIATE_PREFIX}{url}" if AFFILIATE_PREFIX else url
 
 def normalize_text(s: str) -> str:
     return " ".join((s or "").lower().split())
@@ -66,6 +72,18 @@ def make_fingerprint(title: str, description: str) -> str:
     base = normalize_text((title or "") + " " + (description or ""))
     return hashlib.sha256(base.encode("utf-8")).hexdigest()[:40]
 
+def user_is_active(u: User) -> bool:
+    # access check (trial or license and not blocked)
+    if getattr(u, "is_blocked", False):
+        return False
+    t = now_utc()
+    if getattr(u, "access_until", None) and u.access_until >= t:
+        return True
+    if getattr(u, "trial_until", None) and u.trial_until >= t:
+        return True
+    return False
+
+# ------------- HTTP helpers / adapters -------------
 async def fetch_text(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
@@ -76,7 +94,6 @@ async def fetch_text(session: aiohttp.ClientSession, url: str) -> Optional[str]:
         logger.warning("Error fetching %s: %s", url, e)
     return None
 
-# -------------- Generic adapters --------------
 async def fetch_rss_list(session: aiohttp.ClientSession, urls: List[str], source: str, country_hint: str) -> List[Dict]:
     out: List[Dict] = []
     for url in urls:
@@ -131,7 +148,7 @@ async def fetch_json_list(session: aiohttp.ClientSession, urls: List[str], sourc
             })
     return out
 
-# -------------- Source-specific fetchers --------------
+# --- source specific ---
 async def fetch_from_freelancer(session) -> List[Dict]:
     if not FREELANCER_RSS_URLS:
         return []
@@ -152,7 +169,7 @@ async def fetch_from_workana(session) -> List[Dict]:
         return []
     return await fetch_json_list(session, WORKANA_JSON_URLS, "workana", "ES")
 
-# --- Greece ---
+# Greece
 async def fetch_from_jobfind(session) -> List[Dict]:
     if not JOBFIND_RSS_URLS:
         return []
@@ -168,7 +185,7 @@ async def fetch_from_kariera(session) -> List[Dict]:
         return []
     return await fetch_rss_list(session, KARIERA_RSS_URLS, "kariera", "GR")
 
-# -------------- Fetch aggregator --------------
+# ------------- Aggregator -------------
 async def fetch_jobs() -> List[Dict]:
     async with aiohttp.ClientSession() as session:
         results = await asyncio.gather(
@@ -186,11 +203,12 @@ async def fetch_jobs() -> List[Dict]:
         jobs.extend(lst)
     return jobs
 
-# -------------- Dedup & preference --------------
+# ------------- Canonical / dedup -------------
 def choose_canonical(existing_row: JobFingerprint, candidate: Dict) -> Optional[Dict]:
     cand_src = candidate["source"]
     cand_aff, cand_rank = SOURCE_PRIORITY.get(cand_src, (False, 99))
     ex_aff, ex_rank = SOURCE_PRIORITY.get(existing_row.source, (existing_row.has_affiliate, 99))
+    # Prefer affiliate, then lower rank (higher priority)
     if cand_aff and not ex_aff:
         return candidate
     if (cand_aff == ex_aff) and (cand_rank < ex_rank):
@@ -198,9 +216,11 @@ def choose_canonical(existing_row: JobFingerprint, candidate: Dict) -> Optional[
     return None
 
 def match_job_to_user(job: Dict, user: User, keywords: List[Keyword]) -> bool:
+    # primary: by keywords
     text = normalize_text(job.get("title", "") + " " + job.get("description", ""))
     if not any(kw.keyword.lower() in text for kw in keywords):
         return False
+    # country filter (accept job.country OR platform region)
     if user.countries and user.countries != "ALL":
         allowed = {c.strip().upper() for c in (user.countries or "").split(",")}
         job_cc = (job.get("country") or "GLOBAL").upper()
@@ -209,13 +229,68 @@ def match_job_to_user(job: Dict, user: User, keywords: List[Keyword]) -> bool:
             return False
     return True
 
+# ------------- Notifications (expiry) -------------
+
+def _notify_key(user_id: int, tag: str, day: datetime) -> str:
+    # e.g. NOTIFY-EXPIRING-2025-09-27 or NOTIFY-EXPIRED-2025-09-27
+    return f"NOTIFY-{tag}-{day.strftime('%Y-%m-%d')}-USR-{user_id}"
+
+async def maybe_notify_expiry(user: User):
+    """
+    Στέλνει ειδοποίηση λήξης/επικείμενης λήξης μία φορά την ημέρα,
+    χρησιμοποιώντας το JobSent ως μηχανισμό dedup (job_id unique).
+    """
+    db = SessionLocal()
+    try:
+        today = now_utc().date()
+        # Υπολόγισε το πλησιέστερο expiry (trial ή license)
+        expiries = [dt for dt in [getattr(user, "access_until", None), getattr(user, "trial_until", None)] if dt]
+        target = min(expiries) if expiries else None
+        if not target:
+            return
+
+        remaining = (target - now_utc()).total_seconds()
+        # expiring soon (<=24h and >0)
+        if 0 < remaining <= 24 * 3600:
+            key = _notify_key(user.id, "EXPIRING", datetime(today.year, today.month, today.day, tzinfo=timezone.utc))
+            # αν έχει σταλεί σήμερα, μην το ξαναστείλεις
+            if not db.query(JobSent).filter_by(user_id=user.id, job_id=key).first():
+                txt = (
+                    "⏳ *Your access expires soon (≤ 24h).* \n"
+                    "If you need more time, send `/contact I need more access`."
+                )
+                await bot.send_message(chat_id=user.telegram_id, text=txt, parse_mode="Markdown")
+                db.add(JobSent(user_id=user.id, job_id=key)); db.commit()
+            return
+
+        # expired (<=0)
+        if remaining <= 0:
+            key = _notify_key(user.id, "EXPIRED", datetime(today.year, today.month, today.day, tzinfo=timezone.utc))
+            if not db.query(JobSent).filter_by(user_id=user.id, job_id=key).first():
+                txt = (
+                    "🔒 *Your access has expired.*\n"
+                    "Use `/status` to see details or `/contact I need access` to reach the admin."
+                )
+                await bot.send_message(chat_id=user.telegram_id, text=txt, parse_mode="Markdown")
+                db.add(JobSent(user_id=user.id, job_id=key)); db.commit()
+    finally:
+        db.close()
+
+# ------------- Sending jobs -------------
 async def send_job(user: User, job: Dict, canonical_url: str, fingerprint: str):
+    # Only send if user has active trial/license
+    if not user_is_active(user):
+        # Αλλά στείλε πιθανή ειδοποίηση λήξης/λήξης
+        await maybe_notify_expiry(user)
+        return
+
     db = SessionLocal()
     try:
         if db.query(JobSent).filter_by(user_id=user.id, job_id=fingerprint).first():
             return
 
         aff_url = affiliate_wrap(canonical_url)
+
         buttons = [
             [InlineKeyboardButton("⭐ Save", callback_data=f"save:{fingerprint}"),
              InlineKeyboardButton("🙈 Dismiss", callback_data=f"dismiss:{fingerprint}")],
@@ -225,9 +300,10 @@ async def send_job(user: User, job: Dict, canonical_url: str, fingerprint: str):
         keyboard = InlineKeyboardMarkup(buttons)
 
         desc = (job.get("description") or "").strip()
-        if len(desc) > 300: desc = desc[:300] + "..."
-        text = f"💼 *{job['title']}*\n\n{desc}\n\n🔗 [View Job]({aff_url})"
+        if len(desc) > 300:
+            desc = desc[:300] + "..."
 
+        text = f"💼 *{job['title']}*\n\n{desc}\n\n🔗 [View Job]({aff_url})"
         await bot.send_message(
             chat_id=user.telegram_id, text=text, reply_markup=keyboard,
             parse_mode="Markdown", disable_web_page_preview=True,
@@ -237,6 +313,7 @@ async def send_job(user: User, job: Dict, canonical_url: str, fingerprint: str):
     finally:
         db.close()
 
+# ------------- Processing -------------
 async def process_jobs():
     jobs = await fetch_jobs()
     if not jobs:
@@ -272,28 +349,37 @@ async def process_jobs():
                     row.country = better.get("country", row.country)
                     db.commit()
 
-        # Deliver to users
+        # Deliver to users based on canonical entries
         users = db.query(User).all()
         for row in db.query(JobFingerprint).all():
-            original = next((j for j in jobs if make_fingerprint(j.get("title",""), j.get("description","")) == row.fingerprint), None)
+            # Find one representative job with same fingerprint (for text/desc)
+            original = next(
+                (j for j in jobs if make_fingerprint(j.get("title",""), j.get("description","")) == row.fingerprint),
+                None
+            )
             if not original:
                 continue
             for user in users:
                 kws = db.query(Keyword).filter_by(user_id=user.id).all()
                 if kws and match_job_to_user(original, user, kws):
                     await send_job(user, original, row.canonical_url, row.fingerprint)
+
+        # Additionally, check expiry notifications for all users (once per loop)
+        for user in users:
+            if not user_is_active(user):
+                await maybe_notify_expiry(user)
     finally:
         db.close()
 
+# ------------- Loop -------------
 async def worker_loop():
-    interval = int(os.getenv("FETCH_INTERVAL_SEC", "60"))
-    logger.info("Worker loop running every %ss", interval)
+    logger.info("Worker loop running every %ss", FETCH_INTERVAL_SEC)
     while True:
         try:
             await process_jobs()
         except Exception as e:
             logger.exception(f"Error in worker loop: {e}")
-        await asyncio.sleep(interval)
+        await asyncio.sleep(FETCH_INTERVAL_SEC)
 
 def main():
     asyncio.run(worker_loop())
