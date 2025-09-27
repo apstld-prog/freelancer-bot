@@ -73,6 +73,9 @@ def now_utc() -> datetime:
 def is_admin(user_id: int) -> bool:
     return ADMIN_ID and user_id == ADMIN_ID
 
+def affiliate_wrap(url: str) -> str:
+    return f"{AFFILIATE_PREFIX}{url}" if AFFILIATE_PREFIX else url
+
 def normalize_kw_list(text: str) -> List[str]:
     out, seen = [], set()
     for part in _SPLIT_RE.split(text or ""):
@@ -185,7 +188,6 @@ async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.effective_message.reply_text("Usage: /contact <your message>")
     user = update.effective_user
     text = f"📨 *Contact request*\nFrom: `{user.id}` {user.first_name or ''} @{user.username or '(none)'}\n\n{msg}"
-    # ΜΟΝΟ στον admin
     await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
     await update.effective_message.reply_text("✅ Message sent to admin. You will receive a reply here.")
 
@@ -307,7 +309,7 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Στέλνει ΜΟΝΟ στον συγκεκριμένο χρήστη (private 1:1)
+    # ΜΟΝΟ στον συγκεκριμένο χρήστη (ιδιωτικά)
     if not is_admin(update.effective_user.id):
         return
     if len(context.args) < 2:
@@ -316,6 +318,43 @@ async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = " ".join(context.args[1:])
     await context.bot.send_message(chat_id=uid, text=f"💬 *Admin reply:*\n\n{text}", parse_mode="Markdown")
     await update.effective_message.reply_text("✅ Sent.")
+
+# ------------ Selftest ------------
+async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Στέλνει ένα δοκιμαστικό job με affiliate-wrapped link και τα κουμπιά."""
+    db = SessionLocal()
+    try:
+        user = await ensure_user(db, update.effective_user.id)
+        kws = list_keywords(db, user.id)
+        sample_kw = kws[0] if kws else "sample"
+
+        title = f"[TEST] {sample_kw.capitalize()} project needed"
+        desc = (
+            f"This is a self-test message to verify the bot UI and affiliate links.\n"
+            f"Keyword matched: *{sample_kw}*."
+        )
+        original_url = "https://example.com/job/123456"
+        aff_url = affiliate_wrap(original_url)
+        fingerprint = f"SELFTEST-{user.telegram_id}-{int(datetime.now().timestamp())}"
+
+        buttons = [
+            [InlineKeyboardButton("⭐ Save", callback_data=f"save:{fingerprint}"),
+             InlineKeyboardButton("🙈 Dismiss", callback_data=f"dismiss:{fingerprint}")],
+            [InlineKeyboardButton("💼 Proposal", url=aff_url),
+             InlineKeyboardButton("🔗 Original", url=aff_url)],
+        ]
+        keyboard = InlineKeyboardMarkup(buttons)
+
+        text = f"💼 *{title}*\n\n{desc}\n\n🔗 [View Job]({aff_url})"
+        await context.bot.send_message(
+            chat_id=user.telegram_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+    finally:
+        db.close()
 
 # ------------ Menu callbacks ------------
 async def confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -471,6 +510,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("contact", contact_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("platforms", platforms_cmd))
+    app.add_handler(CommandHandler("selftest", selftest_cmd))  # <-- NEW
 
     # Settings/keywords
     app.add_handler(CommandHandler("setcountry", setcountry_cmd))
