@@ -48,7 +48,7 @@ WELCOME = (
     "👉 Use the menu below or commands to configure your settings."
 )
 
-HELP = (
+HELP_BASE = (
     "📖 *Help / How it works*\n\n"
     "1️⃣ Add keywords with `/addkeyword python, telegram`\n"
     "2️⃣ View your keywords with `/keywords` or `/listkeywords`\n"
@@ -73,7 +73,7 @@ def now_utc() -> datetime:
 def is_admin(user_id: int) -> bool:
     return ADMIN_ID and user_id == ADMIN_ID
 
-def normalize_kw_list(text: str):
+def normalize_kw_list(text: str) -> List[str]:
     out, seen = [], set()
     for part in _SPLIT_RE.split(text or ""):
         p = part.strip()
@@ -81,7 +81,7 @@ def normalize_kw_list(text: str):
             seen.add(p.lower()); out.append(p)
     return out
 
-def list_keywords(db, user_id: int):
+def list_keywords(db, user_id: int) -> List[str]:
     rows = db.query(Keyword).filter_by(user_id=user_id).order_by(Keyword.keyword.asc()).all()
     return [r.keyword for r in rows]
 
@@ -93,6 +93,9 @@ async def ensure_user(db, telegram_id: int) -> User:
     return row
 
 def user_is_active(u: User) -> bool:
+    # Admin: πάντα ενεργός
+    if ADMIN_ID and getattr(u, "telegram_id", 0) == ADMIN_ID:
+        return True
     t = now_utc()
     access_until = getattr(u, "access_until", None)
     trial_until = getattr(u, "trial_until", None)
@@ -136,7 +139,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = await ensure_user(db, update.effective_user.id)
         if not getattr(user, "started_at", None):
             user.started_at = now_utc()
-            user.trial_until = user.started_at + timedelta(days=int(os.getenv("TRIAL_DAYS", "10")))
+            user.trial_until = user.started_at + timedelta(days=TRIAL_DAYS)
             db.commit()
         await update.effective_message.reply_text(
             WELCOME + f"\n\n⏳ *Trial ends:* `{getattr(user, 'trial_until', None)}` (UTC)",
@@ -146,7 +149,16 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(HELP, reply_markup=main_menu_markup(), parse_mode="Markdown")
+    text = HELP_BASE
+    if is_admin(update.effective_user.id):
+        text += (
+            "\n\n🛡 *Admin quick commands:*\n"
+            "• `/adminhelp` – show all admin commands\n"
+            "• `/adminstats`, `/adminusers`\n"
+            "• `/grant <user_id> <days>`, `/extend <user_id> <days>`, `/revoke <user_id>`\n"
+            "• `/reply <user_id> <text>`"
+        )
+    await update.effective_message.reply_text(text, reply_markup=main_menu_markup(), parse_mode="Markdown")
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
@@ -165,7 +177,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_id = int(os.getenv("TELEGRAM_ADMIN_ID", "0") or "0")
+    admin_id = ADMIN_ID
     if not admin_id:
         return await update.effective_message.reply_text("Admin is not configured.")
     msg = " ".join(context.args).strip()
@@ -173,35 +185,35 @@ async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.effective_message.reply_text("Usage: /contact <your message>")
     user = update.effective_user
     text = f"📨 *Contact request*\nFrom: `{user.id}` {user.first_name or ''} @{user.username or '(none)'}\n\n{msg}"
+    # ΜΟΝΟ στον admin
     await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
     await update.effective_message.reply_text("✅ Message sent to admin. You will receive a reply here.")
 
 # ------------ Admin commands ------------
-def is_admin(u_id: int) -> bool:
-    return ADMIN_ID and u_id == ADMIN_ID
-
 async def adminhelp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     txt = (
         "🛡 *Admin Commands*\n\n"
-        "• `/adminstats` – Bot statistics\n"
-        "• `/adminusers` – List users\n"
-        "• `/grant <user_id> <days>` – Give license\n"
-        "• `/extend <user_id> <days>` – Extend license\n"
-        "• `/revoke <user_id>` – Revoke license\n"
-        "• `/reply <user_id> <text>` – Reply to a user\n"
-        "• `/whoami` – Show your Telegram ID\n"
+        "• `/adminstats` – Bot statistics (users, keywords, jobs sent/saved/dismissed)\n"
+        "• `/adminusers` – List users (ID, countries, keywords)\n"
+        "• `/grant <user_id> <days>` – Give license for N days\n"
+        "• `/extend <user_id> <days>` – Extend license by N days\n"
+        "• `/revoke <user_id>` – Revoke license (set expired)\n"
+        "• `/reply <user_id> <text>` – Send a reply to a user\n"
+        "• `/whoami` – Show your Telegram ID"
     )
     await update.effective_message.reply_text(txt, parse_mode="Markdown")
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    role = "Admin ✅" if is_admin(user.id) else "User"
     txt = (
         "🙋 *WhoAmI*\n\n"
         f"🆔 Your Telegram ID: `{user.id}`\n"
         f"👤 Name: {user.first_name or ''} {user.last_name or ''}\n"
-        f"🔗 Username: @{user.username if user.username else '(none)'}"
+        f"🔗 Username: @{user.username if user.username else '(none)'}\n"
+        f"🧿 Role: {role}"
     )
     await update.effective_message.reply_text(txt, parse_mode="Markdown")
 
@@ -295,6 +307,7 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Στέλνει ΜΟΝΟ στον συγκεκριμένο χρήστη (private 1:1)
     if not is_admin(update.effective_user.id):
         return
     if len(context.args) < 2:
@@ -334,7 +347,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu:contact":
         await q.message.reply_text("📨 Send a message with `/contact <your message>` and the admin will reply here.")
 
-# ------------ Settings & misc ------------
+# ------------ User settings / misc ------------
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
@@ -352,6 +365,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
+# ------------ Keywords & countries ------------
 async def setcountry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -439,13 +453,14 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
+# ------------ Platforms ------------
 async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cc = (context.args[0].upper() if context.args else "GLOBAL")
     platforms = PLATFORM_COUNTRY_MAP.get(cc) or PLATFORM_COUNTRY_MAP["GLOBAL"]
     lines = [f"🌍 *Platforms for {cc}*"] + [f"• {p}" for p in platforms]
     await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ------------ Build Application ------------
+# ------------ Build Application (for webhook server) ------------
 def build_application() -> Application:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
