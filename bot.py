@@ -111,18 +111,14 @@ async def ensure_user(db, telegram_id: int) -> User:
     return row
 
 def user_is_active(u: User) -> bool:
-    # Admin: πάντα ενεργός
     if ADMIN_ID and getattr(u, "telegram_id", 0) == ADMIN_ID:
         return True
     t = now_utc()
-    access_until = getattr(u, "access_until", None)
-    trial_until = getattr(u, "trial_until", None)
-    is_blocked = getattr(u, "is_blocked", False)
-    if is_blocked:
+    if getattr(u, "is_blocked", False):
         return False
-    if access_until and access_until >= t:
+    if getattr(u, "access_until", None) and u.access_until >= t:
         return True
-    if trial_until and trial_until >= t:
+    if getattr(u, "trial_until", None) and u.trial_until >= t:
         return True
     return False
 
@@ -203,15 +199,14 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_id = ADMIN_ID
-    if not admin_id:
+    if not ADMIN_ID:
         return await update.effective_message.reply_text("Admin is not configured.")
     msg = " ".join(context.args).strip()
     if not msg:
         return await update.effective_message.reply_text("Usage: /contact <your message>")
     user = update.effective_user
     text = f"📨 *Contact request*\nFrom: `{user.id}` {user.first_name or ''} @{user.username or '(none)'}\n\n{msg}"
-    await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
+    await context.bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="Markdown")
     await update.effective_message.reply_text("✅ Message sent to admin. You will receive a reply here.")
 
 # ------------ Admin commands ------------
@@ -259,7 +254,6 @@ async def adminstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ensure_admin(update): return
     db = SessionLocal()
     try:
-        from db import JobSent, JobSaved, JobDismissed
         user_count = db.query(User).count()
         keyword_count = db.query(Keyword).count()
         jobs_sent = db.query(JobSent).count()
@@ -277,28 +271,6 @@ async def adminstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-async def feedsstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not ensure_admin(update): 
-        return await update.effective_message.reply_text("Only admin can view feeds status.")
-    # Διαβάζουμε ENV και δείχνουμε counts ανά πλατφόρμα
-    def split_env(name: str) -> List[str]:
-        return [u.strip() for u in os.getenv(name, "").split(",") if u.strip()]
-    rows = [
-        ("Freelancer", "FREELANCER_RSS_URLS"),
-        ("PeoplePerHour", "PPH_RSS_URLS"),
-        ("Malt", "MALT_RSS_URLS"),
-        ("Workana", "WORKANA_JSON_URLS"),
-        ("JobFind (GR)", "JOBFIND_RSS_URLS"),
-        ("Skywalker (GR)", "SKYWALKER_RSS_URLS"),
-        ("Kariera (GR)", "KARIERA_RSS_URLS"),
-    ]
-    lines = ["🔧 *Feeds status*"]
-    for label, var in rows:
-        vals = split_env(var)
-        mark = "✅" if vals else "⚠️"
-        lines.append(f"• {label}: {mark} {len(vals)} feed(s) {'configured' if vals else 'missing'}")
-    await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
-
 async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ensure_admin(update): return
     db = SessionLocal()
@@ -311,6 +283,54 @@ async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Trial: {getattr(u,'trial_until',None)} | Access: {getattr(u,'access_until',None)} | KW: {len(u.keywords)}"
             )
         await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+    finally:
+        db.close()
+
+async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ensure_admin(update): return
+    if len(context.args) < 2:
+        return await update.effective_message.reply_text("Usage: /grant <user_id> <days>")
+    uid = int(context.args[0]); days = int(context.args[1])
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=uid).first()
+        if not u: return await update.effective_message.reply_text("User not found.")
+        u.access_until = now_utc() + timedelta(days=days)
+        u.is_blocked = False
+        db.commit()
+        await update.effective_message.reply_text(f"✅ Granted access to {uid} until {u.access_until} (UTC).")
+    finally:
+        db.close()
+
+async def extend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ensure_admin(update): return
+    if len(context.args) < 2:
+        return await update.effective_message.reply_text("Usage: /extend <user_id> <days>")
+    uid = int(context.args[0]); days = int(context.args[1])
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=uid).first()
+        if not u: return await update.effective_message.reply_text("User not found.")
+        base = getattr(u, "access_until", None)
+        base = base if base and base > now_utc() else now_utc()
+        u.access_until = base + timedelta(days=days)
+        db.commit()
+        await update.effective_message.reply_text(f"🔁 Extended access for {uid} until {u.access_until} (UTC).")
+    finally:
+        db.close()
+
+async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ensure_admin(update): return
+    if not context.args:
+        return await update.effective_message.reply_text("Usage: /revoke <user_id>")
+    uid = int(context.args[0])
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=uid).first()
+        if not u: return await update.effective_message.reply_text("User not found.")
+        u.access_until = now_utc() - timedelta(seconds=1)
+        db.commit()
+        await update.effective_message.reply_text(f"⛔ Revoked access for {uid}.")
     finally:
         db.close()
 
@@ -533,7 +553,7 @@ async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"🌍 *Platforms for {cc}*"] + [f"• {p}" for p in platforms]
     await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ------------ Build Application ------------
+# ------------ Build Application (imported by server.py) ------------
 def build_application() -> Application:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 

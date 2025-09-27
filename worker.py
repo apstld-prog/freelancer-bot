@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import asyncio
 import hashlib
@@ -20,10 +21,10 @@ if not BOT_TOKEN:
 # Global fallback affiliate prefix (used if no per-source template is set)
 AFFILIATE_PREFIX = os.getenv("AFFILIATE_PREFIX", "")
 
-# Fiverr deep-link (χρησιμοποιεί {url})
+# Fiverr deep-link (uses {url})
 FIVERR_AFF_TEMPLATE = os.getenv("FIVERR_AFF_TEMPLATE", "").strip()
 
-# Freelancer referral code (π.χ. apstld) — προστίθεται ως ?f=CODE σε οποιοδήποτε freelancer.com URL
+# Freelancer referral code (e.g., apstld) — appended as ?f=CODE to any freelancer.com URL
 FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
 
 # Fetch interval (seconds)
@@ -91,7 +92,7 @@ def user_is_active(u: User) -> bool:
     return False
 
 def add_query_param(url: str, key: str, value: str) -> str:
-    """Ασφαλής προσθήκη/αντικατάσταση παραμέτρου query σε URL."""
+    """Safely add/replace a query parameter in a URL."""
     try:
         p = urlparse(url)
         q = dict(parse_qsl(p.query, keep_blank_values=True))
@@ -106,7 +107,7 @@ def affiliate_wrap_by_source(source: str, url: str) -> str:
     if source == "fiverr" and FIVERR_AFF_TEMPLATE:
         return FIVERR_AFF_TEMPLATE.replace("{url}", url)
 
-    # Freelancer referral param ?f=<code> μόνο για freelancer.com
+    # Freelancer referral param ?f=<code> only for freelancer.com
     if source == "freelancer" and FREELANCER_REF_CODE:
         host = urlparse(url).hostname or ""
         if "freelancer.com" in host:
@@ -127,11 +128,19 @@ async def fetch_text(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     return None
 
 async def fetch_json(session: aiohttp.ClientSession, url: str) -> Optional[dict]:
+    """Robust JSON fetch (some endpoints return application/octet-stream)."""
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
-            if r.status == 200:
-                return await r.json()
-            logger.warning("Non-200 JSON from %s: %s", url, r.status)
+        headers = {"Accept": "application/json, text/plain, */*"}
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=25)) as r:
+            text = await r.text()
+            if r.status != 200:
+                logger.warning("Non-200 JSON from %s: %s", url, r.status)
+                return None
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as e:
+                logger.warning("JSON decode error from %s: %s", url, e)
+                return None
     except Exception as e:
         logger.warning("Error fetching JSON %s: %s", url, e)
     return None
