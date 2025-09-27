@@ -76,7 +76,8 @@ HELP_BASE = (
     "📨 `/contact <message>` to reach the admin.\n"
     "🧪 `/selftest` for a test job.\n"
     "🌍 `/platforms [CC]` to see platforms by country (e.g. `/platforms GR`).\n"
-    "✨ `/features` to see everything included.\n\n"
+    "✨ `/features` to see everything included.\n"
+    "🔧 `/feedsstatus` to see which feeds are configured.\n\n"
     "📡 *Platforms currently supported:*\n" + "\n".join(PLATFORM_LIST)
 )
 
@@ -174,7 +175,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += (
             "\n\n🛡 *Admin quick commands:*\n"
             "• `/adminhelp` – all admin commands\n"
-            "• `/adminstats`, `/userscount`, `/adminusers`\n"
+            "• `/adminstats`, `/userscount`, `/adminusers`, `/feedsstatus`\n"
             "• `/grant <user_id> <days>`, `/extend <user_id> <days>`, `/revoke <user_id>`\n"
             "• `/broadcast <text>` – send message to all users\n"
             "• `/announcefeatures` – send the features announcement\n"
@@ -224,6 +225,7 @@ async def adminhelp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/adminstats` – stats (users, keywords, jobs sent/saved/dismissed)\n"
         "• `/userscount` – total users\n"
         "• `/adminusers` – list users\n"
+        "• `/feedsstatus` – show currently configured feeds\n"
         "• `/grant <user_id> <days>`, `/extend <user_id> <days>`, `/revoke <user_id>`\n"
         "• `/broadcast <text>` – send message to all users\n"
         "• `/announcefeatures` – send the features announcement\n"
@@ -244,10 +246,20 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_message.reply_text(txt, parse_mode="Markdown")
 
+async def userscount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ensure_admin(update): return
+    db = SessionLocal()
+    try:
+        count = db.query(User).count()
+        await update.effective_message.reply_text(f"👥 *Total users:* {count}", parse_mode="Markdown")
+    finally:
+        db.close()
+
 async def adminstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ensure_admin(update): return
     db = SessionLocal()
     try:
+        from db import JobSent, JobSaved, JobDismissed
         user_count = db.query(User).count()
         keyword_count = db.query(Keyword).count()
         jobs_sent = db.query(JobSent).count()
@@ -265,14 +277,27 @@ async def adminstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-async def userscount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not ensure_admin(update): return
-    db = SessionLocal()
-    try:
-        count = db.query(User).count()
-        await update.effective_message.reply_text(f"👥 *Total users:* {count}", parse_mode="Markdown")
-    finally:
-        db.close()
+async def feedsstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ensure_admin(update): 
+        return await update.effective_message.reply_text("Only admin can view feeds status.")
+    # Διαβάζουμε ENV και δείχνουμε counts ανά πλατφόρμα
+    def split_env(name: str) -> List[str]:
+        return [u.strip() for u in os.getenv(name, "").split(",") if u.strip()]
+    rows = [
+        ("Freelancer", "FREELANCER_RSS_URLS"),
+        ("PeoplePerHour", "PPH_RSS_URLS"),
+        ("Malt", "MALT_RSS_URLS"),
+        ("Workana", "WORKANA_JSON_URLS"),
+        ("JobFind (GR)", "JOBFIND_RSS_URLS"),
+        ("Skywalker (GR)", "SKYWALKER_RSS_URLS"),
+        ("Kariera (GR)", "KARIERA_RSS_URLS"),
+    ]
+    lines = ["🔧 *Feeds status*"]
+    for label, var in rows:
+        vals = split_env(var)
+        mark = "✅" if vals else "⚠️"
+        lines.append(f"• {label}: {mark} {len(vals)} feed(s) {'configured' if vals else 'missing'}")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ensure_admin(update): return
@@ -289,66 +314,7 @@ async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not ensure_admin(update): return
-    if len(context.args) < 2:
-        return await update.effective_message.reply_text("Usage: /grant <user_id> <days>")
-    uid = int(context.args[0]); days = int(context.args[1])
-    db = SessionLocal()
-    try:
-        u = db.query(User).filter_by(telegram_id=uid).first()
-        if not u: return await update.effective_message.reply_text("User not found.")
-        u.access_until = now_utc() + timedelta(days=days)
-        u.is_blocked = False
-        db.commit()
-        await update.effective_message.reply_text(f"✅ Granted access to {uid} until {u.access_until} (UTC).")
-    finally:
-        db.close()
-
-async def extend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not ensure_admin(update): return
-    if len(context.args) < 2:
-        return await update.effective_message.reply_text("Usage: /extend <user_id> <days>")
-    uid = int(context.args[0]); days = int(context.args[1])
-    db = SessionLocal()
-    try:
-        u = db.query(User).filter_by(telegram_id=uid).first()
-        if not u: return await update.effective_message.reply_text("User not found.")
-        base = getattr(u, "access_until", None)
-        base = base if base and base > now_utc() else now_utc()
-        u.access_until = base + timedelta(days=days)
-        db.commit()
-        await update.effective_message.reply_text(f"🔁 Extended access for {uid} until {u.access_until} (UTC).")
-    finally:
-        db.close()
-
-async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not ensure_admin(update): return
-    if not context.args:
-        return await update.effective_message.reply_text("Usage: /revoke <user_id>")
-    uid = int(context.args[0])
-    db = SessionLocal()
-    try:
-        u = db.query(User).filter_by(telegram_id=uid).first()
-        if not u: return await update.effective_message.reply_text("User not found.")
-        u.access_until = now_utc() - timedelta(seconds=1)
-        db.commit()
-        await update.effective_message.reply_text(f"⛔ Revoked access for {uid}.")
-    finally:
-        db.close()
-
-async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ΜΟΝΟ στον συγκεκριμένο χρήστη (ιδιωτικά)
-    if not ensure_admin(update): return
-    if len(context.args) < 2:
-        return await update.effective_message.reply_text("Usage: /reply <user_id> <text>")
-    uid = int(context.args[0])
-    text = " ".join(context.args[1:])
-    await context.bot.send_message(chat_id=uid, text=f"💬 *Admin reply:*\n\n{text}", parse_mode="Markdown")
-    await update.effective_message.reply_text("✅ Sent.")
-
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Admin → μαζική ανακοίνωση
     if not ensure_admin(update): return
     msg = " ".join(context.args).strip()
     if not msg:
@@ -382,6 +348,15 @@ async def announce_features_cmd(update: Update, context: ContextTypes.DEFAULT_TY
         await update.effective_message.reply_text(f"✨ Features announcement sent to {sent} users.")
     finally:
         db.close()
+
+async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ensure_admin(update): return
+    if len(context.args) < 2:
+        return await update.effective_message.reply_text("Usage: /reply <user_id> <text>")
+    uid = int(context.args[0])
+    text = " ".join(context.args[1:])
+    await context.bot.send_message(chat_id=uid, text=f"💬 *Admin reply:*\n\n{text}", parse_mode="Markdown")
+    await update.effective_message.reply_text("✅ Sent.")
 
 # ------------ Selftest ------------
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -558,7 +533,7 @@ async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"🌍 *Platforms for {cc}*"] + [f"• {p}" for p in platforms]
     await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ------------ Build Application (webhook server uses this) ------------
+# ------------ Build Application ------------
 def build_application() -> Application:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -571,6 +546,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("platforms", platforms_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
+    app.add_handler(CommandHandler("feedsstatus", feedsstatus_cmd))
 
     # Settings/keywords
     app.add_handler(CommandHandler("setcountry", setcountry_cmd))
