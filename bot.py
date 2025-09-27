@@ -378,6 +378,40 @@ async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=uid, text=f"💬 *Admin reply:*\n\n{text}", parse_mode="Markdown")
     await update.effective_message.reply_text("✅ Sent.")
 
+# ------------ Feeds status (FIX) ------------
+async def feedsstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ensure_admin(update):
+        return await update.effective_message.reply_text("Only admin can view feeds status.")
+    def split_env(name: str) -> List[str]:
+        return [u.strip() for u in os.getenv(name, "").split(",") if u.strip()]
+    rows = [
+        ("Freelancer", "FREELANCER_RSS_URLS"),
+        ("PeoplePerHour", "PPH_RSS_URLS"),
+        ("Malt", "MALT_RSS_URLS"),
+        ("Workana (JSON)", "WORKANA_JSON_URLS"),
+        ("JobFind (GR)", "JOBFIND_RSS_URLS"),
+        ("Skywalker (GR)", "SKYWALKER_RSS_URLS"),
+        ("Kariera (GR)", "KARIERA_RSS_URLS"),
+        ("Fiverr (optional RSS)", "FIVERR_RSS_URLS"),
+    ]
+    lines = ["🔧 *Feeds status*"]
+    for label, var in rows:
+        vals = split_env(var)
+        mark = "✅" if vals else "⚠️"
+        lines.append(f"• {label}: {mark} {len(vals)} feed(s) {'configured' if vals else 'missing'}")
+    # Affiliate helpers status (for awareness)
+    aff_lines = []
+    if os.getenv("FREELANCER_REF_CODE", ""):
+        aff_lines.append("Freelancer ref: ✅")
+    else:
+        aff_lines.append("Freelancer ref: ⚠️ (FREELANCER_REF_CODE empty)")
+    if os.getenv("FIVERR_AFF_TEMPLATE", ""):
+        aff_lines.append("Fiverr deep-link: ✅")
+    else:
+        aff_lines.append("Fiverr deep-link: ⚠️ (FIVERR_AFF_TEMPLATE empty)")
+    lines.append("\n".join(aff_lines))
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+
 # ------------ Selftest ------------
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
