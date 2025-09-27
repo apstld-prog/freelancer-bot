@@ -1,33 +1,24 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+#!/bin/bash
+set -euo pipefail
 
 echo "[start] launching services..."
-PIDS=()
 
-if [[ -f "server.py" ]]; then
-  python server.py &
-  PIDS+=($!)
-  echo "[start] server.py pid=${PIDS[-1]}"
-fi
+# start server
+python server.py &
+server_pid=$!
 
-python bot.py &
-PIDS+=($!)
-echo "[start] bot.py pid=${PIDS[-1]}"
-
+# start worker
 python worker.py &
-PIDS+=($!)
-echo "[start] worker.py pid=${PIDS[-1]}"
+worker_pid=$!
 
-term() {
-  echo "[start] terminating children: ${PIDS[*]}"
-  kill -TERM "${PIDS[@]}" 2>/dev/null || true
-  wait
-}
-trap term SIGINT SIGTERM
+# start bot
+python bot.py &
+bot_pid=$!
 
-set +e
+# wait all
+trap "echo '[start] terminating...'; kill $server_pid $worker_pid $bot_pid 2>/dev/null || true" SIGINT SIGTERM
+
 wait -n
-status=$?
-echo "[start] a process exited with code $status — stopping others..."
-term
-exit $status
+
+# if any exits, stop the others
+kill $server_pid $worker_pid $bot_pid 2>/dev/null || true
