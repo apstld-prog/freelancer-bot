@@ -6,7 +6,7 @@ from bot import build_application
 
 app = FastAPI(title="freelancer-bot server")
 
-# Create Telegram PTB application (no polling here; webhook handled elsewhere if needed)
+# Create Telegram PTB application (webhook-ready; no polling here)
 tg_app = build_application()
 
 @app.get("/")
