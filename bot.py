@@ -1,5 +1,4 @@
 import os
-import sys
 import re
 import logging
 from datetime import datetime, timedelta, timezone
@@ -74,7 +73,7 @@ def now_utc() -> datetime:
 def is_admin(user_id: int) -> bool:
     return ADMIN_ID and user_id == ADMIN_ID
 
-def normalize_kw_list(text: str) -> List[str]:
+def normalize_kw_list(text: str):
     out, seen = [], set()
     for part in _SPLIT_RE.split(text or ""):
         p = part.strip()
@@ -82,7 +81,7 @@ def normalize_kw_list(text: str) -> List[str]:
             seen.add(p.lower()); out.append(p)
     return out
 
-def list_keywords(db, user_id: int) -> List[str]:
+def list_keywords(db, user_id: int):
     rows = db.query(Keyword).filter_by(user_id=user_id).order_by(Keyword.keyword.asc()).all()
     return [r.keyword for r in rows]
 
@@ -137,7 +136,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = await ensure_user(db, update.effective_user.id)
         if not getattr(user, "started_at", None):
             user.started_at = now_utc()
-            user.trial_until = user.started_at + timedelta(days=TRIAL_DAYS)
+            user.trial_until = user.started_at + timedelta(days=int(os.getenv("TRIAL_DAYS", "10")))
             db.commit()
         await update.effective_message.reply_text(
             WELCOME + f"\n\n⏳ *Trial ends:* `{getattr(user, 'trial_until', None)}` (UTC)",
@@ -166,28 +165,32 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not ADMIN_ID:
+    admin_id = int(os.getenv("TELEGRAM_ADMIN_ID", "0") or "0")
+    if not admin_id:
         return await update.effective_message.reply_text("Admin is not configured.")
     msg = " ".join(context.args).strip()
     if not msg:
         return await update.effective_message.reply_text("Usage: /contact <your message>")
     user = update.effective_user
     text = f"📨 *Contact request*\nFrom: `{user.id}` {user.first_name or ''} @{user.username or '(none)'}\n\n{msg}"
-    await context.bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="Markdown")
+    await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
     await update.effective_message.reply_text("✅ Message sent to admin. You will receive a reply here.")
 
 # ------------ Admin commands ------------
+def is_admin(u_id: int) -> bool:
+    return ADMIN_ID and u_id == ADMIN_ID
+
 async def adminhelp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     txt = (
         "🛡 *Admin Commands*\n\n"
-        "• `/adminstats` – Bot statistics (users, keywords, jobs sent/saved/dismissed)\n"
-        "• `/adminusers` – List users (ID, countries, keywords)\n"
-        "• `/grant <user_id> <days>` – Give license for N days\n"
-        "• `/extend <user_id> <days>` – Extend license by N days\n"
-        "• `/revoke <user_id>` – Revoke license (set expired)\n"
-        "• `/reply <user_id> <text>` – Send a reply to a user\n"
+        "• `/adminstats` – Bot statistics\n"
+        "• `/adminusers` – List users\n"
+        "• `/grant <user_id> <days>` – Give license\n"
+        "• `/extend <user_id> <days>` – Extend license\n"
+        "• `/revoke <user_id>` – Revoke license\n"
+        "• `/reply <user_id> <text>` – Reply to a user\n"
         "• `/whoami` – Show your Telegram ID\n"
     )
     await update.effective_message.reply_text(txt, parse_mode="Markdown")
@@ -233,7 +236,8 @@ async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["👥 *Registered Users*:"]
         for u in users:
             lines.append(
-                f"• {u.telegram_id} | Active: {'✅' if user_is_active(u) else '❌'} | Trial: {getattr(u,'trial_until',None)} | Access: {getattr(u,'access_until',None)} | KW: {len(u.keywords)}"
+                f"• {u.telegram_id} | Active: {'✅' if user_is_active(u) else '❌'} | "
+                f"Trial: {getattr(u,'trial_until',None)} | Access: {getattr(u,'access_until',None)} | KW: {len(u.keywords)}"
             )
         await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
     finally:
@@ -330,7 +334,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu:contact":
         await q.message.reply_text("📨 Send a message with `/contact <your message>` and the admin will reply here.")
 
-# ------------ User settings / misc ------------
+# ------------ Settings & misc ------------
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
@@ -348,7 +352,6 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ------------ Keywords & countries ------------
 async def setcountry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -436,26 +439,15 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ------------ Platforms ------------
 async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cc = (context.args[0].upper() if context.args else "GLOBAL")
     platforms = PLATFORM_COUNTRY_MAP.get(cc) or PLATFORM_COUNTRY_MAP["GLOBAL"]
     lines = [f"🌍 *Platforms for {cc}*"] + [f"• {p}" for p in platforms]
     await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ------------ PTB lifecycle ------------
-async def _post_init(app: Application):
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Webhook deleted via post_init.")
-
-# ------------ Main ------------
-def main():
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .post_init(_post_init)
-        .build()
-    )
+# ------------ Build Application ------------
+def build_application() -> Application:
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # User
     app.add_handler(CommandHandler("start", start_cmd))
@@ -488,7 +480,4 @@ def main():
     app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(confirm_cb, pattern=r"^conf:(clear_kws|cancel)$"))
 
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
+    return app
