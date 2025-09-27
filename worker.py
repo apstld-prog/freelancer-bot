@@ -13,43 +13,55 @@ from db import SessionLocal, User, Keyword, JobSent, JobFingerprint
 
 # -------------------- Config --------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-AFFILIATE_PREFIX = os.getenv("AFFILIATE_PREFIX", "https://affiliate-network.com/?url=")
-FETCH_INTERVAL_SEC = int(os.getenv("FETCH_INTERVAL_SEC", "60"))
-
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN is not set.")
 
+# Global fallback affiliate prefix (used if no per-source template is set)
+AFFILIATE_PREFIX = os.getenv("AFFILIATE_PREFIX", "")
+
+# Per-source affiliate templates (if set, they override AFFILIATE_PREFIX for that source)
+# Use {url} placeholder. Examples:
+# FIVERR_AFF_TEMPLATE="https://go.fiverr.com/visit/?bta=XXXX&brand=fiverrcpa&landingPage={url}"
+# FREELANCER_AFF_TEMPLATE="https://track.freelancer.com/c/XXXX/?url={url}"
+FIVERR_AFF_TEMPLATE = os.getenv("FIVERR_AFF_TEMPLATE", "")
+FREELANCER_AFF_TEMPLATE = os.getenv("FREELANCER_AFF_TEMPLATE", "")
+
+# Fetch interval (seconds)
+FETCH_INTERVAL_SEC = int(os.getenv("FETCH_INTERVAL_SEC", "90"))
+
+# Telegram bot
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [worker] %(levelname)s: %(message)s")
 logger = logging.getLogger("freelancer-worker")
 bot = Bot(BOT_TOKEN)
 
-# --- ENV feeds (comma-separated URLs) ---
-# International
+# -------------------- Feed URLs (ENV) --------------------
+# Put comma-separated URLs in the env for each source. Leave empty to skip a source.
 FREELANCER_RSS_URLS = [u.strip() for u in os.getenv("FREELANCER_RSS_URLS", "").split(",") if u.strip()]
 PPH_RSS_URLS         = [u.strip() for u in os.getenv("PPH_RSS_URLS", "").split(",") if u.strip()]
 MALT_RSS_URLS        = [u.strip() for u in os.getenv("MALT_RSS_URLS", "").split(",") if u.strip()]
 WORKANA_JSON_URLS    = [u.strip() for u in os.getenv("WORKANA_JSON_URLS", "").split(",") if u.strip()]
 
-# Greece
 JOBFIND_RSS_URLS     = [u.strip() for u in os.getenv("JOBFIND_RSS_URLS", "").split(",") if u.strip()]
 SKYWALKER_RSS_URLS   = [u.strip() for u in os.getenv("SKYWALKER_RSS_URLS", "").split(",") if u.strip()]
 KARIERA_RSS_URLS     = [u.strip() for u in os.getenv("KARIERA_RSS_URLS", "").split(",") if u.strip()]
 
-# --- Source priority (affiliate first, then rank) ---
+# -------------------- Source metadata --------------------
+# (has_affiliate, priority_rank) -> lower rank = preferred when dedup
 SOURCE_PRIORITY = {
-    # source: (has_affiliate, rank)
-    "freelancer":     (True,  1),
-    "peopleperhour":  (True,  2),
-    "malt":           (False, 3),
-    "workana":        (False, 4),
-    "jobfind":        (False, 5),
-    "skywalker":      (False, 6),
-    "kariera":        (False, 7),
+    "freelancer":     (bool(FREELANCER_AFF_TEMPLATE), 1),
+    "fiverr":         (bool(FIVERR_AFF_TEMPLATE),     1),
+    "peopleperhour":  (False,                         2),
+    "malt":           (False,                         3),
+    "workana":        (False,                         4),
+    "jobfind":        (False,                         5),
+    "skywalker":      (False,                         6),
+    "kariera":        (False,                         7),
 }
 
-# --- Source -> region (used by secondary country filter) ---
+# Platform region hint (used by country filtering when the feed doesn't provide one)
 SOURCE_REGION = {
     "freelancer": "GLOBAL",
+    "fiverr": "GLOBAL",
     "peopleperhour": "UK",
     "malt": "FR",
     "workana": "ES",
@@ -62,9 +74,6 @@ SOURCE_REGION = {
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
-def affiliate_wrap(url: str) -> str:
-    return f"{AFFILIATE_PREFIX}{url}" if AFFILIATE_PREFIX else url
-
 def normalize_text(s: str) -> str:
     return " ".join((s or "").lower().split())
 
@@ -73,7 +82,7 @@ def make_fingerprint(title: str, description: str) -> str:
     return hashlib.sha256(base.encode("utf-8")).hexdigest()[:40]
 
 def user_is_active(u: User) -> bool:
-    # access check (trial or license and not blocked)
+    # Admin bypass done in bot side; here we just check DB fields
     if getattr(u, "is_blocked", False):
         return False
     t = now_utc()
@@ -83,10 +92,19 @@ def user_is_active(u: User) -> bool:
         return True
     return False
 
-# ------------- HTTP helpers / adapters -------------
+def affiliate_wrap_by_source(source: str, url: str) -> str:
+    # Specific source templates first
+    if source == "fiverr" and FIVERR_AFF_TEMPLATE:
+        return FIVERR_AFF_TEMPLATE.replace("{url}", url)
+    if source == "freelancer" and FREELANCER_AFF_TEMPLATE:
+        return FREELANCER_AFF_TEMPLATE.replace("{url}", url)
+    # Global fallback
+    return f"{AFFILIATE_PREFIX}{url}" if AFFILIATE_PREFIX else url
+
+# -------------------- HTTP / adapters --------------------
 async def fetch_text(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
             if r.status == 200:
                 return await r.text()
             logger.warning("Non-200 from %s: %s", url, r.status)
@@ -94,7 +112,17 @@ async def fetch_text(session: aiohttp.ClientSession, url: str) -> Optional[str]:
         logger.warning("Error fetching %s: %s", url, e)
     return None
 
-async def fetch_rss_list(session: aiohttp.ClientSession, urls: List[str], source: str, country_hint: str) -> List[Dict]:
+async def fetch_json(session: aiohttp.ClientSession, url: str) -> Optional[dict]:
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
+            if r.status == 200:
+                return await r.json()
+            logger.warning("Non-200 JSON from %s: %s", url, r.status)
+    except Exception as e:
+        logger.warning("Error fetching JSON %s: %s", url, e)
+    return None
+
+async def rss_to_jobs(session: aiohttp.ClientSession, urls: List[str], source: str, country_hint: str) -> List[Dict]:
     out: List[Dict] = []
     for url in urls:
         text = await fetch_text(session, url)
@@ -108,34 +136,34 @@ async def fetch_rss_list(session: aiohttp.ClientSession, urls: List[str], source
             if not title or not link:
                 continue
             # Try to pull a country tag if exists; else use hint
-            country = (e.get("tags", [{}])[0].get("term") if e.get("tags") else None) or country_hint
+            country = None
+            if e.get("tags"):
+                # take first tag term if any
+                try:
+                    country = e["tags"][0].get("term")
+                except Exception:
+                    country = None
             out.append({
                 "source": source,
                 "id": e.get("id") or link,
                 "title": title,
                 "url": link,
                 "description": desc,
-                "country": country or "GLOBAL",
+                "country": (country or country_hint or "GLOBAL"),
             })
     return out
 
-async def fetch_json_list(session: aiohttp.ClientSession, urls: List[str], source: str, country_hint: str) -> List[Dict]:
+async def json_to_jobs(session: aiohttp.ClientSession, urls: List[str], source: str, country_hint: str) -> List[Dict]:
     out: List[Dict] = []
     for url in urls:
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
-                if r.status != 200:
-                    logger.warning("Non-200 JSON from %s: %s", url, r.status); continue
-                data = await r.json()
-        except Exception as e:
-            logger.warning("Error fetching JSON %s: %s", url, e); continue
-
+        data = await fetch_json(session, url)
+        if not data:
+            continue
         items = data if isinstance(data, list) else data.get("items") or data.get("results") or []
         for it in items:
             title = (it.get("title") or it.get("name") or "").strip()
             link = (it.get("url") or it.get("link") or "").strip()
             desc = (it.get("description") or it.get("summary") or "")
-            country = (it.get("country") or it.get("locale") or country_hint) or "GLOBAL"
             if not title or not link:
                 continue
             out.append({
@@ -144,52 +172,42 @@ async def fetch_json_list(session: aiohttp.ClientSession, urls: List[str], sourc
                 "title": title,
                 "url": link,
                 "description": desc,
-                "country": country,
+                "country": (it.get("country") or it.get("locale") or country_hint or "GLOBAL"),
             })
     return out
 
-# --- source specific ---
-async def fetch_from_freelancer(session) -> List[Dict]:
-    if not FREELANCER_RSS_URLS:
-        return []
-    return await fetch_rss_list(session, FREELANCER_RSS_URLS, "freelancer", "GLOBAL")
+# ----- Per source fetchers -----
+async def fetch_from_freelancer(session):  # RSS
+    return await rss_to_jobs(session, FREELANCER_RSS_URLS, "freelancer", "GLOBAL") if FREELANCER_RSS_URLS else []
 
-async def fetch_from_pph(session) -> List[Dict]:
-    if not PPH_RSS_URLS:
-        return []
-    return await fetch_rss_list(session, PPH_RSS_URLS, "peopleperhour", "UK")
+async def fetch_from_fiverr(session):  # RSS/JSON – συνήθως δεν παρέχει public feed, άφησέ το κενό αν δεν έχεις URL
+    urls = [u.strip() for u in os.getenv("FIVERR_RSS_URLS", "").split(",") if u.strip()]
+    return await rss_to_jobs(session, urls, "fiverr", "GLOBAL") if urls else []
 
-async def fetch_from_malt(session) -> List[Dict]:
-    if not MALT_RSS_URLS:
-        return []
-    return await fetch_rss_list(session, MALT_RSS_URLS, "malt", "FR")
+async def fetch_from_pph(session):
+    return await rss_to_jobs(session, PPH_RSS_URLS, "peopleperhour", "UK") if PPH_RSS_URLS else []
 
-async def fetch_from_workana(session) -> List[Dict]:
-    if not WORKANA_JSON_URLS:
-        return []
-    return await fetch_json_list(session, WORKANA_JSON_URLS, "workana", "ES")
+async def fetch_from_malt(session):
+    return await rss_to_jobs(session, MALT_RSS_URLS, "malt", "FR") if MALT_RSS_URLS else []
 
-# Greece
-async def fetch_from_jobfind(session) -> List[Dict]:
-    if not JOBFIND_RSS_URLS:
-        return []
-    return await fetch_rss_list(session, JOBFIND_RSS_URLS, "jobfind", "GR")
+async def fetch_from_workana(session):
+    return await json_to_jobs(session, WORKANA_JSON_URLS, "workana", "ES") if WORKANA_JSON_URLS else []
 
-async def fetch_from_skywalker(session) -> List[Dict]:
-    if not SKYWALKER_RSS_URLS:
-        return []
-    return await fetch_rss_list(session, SKYWALKER_RSS_URLS, "skywalker", "GR")
+async def fetch_from_jobfind(session):
+    return await rss_to_jobs(session, JOBFIND_RSS_URLS, "jobfind", "GR") if JOBFIND_RSS_URLS else []
 
-async def fetch_from_kariera(session) -> List[Dict]:
-    if not KARIERA_RSS_URLS:
-        return []
-    return await fetch_rss_list(session, KARIERA_RSS_URLS, "kariera", "GR")
+async def fetch_from_skywalker(session):
+    return await rss_to_jobs(session, SKYWALKER_RSS_URLS, "skywalker", "GR") if SKYWALKER_RSS_URLS else []
 
-# ------------- Aggregator -------------
+async def fetch_from_kariera(session):
+    return await rss_to_jobs(session, KARIERA_RSS_URLS, "kariera", "GR") if KARIERA_RSS_URLS else []
+
+# -------------------- Aggregator --------------------
 async def fetch_jobs() -> List[Dict]:
     async with aiohttp.ClientSession() as session:
         results = await asyncio.gather(
             fetch_from_freelancer(session),
+            fetch_from_fiverr(session),
             fetch_from_pph(session),
             fetch_from_malt(session),
             fetch_from_workana(session),
@@ -201,14 +219,15 @@ async def fetch_jobs() -> List[Dict]:
     jobs: List[Dict] = []
     for lst in results:
         jobs.extend(lst)
+    logger.info("Fetched %d jobs from all sources.", len(jobs))
     return jobs
 
-# ------------- Canonical / dedup -------------
+# -------------------- Canonical selection / dedup --------------------
 def choose_canonical(existing_row: JobFingerprint, candidate: Dict) -> Optional[Dict]:
     cand_src = candidate["source"]
     cand_aff, cand_rank = SOURCE_PRIORITY.get(cand_src, (False, 99))
     ex_aff, ex_rank = SOURCE_PRIORITY.get(existing_row.source, (existing_row.has_affiliate, 99))
-    # Prefer affiliate, then lower rank (higher priority)
+    # Prefer affiliate, then lower rank
     if cand_aff and not ex_aff:
         return candidate
     if (cand_aff == ex_aff) and (cand_rank < ex_rank):
@@ -216,71 +235,58 @@ def choose_canonical(existing_row: JobFingerprint, candidate: Dict) -> Optional[
     return None
 
 def match_job_to_user(job: Dict, user: User, keywords: List[Keyword]) -> bool:
-    # primary: by keywords
+    # keyword match
     text = normalize_text(job.get("title", "") + " " + job.get("description", ""))
-    if not any(kw.keyword.lower() in text for kw in keywords):
+    if keywords and not any(kw.keyword.lower() in text for kw in keywords):
         return False
     # country filter (accept job.country OR platform region)
     if user.countries and user.countries != "ALL":
         allowed = {c.strip().upper() for c in (user.countries or "").split(",")}
         job_cc = (job.get("country") or "GLOBAL").upper()
-        src_cc = SOURCE_REGION.get(job.get("source",""), "GLOBAL").upper()
+        src_cc = SOURCE_REGION.get(job.get("source", ""), "GLOBAL").upper()
         if job_cc not in allowed and src_cc not in allowed:
             return False
     return True
 
-# ------------- Notifications (expiry) -------------
-
+# -------------------- Expiry notifications --------------------
 def _notify_key(user_id: int, tag: str, day: datetime) -> str:
-    # e.g. NOTIFY-EXPIRING-2025-09-27 or NOTIFY-EXPIRED-2025-09-27
     return f"NOTIFY-{tag}-{day.strftime('%Y-%m-%d')}-USR-{user_id}"
 
 async def maybe_notify_expiry(user: User):
-    """
-    Στέλνει ειδοποίηση λήξης/επικείμενης λήξης μία φορά την ημέρα,
-    χρησιμοποιώντας το JobSent ως μηχανισμό dedup (job_id unique).
-    """
     db = SessionLocal()
     try:
         today = now_utc().date()
-        # Υπολόγισε το πλησιέστερο expiry (trial ή license)
         expiries = [dt for dt in [getattr(user, "access_until", None), getattr(user, "trial_until", None)] if dt]
         target = min(expiries) if expiries else None
         if not target:
             return
-
         remaining = (target - now_utc()).total_seconds()
-        # expiring soon (<=24h and >0)
+
+        # expiring soon: within 24h
         if 0 < remaining <= 24 * 3600:
             key = _notify_key(user.id, "EXPIRING", datetime(today.year, today.month, today.day, tzinfo=timezone.utc))
-            # αν έχει σταλεί σήμερα, μην το ξαναστείλεις
             if not db.query(JobSent).filter_by(user_id=user.id, job_id=key).first():
-                txt = (
-                    "⏳ *Your access expires soon (≤ 24h).* \n"
-                    "If you need more time, send `/contact I need more access`."
-                )
+                txt = ("⏳ *Your access expires soon (≤ 24h).* \n"
+                       "Use `/contact I need more access` to reach the admin.")
                 await bot.send_message(chat_id=user.telegram_id, text=txt, parse_mode="Markdown")
                 db.add(JobSent(user_id=user.id, job_id=key)); db.commit()
             return
 
-        # expired (<=0)
+        # already expired
         if remaining <= 0:
             key = _notify_key(user.id, "EXPIRED", datetime(today.year, today.month, today.day, tzinfo=timezone.utc))
             if not db.query(JobSent).filter_by(user_id=user.id, job_id=key).first():
-                txt = (
-                    "🔒 *Your access has expired.*\n"
-                    "Use `/status` to see details or `/contact I need access` to reach the admin."
-                )
+                txt = ("🔒 *Your access has expired.*\n"
+                       "Send `/contact I need access` to request more time.")
                 await bot.send_message(chat_id=user.telegram_id, text=txt, parse_mode="Markdown")
                 db.add(JobSent(user_id=user.id, job_id=key)); db.commit()
     finally:
         db.close()
 
-# ------------- Sending jobs -------------
+# -------------------- Delivery --------------------
 async def send_job(user: User, job: Dict, canonical_url: str, fingerprint: str):
-    # Only send if user has active trial/license
+    # Only deliver to active users; still send expiry reminders to inactive
     if not user_is_active(user):
-        # Αλλά στείλε πιθανή ειδοποίηση λήξης/λήξης
         await maybe_notify_expiry(user)
         return
 
@@ -289,7 +295,8 @@ async def send_job(user: User, job: Dict, canonical_url: str, fingerprint: str):
         if db.query(JobSent).filter_by(user_id=user.id, job_id=fingerprint).first():
             return
 
-        aff_url = affiliate_wrap(canonical_url)
+        source = job.get("source", "")
+        aff_url = affiliate_wrap_by_source(source, canonical_url)
 
         buttons = [
             [InlineKeyboardButton("⭐ Save", callback_data=f"save:{fingerprint}"),
@@ -305,15 +312,18 @@ async def send_job(user: User, job: Dict, canonical_url: str, fingerprint: str):
 
         text = f"💼 *{job['title']}*\n\n{desc}\n\n🔗 [View Job]({aff_url})"
         await bot.send_message(
-            chat_id=user.telegram_id, text=text, reply_markup=keyboard,
-            parse_mode="Markdown", disable_web_page_preview=True,
+            chat_id=user.telegram_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
         )
 
         db.add(JobSent(user_id=user.id, job_id=fingerprint)); db.commit()
     finally:
         db.close()
 
-# ------------- Processing -------------
+# -------------------- Main processing --------------------
 async def process_jobs():
     jobs = await fetch_jobs()
     if not jobs:
@@ -321,11 +331,11 @@ async def process_jobs():
 
     db = SessionLocal()
     try:
-        # Update/insert canonical per fingerprint
+        # Upsert fingerprints -> choose canonical link by priority/affiliate
         for job in jobs:
-            fp = make_fingerprint(job.get("title",""), job.get("description",""))
-            url = job.get("url","")
-            src = job.get("source","unknown")
+            fp = make_fingerprint(job.get("title", ""), job.get("description", ""))
+            url = job.get("url", "")
+            src = job.get("source", "unknown")
             has_aff = SOURCE_PRIORITY.get(src, (False, 99))[0]
 
             row = db.query(JobFingerprint).filter_by(fingerprint=fp).first()
@@ -344,15 +354,17 @@ async def process_jobs():
                 if better:
                     row.canonical_url = better["url"]
                     row.source = better["source"]
-                    row.has_affiliate = SOURCE_PRIORITY.get(row.source, (False,99))[0]
+                    row.has_affiliate = SOURCE_PRIORITY.get(row.source, (False, 99))[0]
                     row.title = better.get("title", row.title)
                     row.country = better.get("country", row.country)
                     db.commit()
 
-        # Deliver to users based on canonical entries
         users = db.query(User).all()
-        for row in db.query(JobFingerprint).all():
-            # Find one representative job with same fingerprint (for text/desc)
+        fps = db.query(JobFingerprint).all()
+
+        # Deliver jobs
+        for row in fps:
+            # reconstruct a representative job object for text/desc
             original = next(
                 (j for j in jobs if make_fingerprint(j.get("title",""), j.get("description","")) == row.fingerprint),
                 None
@@ -361,24 +373,24 @@ async def process_jobs():
                 continue
             for user in users:
                 kws = db.query(Keyword).filter_by(user_id=user.id).all()
-                if kws and match_job_to_user(original, user, kws):
+                if match_job_to_user(original, user, kws):
                     await send_job(user, original, row.canonical_url, row.fingerprint)
 
-        # Additionally, check expiry notifications for all users (once per loop)
+        # Check expiry notifications for inactive users once per loop
         for user in users:
             if not user_is_active(user):
                 await maybe_notify_expiry(user)
     finally:
         db.close()
 
-# ------------- Loop -------------
+# -------------------- Loop --------------------
 async def worker_loop():
     logger.info("Worker loop running every %ss", FETCH_INTERVAL_SEC)
     while True:
         try:
             await process_jobs()
         except Exception as e:
-            logger.exception(f"Error in worker loop: {e}")
+            logger.exception("Error in worker loop: %s", e)
         await asyncio.sleep(FETCH_INTERVAL_SEC)
 
 def main():
