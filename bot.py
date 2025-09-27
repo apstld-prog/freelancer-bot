@@ -11,7 +11,7 @@ from telegram.ext import (
     ApplicationBuilder, Application, CommandHandler, CallbackQueryHandler, ContextTypes
 )
 
-from db import SessionLocal, User, Keyword, JobSaved, JobDismissed, JobSent, AppLock
+from db import SessionLocal, User, Keyword, JobSaved, JobDismissed, JobSent
 
 # ------------ Config ------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -93,16 +93,18 @@ async def ensure_user(db, telegram_id: int) -> User:
         db.add(row); db.commit(); db.refresh(row)
     return row
 
-def user_is_active(u: User) -> (bool, Optional[str]):
-    """Returns (is_active, reason)."""
+def user_is_active(u: User) -> bool:
     t = now_utc()
-    if u.is_blocked:
-        return False, "blocked"
-    if u.access_until and u.access_until >= t:
-        return True, None
-    if u.trial_until and u.trial_until >= t:
-        return True, None
-    return False, "expired"
+    access_until = getattr(u, "access_until", None)
+    trial_until = getattr(u, "trial_until", None)
+    is_blocked = getattr(u, "is_blocked", False)
+    if is_blocked:
+        return False
+    if access_until and access_until >= t:
+        return True
+    if trial_until and trial_until >= t:
+        return True
+    return False
 
 def human_left(dt: Optional[datetime]) -> str:
     if not dt:
@@ -128,17 +130,17 @@ def main_menu_markup() -> InlineKeyboardMarkup:
         ]
     )
 
-# ------------ Commands (user) ------------
+# ------------ User commands ------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         user = await ensure_user(db, update.effective_user.id)
-        if not user.started_at:
+        if not getattr(user, "started_at", None):
             user.started_at = now_utc()
             user.trial_until = user.started_at + timedelta(days=TRIAL_DAYS)
             db.commit()
         await update.effective_message.reply_text(
-            WELCOME + f"\n\n⏳ *Trial ends:* `{user.trial_until}` (UTC)",
+            WELCOME + f"\n\n⏳ *Trial ends:* `{getattr(user, 'trial_until', None)}` (UTC)",
             reply_markup=main_menu_markup(), parse_mode="Markdown"
         )
     finally:
@@ -151,21 +153,19 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         u = await ensure_user(db, update.effective_user.id)
-        active, reason = user_is_active(u)
         txt = (
             "🧾 *Your Access Status*\n\n"
-            f"• Trial until: `{u.trial_until}` (left: {human_left(u.trial_until)})\n"
-            f"• License until: `{u.access_until}` (left: {human_left(u.access_until)})\n"
-            f"• Active: {'✅' if active else '❌'}"
+            f"• Trial until: `{getattr(u, 'trial_until', None)}` (left: {human_left(getattr(u, 'trial_until', None))})\n"
+            f"• License until: `{getattr(u, 'access_until', None)}` (left: {human_left(getattr(u, 'access_until', None))})\n"
+            f"• Active: {'✅' if user_is_active(u) else '❌'}"
         )
-        if not active:
+        if not user_is_active(u):
             txt += "\n\n📨 Use `/contact I need access` to reach the admin."
         await update.effective_message.reply_text(txt, parse_mode="Markdown")
     finally:
         db.close()
 
 async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User sends a message that is forwarded to the admin."""
     if not ADMIN_ID:
         return await update.effective_message.reply_text("Admin is not configured.")
     msg = " ".join(context.args).strip()
@@ -232,9 +232,8 @@ async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users = db.query(User).all()
         lines = ["👥 *Registered Users*:"]
         for u in users:
-            active, _ = user_is_active(u)
             lines.append(
-                f"• {u.telegram_id} | Active: {'✅' if active else '❌'} | Trial: {u.trial_until} | Access: {u.access_until} | KW: {len(u.keywords)}"
+                f"• {u.telegram_id} | Active: {'✅' if user_is_active(u) else '❌'} | Trial: {getattr(u,'trial_until',None)} | Access: {getattr(u,'access_until',None)} | KW: {len(u.keywords)}"
             )
         await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
     finally:
@@ -267,7 +266,8 @@ async def extend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         u = db.query(User).filter_by(telegram_id=uid).first()
         if not u: return await update.effective_message.reply_text("User not found.")
-        base = u.access_until if u.access_until and u.access_until > now_utc() else now_utc()
+        base = getattr(u, "access_until", None)
+        base = base if base and base > now_utc() else now_utc()
         u.access_until = base + timedelta(days=days)
         db.commit()
         await update.effective_message.reply_text(f"🔁 Extended access for {uid} until {u.access_until} (UTC).")
@@ -330,20 +330,19 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu:contact":
         await q.message.reply_text("📨 Send a message with `/contact <your message>` and the admin will reply here.")
 
-# ------------ User settings commands ------------
+# ------------ User settings / misc ------------
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         user = await ensure_user(db, update.effective_user.id)
         kws = list_keywords(db, user.id)
-        active, _ = user_is_active(user)
         txt = "🛠 *Your Settings*\n\n"
         txt += f"• Keywords: {', '.join(kws) if kws else '(none)'}\n"
         txt += f"• Countries: {user.countries or 'ALL'}\n"
         txt += f"• Proposal template: {(user.proposal_template or '(none)')}\n\n"
-        txt += f"🎁 Trial until: `{user.trial_until}` (left: {human_left(user.trial_until)})\n"
-        txt += f"🔑 License until: `{user.access_until}` (left: {human_left(user.access_until)})\n"
-        txt += f"• Active: {'✅' if active else '❌'}\n\n"
+        txt += f"🎁 Trial until: `{getattr(user,'trial_until',None)}` (left: {human_left(getattr(user,'trial_until',None))})\n"
+        txt += f"🔑 License until: `{getattr(user,'access_until',None)}` (left: {human_left(getattr(user,'access_until',None))})\n"
+        txt += f"• Active: {'✅' if user_is_active(user) else '❌'}\n\n"
         txt += "📡 *Platforms monitored:*\n" + "\n".join(PLATFORM_LIST)
         await update.effective_message.reply_text(txt, parse_mode="Markdown")
     finally:
@@ -474,10 +473,6 @@ def main():
     app.add_handler(CommandHandler("listkeywords", keywords_cmd))
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
-
-    # Job actions (manual)
-    app.add_handler(CommandHandler("savejob", lambda u, c: u.effective_message.reply_text("Use inline buttons in job posts.")))
-    app.add_handler(CommandHandler("dismissjob", lambda u, c: u.effective_message.reply_text("Use inline buttons in job posts.")))
 
     # Admin
     app.add_handler(CommandHandler("adminhelp", adminhelp_cmd))
