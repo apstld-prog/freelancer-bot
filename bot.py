@@ -43,9 +43,22 @@ PLATFORM_COUNTRY_MAP: Dict[str, List[str]] = {
 
 WELCOME = (
     "👋 *Welcome to Freelancer Alerts Bot!*\n\n"
-    f"🎁 *Free trial {TRIAL_DAYS} days* from the moment you press /start.\n"
+    f"🎁 *Free trial {TRIAL_DAYS} days* — all features enabled.\n"
     "After the trial you can request more access from the admin.\n\n"
     "👉 Use the menu below or commands to configure your settings."
+)
+
+FEATURES_TEXT = (
+    "✨ *What you get*\n\n"
+    "• 🤖 *AI Proposal Draft* — auto-generates a tailored proposal from your template.\n"
+    "• 🎯 *Match Score* — quick % relevance based on your keywords.\n"
+    "• ⏱ *Priority Alerts* — earlier alerts for premium users.\n"
+    "• 🗞 *Daily Digest* — morning summary of the most relevant jobs.\n"
+    "• 🗺 *Opportunities Map* — stats by country/region.\n"
+    "• 🕵️ *Competition Insight* — proposals so far / budget where available.\n"
+    "• 🚀 *Auto-Bid Mode* — optional auto-submit using your template.\n\n"
+    f"🆓 All features are included in your *{TRIAL_DAYS}-day trial* from /start.\n"
+    "Need more time? Use `/contact I need more access`."
 )
 
 HELP_BASE = (
@@ -62,7 +75,8 @@ HELP_BASE = (
     "ℹ️ `/status` to see your trial/license status.\n"
     "📨 `/contact <message>` to reach the admin.\n"
     "🧪 `/selftest` for a test job.\n"
-    "🌍 `/platforms [CC]` to see platforms by country (e.g. `/platforms GR`).\n\n"
+    "🌍 `/platforms [CC]` to see platforms by country (e.g. `/platforms GR`).\n"
+    "✨ `/features` to see everything included.\n\n"
     "📡 *Platforms currently supported:*\n" + "\n".join(PLATFORM_LIST)
 )
 
@@ -130,6 +144,9 @@ def main_menu_markup() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("📖 Help", callback_data="menu:help"),
+                InlineKeyboardButton("✨ Features", callback_data="menu:features"),
+            ],
+            [
                 InlineKeyboardButton("📨 Contact", callback_data="menu:contact"),
             ],
         ]
@@ -156,12 +173,17 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin(update.effective_user.id):
         text += (
             "\n\n🛡 *Admin quick commands:*\n"
-            "• `/adminhelp` – show all admin commands\n"
-            "• `/adminstats`, `/adminusers`\n"
+            "• `/adminhelp` – all admin commands\n"
+            "• `/adminstats`, `/userscount`, `/adminusers`\n"
             "• `/grant <user_id> <days>`, `/extend <user_id> <days>`, `/revoke <user_id>`\n"
+            "• `/broadcast <text>` – send message to all users\n"
+            "• `/announcefeatures` – send the features announcement\n"
             "• `/reply <user_id> <text>`"
         )
     await update.effective_message.reply_text(text, reply_markup=main_menu_markup(), parse_mode="Markdown")
+
+async def features_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(FEATURES_TEXT, parse_mode="Markdown", reply_markup=main_menu_markup())
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
@@ -192,18 +214,21 @@ async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("✅ Message sent to admin. You will receive a reply here.")
 
 # ------------ Admin commands ------------
+def ensure_admin(update: Update) -> bool:
+    return is_admin(update.effective_user.id)
+
 async def adminhelp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
+    if not ensure_admin(update): return
     txt = (
         "🛡 *Admin Commands*\n\n"
-        "• `/adminstats` – Bot statistics (users, keywords, jobs sent/saved/dismissed)\n"
-        "• `/adminusers` – List users (ID, countries, keywords)\n"
-        "• `/grant <user_id> <days>` – Give license for N days\n"
-        "• `/extend <user_id> <days>` – Extend license by N days\n"
-        "• `/revoke <user_id>` – Revoke license (set expired)\n"
-        "• `/reply <user_id> <text>` – Send a reply to a user\n"
-        "• `/whoami` – Show your Telegram ID"
+        "• `/adminstats` – stats (users, keywords, jobs sent/saved/dismissed)\n"
+        "• `/userscount` – total users\n"
+        "• `/adminusers` – list users\n"
+        "• `/grant <user_id> <days>`, `/extend <user_id> <days>`, `/revoke <user_id>`\n"
+        "• `/broadcast <text>` – send message to all users\n"
+        "• `/announcefeatures` – send the features announcement\n"
+        "• `/reply <user_id> <text>` – reply to a user\n"
+        "• `/whoami` – show your Telegram ID"
     )
     await update.effective_message.reply_text(txt, parse_mode="Markdown")
 
@@ -220,8 +245,7 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(txt, parse_mode="Markdown")
 
 async def adminstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
+    if not ensure_admin(update): return
     db = SessionLocal()
     try:
         user_count = db.query(User).count()
@@ -241,9 +265,17 @@ async def adminstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
+async def userscount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ensure_admin(update): return
+    db = SessionLocal()
+    try:
+        count = db.query(User).count()
+        await update.effective_message.reply_text(f"👥 *Total users:* {count}", parse_mode="Markdown")
+    finally:
+        db.close()
+
 async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
+    if not ensure_admin(update): return
     db = SessionLocal()
     try:
         users = db.query(User).all()
@@ -258,8 +290,7 @@ async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
+    if not ensure_admin(update): return
     if len(context.args) < 2:
         return await update.effective_message.reply_text("Usage: /grant <user_id> <days>")
     uid = int(context.args[0]); days = int(context.args[1])
@@ -275,8 +306,7 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def extend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
+    if not ensure_admin(update): return
     if len(context.args) < 2:
         return await update.effective_message.reply_text("Usage: /extend <user_id> <days>")
     uid = int(context.args[0]); days = int(context.args[1])
@@ -293,8 +323,7 @@ async def extend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
+    if not ensure_admin(update): return
     if not context.args:
         return await update.effective_message.reply_text("Usage: /revoke <user_id>")
     uid = int(context.args[0])
@@ -310,8 +339,7 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ΜΟΝΟ στον συγκεκριμένο χρήστη (ιδιωτικά)
-    if not is_admin(update.effective_user.id):
-        return
+    if not ensure_admin(update): return
     if len(context.args) < 2:
         return await update.effective_message.reply_text("Usage: /reply <user_id> <text>")
     uid = int(context.args[0])
@@ -319,24 +347,57 @@ async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=uid, text=f"💬 *Admin reply:*\n\n{text}", parse_mode="Markdown")
     await update.effective_message.reply_text("✅ Sent.")
 
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Admin → μαζική ανακοίνωση
+    if not ensure_admin(update): return
+    msg = " ".join(context.args).strip()
+    if not msg:
+        return await update.effective_message.reply_text("Usage: /broadcast <message>")
+    db = SessionLocal()
+    try:
+        users = db.query(User).all()
+        sent = 0
+        for u in users:
+            try:
+                await context.bot.send_message(chat_id=u.telegram_id, text=msg)
+                sent += 1
+            except Exception:
+                pass
+        await update.effective_message.reply_text(f"📣 Broadcast sent to {sent} users.")
+    finally:
+        db.close()
+
+async def announce_features_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ensure_admin(update): return
+    db = SessionLocal()
+    try:
+        users = db.query(User).all()
+        sent = 0
+        for u in users:
+            try:
+                await context.bot.send_message(chat_id=u.telegram_id, text=FEATURES_TEXT, parse_mode="Markdown")
+                sent += 1
+            except Exception:
+                pass
+        await update.effective_message.reply_text(f"✨ Features announcement sent to {sent} users.")
+    finally:
+        db.close()
+
 # ------------ Selftest ------------
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Στέλνει ένα δοκιμαστικό job με affiliate-wrapped link και τα κουμπιά."""
     db = SessionLocal()
     try:
         user = await ensure_user(db, update.effective_user.id)
         kws = list_keywords(db, user.id)
         sample_kw = kws[0] if kws else "sample"
-
         title = f"[TEST] {sample_kw.capitalize()} project needed"
         desc = (
             f"This is a self-test message to verify the bot UI and affiliate links.\n"
-            f"Keyword matched: *{sample_kw}*."
+            f"Keyword matched: *{sample_kw.upper()}*."
         )
         original_url = "https://example.com/job/123456"
         aff_url = affiliate_wrap(original_url)
         fingerprint = f"SELFTEST-{user.telegram_id}-{int(datetime.now().timestamp())}"
-
         buttons = [
             [InlineKeyboardButton("⭐ Save", callback_data=f"save:{fingerprint}"),
              InlineKeyboardButton("🙈 Dismiss", callback_data=f"dismiss:{fingerprint}")],
@@ -344,14 +405,10 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("🔗 Original", url=aff_url)],
         ]
         keyboard = InlineKeyboardMarkup(buttons)
-
         text = f"💼 *{title}*\n\n{desc}\n\n🔗 [View Job]({aff_url})"
         await context.bot.send_message(
-            chat_id=user.telegram_id,
-            text=text,
-            reply_markup=keyboard,
-            parse_mode="Markdown",
-            disable_web_page_preview=True,
+            chat_id=user.telegram_id, text=text, reply_markup=keyboard,
+            parse_mode="Markdown", disable_web_page_preview=True,
         )
     finally:
         db.close()
@@ -383,6 +440,8 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await mysettings_cmd(update, context)
     elif data == "menu:help":
         await help_cmd(update, context)
+    elif data == "menu:features":
+        await features_cmd(update, context)
     elif data == "menu:contact":
         await q.message.reply_text("📨 Send a message with `/contact <your message>` and the admin will reply here.")
 
@@ -399,7 +458,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt += f"🎁 Trial until: `{getattr(user,'trial_until',None)}` (left: {human_left(getattr(user,'trial_until',None))})\n"
         txt += f"🔑 License until: `{getattr(user,'access_until',None)}` (left: {human_left(getattr(user,'access_until',None))})\n"
         txt += f"• Active: {'✅' if user_is_active(user) else '❌'}\n\n"
-        txt += "📡 *Platforms monitored:*\n" + "\n".join(PLATFORM_LIST)
+        txt += "📡 *Platforms monitored:*\n" + "\n".join(PLATFORM_LIST) + "\n\n" + FEATURES_TEXT
         await update.effective_message.reply_text(txt, parse_mode="Markdown")
     finally:
         db.close()
@@ -499,18 +558,19 @@ async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"🌍 *Platforms for {cc}*"] + [f"• {p}" for p in platforms]
     await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ------------ Build Application (for webhook server) ------------
+# ------------ Build Application (webhook server uses this) ------------
 def build_application() -> Application:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # User
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("features", features_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("contact", contact_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("platforms", platforms_cmd))
-    app.add_handler(CommandHandler("selftest", selftest_cmd))  # <-- NEW
+    app.add_handler(CommandHandler("selftest", selftest_cmd))
 
     # Settings/keywords
     app.add_handler(CommandHandler("setcountry", setcountry_cmd))
@@ -524,10 +584,13 @@ def build_application() -> Application:
     # Admin
     app.add_handler(CommandHandler("adminhelp", adminhelp_cmd))
     app.add_handler(CommandHandler("adminstats", adminstats_cmd))
+    app.add_handler(CommandHandler("userscount", userscount_cmd))
     app.add_handler(CommandHandler("adminusers", adminusers_cmd))
     app.add_handler(CommandHandler("grant", grant_cmd))
     app.add_handler(CommandHandler("extend", extend_cmd))
     app.add_handler(CommandHandler("revoke", revoke_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    app.add_handler(CommandHandler("announcefeatures", announce_features_cmd))
     app.add_handler(CommandHandler("reply", reply_cmd))
     app.add_handler(CommandHandler("whoami", whoami_cmd))
 
