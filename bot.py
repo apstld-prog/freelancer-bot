@@ -1,20 +1,18 @@
 import os
 import sys
 import re
-import atexit
-import signal
-import asyncio
 import logging
-import telegram
 from typing import List, Dict
 
+import telegram
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+    ApplicationBuilder, Application, CommandHandler, CallbackQueryHandler, ContextTypes
 )
 
 from db import SessionLocal, User, Keyword, JobSaved, JobDismissed, JobSent, AppLock
 
+# ------------ Config ------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 AFFILIATE_PREFIX = os.getenv("AFFILIATE_PREFIX", "")
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
@@ -23,7 +21,6 @@ if not BOT_TOKEN:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [bot] %(levelname)s: %(message)s")
 logger = logging.getLogger("freelancer-bot")
-logger.info(f"Python runtime: {sys.version}")
 logger.info(f"python-telegram-bot version: {getattr(telegram, '__version__', 'unknown')}")
 
 _SPLIT_RE = re.compile(r"[,\n]+")
@@ -48,7 +45,6 @@ WELCOME = (
     "Get real-time job alerts based on your keywords and country filters.\n\n"
     "👉 Use the menu below or commands to configure your settings."
 )
-
 HELP = (
     "📖 *Help / How it works*\n\n"
     "1️⃣ Add keywords with `/addkeyword python, telegram`\n"
@@ -66,7 +62,7 @@ HELP = (
     "📡 *Platforms currently supported:*\n" + "\n".join(PLATFORM_LIST)
 )
 
-# ---------------- Helpers ----------------
+# ------------ Helpers ------------
 def is_admin(user_id: int) -> bool:
     return ADMIN_ID and user_id == ADMIN_ID
 
@@ -103,7 +99,7 @@ def main_menu_markup() -> InlineKeyboardMarkup:
         ]
     )
 
-# ---------------- Commands ----------------
+# ------------ Commands ------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(WELCOME, reply_markup=main_menu_markup(), parse_mode="Markdown")
 
@@ -151,7 +147,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = await ensure_user(db, update.effective_user.id)
         existing = set(k.lower() for k in list_keywords(db, user.id))
         for kw in new_kws:
-            if kw.lower() in existing:
+            if kw.lower() in existing: 
                 continue
             db.add(Keyword(user_id=user.id, keyword=kw)); added.append(kw)
         db.commit()
@@ -278,11 +274,11 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_message.reply_text(txt, parse_mode="Markdown")
 
-def is_admin_msg(update: Update) -> bool:
+def _is_admin(update: Update) -> bool:
     return is_admin(update.effective_user.id)
 
 async def adminstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_msg(update):
+    if not _is_admin(update):
         return
     db = SessionLocal()
     try:
@@ -304,7 +300,7 @@ async def adminstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_msg(update):
+    if not _is_admin(update):
         return
     db = SessionLocal()
     try:
@@ -317,33 +313,17 @@ async def adminusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    aff = os.getenv("AFFILIATE_PREFIX", "")
-    if not aff:
-        return await update.effective_message.reply_text("⚠️ AFFILIATE_PREFIX is not set.")
-    sample_url = "https://www.freelancer.com/projects/python/telegram-bot-job-TEST"
-    aff_url = f"{aff}{sample_url}"
-    buttons = [
-        [InlineKeyboardButton("⭐ Save", callback_data=f"save:TEST"),
-         InlineKeyboardButton("🙈 Dismiss", callback_data=f"dismiss:TEST")],
-        [InlineKeyboardButton("💼 Proposal", url=aff_url),
-         InlineKeyboardButton("🔗 Original", url=aff_url)],
-    ]
-    keyboard = InlineKeyboardMarkup(buttons)
-    text = "🧪 *Self-Test Job*\n\nThis is a test message to verify buttons and affiliate wrapping.\n\n🔗 [View Job]({})".format(aff_url)
-    await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown", disable_web_page_preview=True)
-
+# --- Platforms ---
 async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cc = (context.args[0].upper() if context.args else "GLOBAL")
     platforms = PLATFORM_COUNTRY_MAP.get(cc) or PLATFORM_COUNTRY_MAP["GLOBAL"]
     lines = [f"🌍 *Platforms for {cc}*"] + [f"• {p}" for p in platforms]
     await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ---------------- Singleton lock + webhook cleanup ----------------
+# ------------ DB singleton lock ------------
 def acquire_polling_lock() -> bool:
     db = SessionLocal()
     try:
-        # καθάρισε παλιές εγγραφές αν θες — εδώ αφήνουμε μία ενεργή
         db.add(AppLock(name="polling"))
         db.commit()
         logger.info("Acquired DB polling lock.")
@@ -368,53 +348,53 @@ def release_polling_lock():
     finally:
         db.close()
 
-def setup_sig_handlers():
-    def _graceful(*_):
-        try:
-            release_polling_lock()
-        finally:
-            os._exit(0)
-    signal.signal(signal.SIGINT, _graceful)
-    signal.signal(signal.SIGTERM, _graceful)
-    atexit.register(release_polling_lock)
+# ------------ PTB lifecycle hooks ------------
+async def _post_init(app: Application):
+    # Διαγράφει webhook μέσα στο event loop του PTB
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhook deleted via post_init.")
 
+# ------------ Main ------------
 def main():
-    # 1) singleton lock (αν αποτύχει -> τερματισμός)
     if not acquire_polling_lock():
         sys.exit(0)
-    setup_sig_handlers()
-
-    # 2) Χτύπα το API & σβήσε οποιοδήποτε webhook για να αποφύγουμε conflicts webhook vs polling
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    asyncio.run(app.bot.delete_webhook(drop_pending_updates=True))
-    logger.info("Deleted webhook (if existed). Starting polling...")
-
-    # 3) Δηλώσεις handlers
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
-    app.add_handler(CommandHandler("version", lambda u, c: u.effective_message.reply_text(
-        f"🧪 Runtime\n• Python: {sys.version.split()[0]}\n• PTB: {getattr(telegram, '__version__', 'unknown')}\n• AFFILIATE_PREFIX set: {'yes' if AFFILIATE_PREFIX else 'no'}"
-    )))
-    app.add_handler(CommandHandler("selftest", selftest_cmd))
-    app.add_handler(CommandHandler("platforms", platforms_cmd))
-    app.add_handler(CommandHandler("setcountry", setcountry_cmd))
-    app.add_handler(CommandHandler("setproposal", setproposal_cmd))
-    app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
-    app.add_handler(CommandHandler("keywords", keywords_cmd))
-    app.add_handler(CommandHandler("listkeywords", keywords_cmd))
-    app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
-    app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
-    app.add_handler(CommandHandler("savejob", savejob_cmd))
-    app.add_handler(CommandHandler("dismissjob", dismissjob_cmd))
-    app.add_handler(CommandHandler("whoami", whoami_cmd))
-    app.add_handler(CommandHandler("adminstats", adminstats_cmd))
-    app.add_handler(CommandHandler("adminusers", adminusers_cmd))
-
-    app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^menu:"))
-    app.add_handler(CallbackQueryHandler(confirm_cb, pattern=r"^conf:(clear_kws|cancel)$"))
 
     try:
+        app = (
+            ApplicationBuilder()
+            .token(BOT_TOKEN)
+            .post_init(_post_init)   # <-- σωστό σημείο για delete_webhook
+            .build()
+        )
+
+        # Core
+        app.add_handler(CommandHandler("start", start_cmd))
+        app.add_handler(CommandHandler("help", help_cmd))
+        app.add_handler(CommandHandler("mysettings", mysettings_cmd))
+        app.add_handler(CommandHandler("platforms", platforms_cmd))
+
+        # Settings & keywords
+        app.add_handler(CommandHandler("setcountry", setcountry_cmd))
+        app.add_handler(CommandHandler("setproposal", setproposal_cmd))
+        app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
+        app.add_handler(CommandHandler("keywords", keywords_cmd))
+        app.add_handler(CommandHandler("listkeywords", keywords_cmd))
+        app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
+        app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
+
+        # Job actions
+        app.add_handler(CommandHandler("savejob", savejob_cmd))
+        app.add_handler(CommandHandler("dismissjob", dismissjob_cmd))
+
+        # Diagnostics & admin
+        app.add_handler(CommandHandler("whoami", whoami_cmd))
+        app.add_handler(CommandHandler("adminstats", adminstats_cmd))
+        app.add_handler(CommandHandler("adminusers", adminusers_cmd))
+
+        # Callbacks
+        app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^menu:"))
+        app.add_handler(CallbackQueryHandler(confirm_cb, pattern=r"^conf:(clear_kws|cancel)$"))
+
         app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
     finally:
         release_polling_lock()
