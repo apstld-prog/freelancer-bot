@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import aiohttp
 import feedparser
@@ -19,12 +20,11 @@ if not BOT_TOKEN:
 # Global fallback affiliate prefix (used if no per-source template is set)
 AFFILIATE_PREFIX = os.getenv("AFFILIATE_PREFIX", "")
 
-# Per-source affiliate templates (if set, they override AFFILIATE_PREFIX for that source)
-# Use {url} placeholder. Examples:
-# FIVERR_AFF_TEMPLATE="https://go.fiverr.com/visit/?bta=XXXX&brand=fiverrcpa&landingPage={url}"
-# FREELANCER_AFF_TEMPLATE="https://track.freelancer.com/c/XXXX/?url={url}"
-FIVERR_AFF_TEMPLATE = os.getenv("FIVERR_AFF_TEMPLATE", "")
-FREELANCER_AFF_TEMPLATE = os.getenv("FREELANCER_AFF_TEMPLATE", "")
+# Fiverr deep-link (χρησιμοποιεί {url})
+FIVERR_AFF_TEMPLATE = os.getenv("FIVERR_AFF_TEMPLATE", "").strip()
+
+# Freelancer referral code (π.χ. apstld) — προστίθεται ως ?f=CODE σε οποιοδήποτε freelancer.com URL
+FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
 
 # Fetch interval (seconds)
 FETCH_INTERVAL_SEC = int(os.getenv("FETCH_INTERVAL_SEC", "90"))
@@ -35,7 +35,6 @@ logger = logging.getLogger("freelancer-worker")
 bot = Bot(BOT_TOKEN)
 
 # -------------------- Feed URLs (ENV) --------------------
-# Put comma-separated URLs in the env for each source. Leave empty to skip a source.
 FREELANCER_RSS_URLS = [u.strip() for u in os.getenv("FREELANCER_RSS_URLS", "").split(",") if u.strip()]
 PPH_RSS_URLS         = [u.strip() for u in os.getenv("PPH_RSS_URLS", "").split(",") if u.strip()]
 MALT_RSS_URLS        = [u.strip() for u in os.getenv("MALT_RSS_URLS", "").split(",") if u.strip()]
@@ -48,14 +47,14 @@ KARIERA_RSS_URLS     = [u.strip() for u in os.getenv("KARIERA_RSS_URLS", "").spl
 # -------------------- Source metadata --------------------
 # (has_affiliate, priority_rank) -> lower rank = preferred when dedup
 SOURCE_PRIORITY = {
-    "freelancer":     (bool(FREELANCER_AFF_TEMPLATE), 1),
-    "fiverr":         (bool(FIVERR_AFF_TEMPLATE),     1),
-    "peopleperhour":  (False,                         2),
-    "malt":           (False,                         3),
-    "workana":        (False,                         4),
-    "jobfind":        (False,                         5),
-    "skywalker":      (False,                         6),
-    "kariera":        (False,                         7),
+    "freelancer":     (bool(FREELANCER_REF_CODE), 1),
+    "fiverr":         (bool(FIVERR_AFF_TEMPLATE), 1),
+    "peopleperhour":  (False,                     2),
+    "malt":           (False,                     3),
+    "workana":        (False,                     4),
+    "jobfind":        (False,                     5),
+    "skywalker":      (False,                     6),
+    "kariera":        (False,                     7),
 }
 
 # Platform region hint (used by country filtering when the feed doesn't provide one)
@@ -82,7 +81,6 @@ def make_fingerprint(title: str, description: str) -> str:
     return hashlib.sha256(base.encode("utf-8")).hexdigest()[:40]
 
 def user_is_active(u: User) -> bool:
-    # Admin bypass done in bot side; here we just check DB fields
     if getattr(u, "is_blocked", False):
         return False
     t = now_utc()
@@ -92,12 +90,28 @@ def user_is_active(u: User) -> bool:
         return True
     return False
 
+def add_query_param(url: str, key: str, value: str) -> str:
+    """Ασφαλής προσθήκη/αντικατάσταση παραμέτρου query σε URL."""
+    try:
+        p = urlparse(url)
+        q = dict(parse_qsl(p.query, keep_blank_values=True))
+        q[key] = value
+        new = p._replace(query=urlencode(q, doseq=True))
+        return urlunparse(new)
+    except Exception:
+        return url
+
 def affiliate_wrap_by_source(source: str, url: str) -> str:
-    # Specific source templates first
+    # Fiverr deep-linking
     if source == "fiverr" and FIVERR_AFF_TEMPLATE:
         return FIVERR_AFF_TEMPLATE.replace("{url}", url)
-    if source == "freelancer" and FREELANCER_AFF_TEMPLATE:
-        return FREELANCER_AFF_TEMPLATE.replace("{url}", url)
+
+    # Freelancer referral param ?f=<code> μόνο για freelancer.com
+    if source == "freelancer" and FREELANCER_REF_CODE:
+        host = urlparse(url).hostname or ""
+        if "freelancer.com" in host:
+            return add_query_param(url, "f", FREELANCER_REF_CODE)
+
     # Global fallback
     return f"{AFFILIATE_PREFIX}{url}" if AFFILIATE_PREFIX else url
 
@@ -135,10 +149,8 @@ async def rss_to_jobs(session: aiohttp.ClientSession, urls: List[str], source: s
             desc = (e.get("summary") or e.get("description") or "").strip()
             if not title or not link:
                 continue
-            # Try to pull a country tag if exists; else use hint
             country = None
             if e.get("tags"):
-                # take first tag term if any
                 try:
                     country = e["tags"][0].get("term")
                 except Exception:
@@ -177,10 +189,10 @@ async def json_to_jobs(session: aiohttp.ClientSession, urls: List[str], source: 
     return out
 
 # ----- Per source fetchers -----
-async def fetch_from_freelancer(session):  # RSS
+async def fetch_from_freelancer(session):
     return await rss_to_jobs(session, FREELANCER_RSS_URLS, "freelancer", "GLOBAL") if FREELANCER_RSS_URLS else []
 
-async def fetch_from_fiverr(session):  # RSS/JSON – συνήθως δεν παρέχει public feed, άφησέ το κενό αν δεν έχεις URL
+async def fetch_from_fiverr(session):
     urls = [u.strip() for u in os.getenv("FIVERR_RSS_URLS", "").split(",") if u.strip()]
     return await rss_to_jobs(session, urls, "fiverr", "GLOBAL") if urls else []
 
@@ -227,7 +239,6 @@ def choose_canonical(existing_row: JobFingerprint, candidate: Dict) -> Optional[
     cand_src = candidate["source"]
     cand_aff, cand_rank = SOURCE_PRIORITY.get(cand_src, (False, 99))
     ex_aff, ex_rank = SOURCE_PRIORITY.get(existing_row.source, (existing_row.has_affiliate, 99))
-    # Prefer affiliate, then lower rank
     if cand_aff and not ex_aff:
         return candidate
     if (cand_aff == ex_aff) and (cand_rank < ex_rank):
@@ -235,11 +246,9 @@ def choose_canonical(existing_row: JobFingerprint, candidate: Dict) -> Optional[
     return None
 
 def match_job_to_user(job: Dict, user: User, keywords: List[Keyword]) -> bool:
-    # keyword match
     text = normalize_text(job.get("title", "") + " " + job.get("description", ""))
     if keywords and not any(kw.keyword.lower() in text for kw in keywords):
         return False
-    # country filter (accept job.country OR platform region)
     if user.countries and user.countries != "ALL":
         allowed = {c.strip().upper() for c in (user.countries or "").split(",")}
         job_cc = (job.get("country") or "GLOBAL").upper()
@@ -261,23 +270,17 @@ async def maybe_notify_expiry(user: User):
         if not target:
             return
         remaining = (target - now_utc()).total_seconds()
-
-        # expiring soon: within 24h
         if 0 < remaining <= 24 * 3600:
             key = _notify_key(user.id, "EXPIRING", datetime(today.year, today.month, today.day, tzinfo=timezone.utc))
             if not db.query(JobSent).filter_by(user_id=user.id, job_id=key).first():
-                txt = ("⏳ *Your access expires soon (≤ 24h).* \n"
-                       "Use `/contact I need more access` to reach the admin.")
+                txt = "⏳ *Your access expires soon (≤ 24h).* \nUse `/contact I need more access` to reach the admin."
                 await bot.send_message(chat_id=user.telegram_id, text=txt, parse_mode="Markdown")
                 db.add(JobSent(user_id=user.id, job_id=key)); db.commit()
             return
-
-        # already expired
         if remaining <= 0:
             key = _notify_key(user.id, "EXPIRED", datetime(today.year, today.month, today.day, tzinfo=timezone.utc))
             if not db.query(JobSent).filter_by(user_id=user.id, job_id=key).first():
-                txt = ("🔒 *Your access has expired.*\n"
-                       "Send `/contact I need access` to request more time.")
+                txt = "🔒 *Your access has expired.*\nSend `/contact I need access` to request more time."
                 await bot.send_message(chat_id=user.telegram_id, text=txt, parse_mode="Markdown")
                 db.add(JobSent(user_id=user.id, job_id=key)); db.commit()
     finally:
@@ -285,7 +288,6 @@ async def maybe_notify_expiry(user: User):
 
 # -------------------- Delivery --------------------
 async def send_job(user: User, job: Dict, canonical_url: str, fingerprint: str):
-    # Only deliver to active users; still send expiry reminders to inactive
     if not user_is_active(user):
         await maybe_notify_expiry(user)
         return
@@ -331,7 +333,6 @@ async def process_jobs():
 
     db = SessionLocal()
     try:
-        # Upsert fingerprints -> choose canonical link by priority/affiliate
         for job in jobs:
             fp = make_fingerprint(job.get("title", ""), job.get("description", ""))
             url = job.get("url", "")
@@ -362,9 +363,7 @@ async def process_jobs():
         users = db.query(User).all()
         fps = db.query(JobFingerprint).all()
 
-        # Deliver jobs
         for row in fps:
-            # reconstruct a representative job object for text/desc
             original = next(
                 (j for j in jobs if make_fingerprint(j.get("title",""), j.get("description","")) == row.fingerprint),
                 None
@@ -376,7 +375,6 @@ async def process_jobs():
                 if match_job_to_user(original, user, kws):
                     await send_job(user, original, row.canonical_url, row.fingerprint)
 
-        # Check expiry notifications for inactive users once per loop
         for user in users:
             if not user_is_active(user):
                 await maybe_notify_expiry(user)
