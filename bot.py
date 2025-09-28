@@ -29,15 +29,39 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
 
-# ------------- Helpers -------------------
-def now_utc():
-    return datetime.now(timezone.utc)
+# ------------- Time helpers (fix naive vs aware) -------------
+UTC = timezone.utc
 
+def now_utc() -> datetime:
+    return datetime.now(UTC)
+
+def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Return UTC-aware datetime (tolerates None and naive)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+def fmt_dt(dt: Optional[datetime]) -> str:
+    dt = to_aware(dt)
+    return dt.strftime("%Y-%m-%d %H:%M:%S %Z") if dt else "None"
+
+def user_active(u: User) -> bool:
+    """A user is active if NOT blocked and has trial or license in the future."""
+    if getattr(u, "is_blocked", False):
+        return False
+    now = now_utc()
+    trial = to_aware(getattr(u, "trial_until", None))
+    lic = to_aware(getattr(u, "access_until", None))
+    return (trial and trial >= now) or (lic and lic >= now)
+
+# ------------- Other helpers -------------------
 def is_admin(update: Update) -> bool:
     return update.effective_user and update.effective_user.id == ADMIN_ID
 
 async def ensure_user(db, tg_id: int) -> User:
-    """Create user if missing. Trial ΔΕΝ ξεκινάει εδώ για να αρχίσει στο /start."""
+    """Create user if missing. Trial starts on /start (όχι εδώ)."""
     u = db.query(User).filter_by(telegram_id=str(tg_id)).first()
     if not u:
         u = User(
@@ -128,14 +152,11 @@ def help_text(is_admin_flag: bool) -> str:
 
 def settings_text(u: User) -> str:
     kws = ", ".join(k.keyword for k in u.keywords) if u.keywords else "(none)"
-    start = u.created_at.strftime("%Y-%m-%d %H:%M:%S %Z") if u.created_at else "—"
-    trial = u.trial_until.strftime("%Y-%m-%d %H:%M:%S %Z") if u.trial_until else "None"
-    lic = u.access_until.strftime("%Y-%m-%d %H:%M:%S %Z") if u.access_until else "None"
-    active = "✅" if (
-        (u.trial_until and u.trial_until >= now_utc()) or
-        (u.access_until and u.access_until >= now_utc())
-    ) and not u.is_blocked else "❌"
-    note = "For extension, contact the admin."
+    start = fmt_dt(getattr(u, "created_at", None))
+    trial = fmt_dt(getattr(u, "trial_until", None))
+    lic = fmt_dt(getattr(u, "access_until", None))
+    active = "✅" if user_active(u) else "❌"
+    blocked = "✅" if getattr(u, "is_blocked", False) else "❌"
     return (
         "🛠 *Your Settings*\n\n"
         f"• Keywords: {kws}\n"
@@ -145,11 +166,11 @@ def settings_text(u: User) -> str:
         f"🎁 Trial ends: {trial}\n"
         f"🔒 License until: {lic}\n"
         f"• Active: {active}\n"
-        f"• Blocked: {'✅' if u.is_blocked else '❌'}\n\n"
+        f"• Blocked: {blocked}\n\n"
         "🛰 *Platforms monitored:*\n"
         "• Global: " + ", ".join(platforms_global()) + "\n"
         "• Greece: " + ", ".join(platforms_gr()) + "\n\n"
-        f"ℹ️ {note}"
+        "ℹ️ For extension, contact the admin."
     )
 
 # ---------------- Commands ----------------
@@ -162,8 +183,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         u = await ensure_user(db, update.effective_user.id)
 
-        # Αν δεν έχει trial_until, ξεκινά τώρα (10 ημέρες)
-        if not u.trial_until:
+        # Start trial on first /start
+        if not getattr(u, "trial_until", None):
             u.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
             db.commit()
 
@@ -403,13 +424,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         users = db.query(User).all()
-        active = 0
-        now = now_utc()
-        for u in users:
-            if u.is_blocked:
-                continue
-            if (u.trial_until and u.trial_until >= now) or (u.access_until and u.access_until >= now):
-                active += 1
+        active = sum(1 for u in users if user_active(u))
         txt = f"👥 Users: {len(users)} (active: {active})"
         await update.message.reply_text(txt)
     finally:
