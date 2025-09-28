@@ -18,8 +18,6 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 from db import SessionLocal, User, Keyword, JobSaved, JobDismissed
@@ -53,22 +51,26 @@ async def ensure_user(db, tg_id: int) -> User:
         db.refresh(u)
     return u
 
-def platforms_by_country(cc: Optional[str]) -> List[str]:
-    cc = (cc or "").upper().strip()
-    global_list = [
+def platforms_global() -> List[str]:
+    return [
         "Freelancer.com",
-        "Fiverr Affiliates (search links)",
+        "Fiverr (affiliate links)",
         "PeoplePerHour (UK)",
         "Malt (FR/EU)",
         "Workana (ES/EU/LatAm)",
         "Upwork",
     ]
-    gr_list = ["JobFind.gr", "Skywalker.gr", "Kariera.gr"]
+
+def platforms_gr() -> List[str]:
+    return ["JobFind.gr", "Skywalker.gr", "Kariera.gr"]
+
+def platforms_by_country(cc: Optional[str]) -> List[str]:
+    cc = (cc or "").upper().strip()
     if not cc or cc == "ALL":
-        return global_list + gr_list
+        return platforms_global() + platforms_gr()
     if cc == "GR":
-        return gr_list
-    return global_list
+        return platforms_gr()
+    return platforms_global()
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -82,11 +84,69 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         ],
     ])
 
+def features_text() -> str:
+    return (
+        "✨ *Features*\n"
+        "• Realtime job alerts (Freelancer API)\n"
+        "• Affiliate-wrapped *Proposal* & *Original* links\n"
+        "• Budget shown + USD conversion\n"
+        "• ⭐ *Keep* / 🗑 *Delete* buttons\n"
+        "• 10-day free trial, extend via admin\n"
+        "• Multi-keyword search (single/all modes)\n"
+        "• Platforms by country (incl. GR boards)\n"
+    )
+
+def help_text() -> str:
+    return (
+        "📖 *Help / How it works*\n\n"
+        "1️⃣ Add keywords with `/addkeyword python telegram` (ή από το μενού)\n"
+        "2️⃣ Set countries με `/setcountry US,UK` *(ή `ALL`)*\n"
+        "3️⃣ Αποθήκευσε proposal με `/setproposal <text>`\n"
+        "   Placeholders: `{jobtitle}`, `{experience}`, `{stack}`, `{budgettime}`, `{portfolio}`, `{name}`\n"
+        "4️⃣ Όταν έρθει αγγελία:\n"
+        "   ⭐ *Keep* — αποθήκευση\n"
+        "   🗑 *Delete* — σβήσιμο & mute της αγγελίας\n"
+        "   💼 *Proposal* — affiliate link προς την αγγελία\n"
+        "   🔗 *Original* — ίδιο affiliate-wrapped link\n\n"
+        "🔎 `/mysettings` για φίλτρα & trial/license\n"
+        "🧪 `/selftest` δοκιμαστικό μήνυμα\n"
+        "🌍 `/platforms CC` (π.χ. `/platforms GR`) για τις πλατφόρμες\n\n"
+        "🧰 *Shortcuts*\n"
+        "• `/keywords` ή `/listkeywords` — λίστα\n"
+        "• `/delkeyword <kw>` — διαγραφή\n"
+        "• `/clearkeywords` — καθαρισμός όλων\n\n"
+        "🛰 *Platforms*\n"
+        "• *Global*: " + ", ".join(platforms_global()) + "\n"
+        "• *Greece*: " + ", ".join(platforms_gr())
+    )
+
+def settings_text(u: User) -> str:
+    kws = ", ".join(k.keyword for k in u.keywords) if u.keywords else "(none)"
+    trial = u.trial_until.strftime("%Y-%m-%d") if u.trial_until else "None"
+    lic = u.access_until.strftime("%Y-%m-%d") if u.access_until else "None"
+    active = "✅" if (
+        (u.trial_until and u.trial_until >= now_utc()) or
+        (u.access_until and u.access_until >= now_utc())
+    ) and not u.is_blocked else "❌"
+    return (
+        "🛠 *Your Settings*\n\n"
+        f"• Keywords: {kws}\n"
+        f"• Countries: {u.countries or 'ALL'}\n"
+        f"• Proposal template: {(u.proposal_template[:40] + '…') if u.proposal_template else '(none)'}\n\n"
+        f"🎁 Trial until: {trial}\n"
+        f"🔒 License until: {lic}\n"
+        f"• Active: {active}\n\n"
+        "🛰 *Platforms monitored:*\n"
+        "• Global: " + ", ".join(platforms_global()) + "\n"
+        "• Greece: " + ", ".join(platforms_gr())
+    )
+
 # ---------------- Commands ----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        user = await ensure_user(db, update.effective_user.id)
+        u = await ensure_user(db, update.effective_user.id)
+        # Welcome card + menu
         await update.message.reply_text(
             "👋 Welcome to Freelancer Alert Bot!\n\n"
             f"🎁 You have a *{TRIAL_DAYS}-day free trial*.\n"
@@ -94,33 +154,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=constants.ParseMode.MARKDOWN,
             reply_markup=main_menu_kb(),
         )
+        # Features card (όπως είχαμε συζητήσει)
+        await update.message.reply_text(features_text(), parse_mode=constants.ParseMode.MARKDOWN)
     finally:
         db.close()
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (
-        "📖 *Help / How it works*\n\n"
-        "1️⃣ Add keywords with `/addkeyword python telegram` (or use the menu)\n"
-        "2️⃣ Set your countries with `/setcountry US,UK` *(or `ALL`)*\n"
-        "3️⃣ Save a proposal template with `/setproposal <text>`\n"
-        "   Placeholders: `{jobtitle}`, `{experience}`, `{stack}`, `{budgettime}`, `{portfolio}`, `{name}`\n"
-        "4️⃣ When a job arrives you can:\n"
-        "   ⭐ *Keep* — save it\n"
-        "   🗑 *Delete* — remove the message & mute that job\n"
-        "   💼 *Proposal* — direct affiliate link to job\n"
-        "   🔗 *Original* — same affiliate-wrapped job link\n\n"
-        "🔎 `/mysettings` to check filters & trial/license\n"
-        "🧪 `/selftest` for a test card\n"
-        "🌍 `/platforms CC` to see platforms per country (e.g. `/platforms GR`)\n\n"
-        "🧰 *User shortcuts*\n"
-        "• `/keywords` or `/listkeywords` — list keywords\n"
-        "• `/delkeyword <kw>` — delete one\n"
-        "• `/clearkeywords` — delete all\n\n"
-        "🧭 *Platforms currently supported*\n"
-        "• *Global Freelancing*: Freelancer.com, PeoplePerHour (UK), Malt (FR/EU), Workana (ES/EU/LatAm), Fiverr Affiliates, Upwork\n"
-        "• *Greek Boards*: JobFind.gr, Skywalker.gr, Kariera.gr"
-    )
-    await update.message.reply_text(txt, parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
+    await update.message.reply_text(help_text(), parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -134,26 +174,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         u = await ensure_user(db, update.effective_user.id)
-        kws = ", ".join(k.keyword for k in u.keywords) if u.keywords else "(none)"
-        trial = u.trial_until.strftime("%Y-%m-%d") if u.trial_until else "None"
-        lic = u.access_until.strftime("%Y-%m-%d") if u.access_until else "None"
-        active = "✅" if (
-            (u.trial_until and u.trial_until >= now_utc()) or
-            (u.access_until and u.access_until >= now_utc())
-        ) and not u.is_blocked else "❌"
-        plats = ", ".join(platforms_by_country("ALL"))
-        txt = (
-            "🛠 *Your Settings*\n\n"
-            f"• Keywords: {kws}\n"
-            f"• Countries: {u.countries or 'ALL'}\n"
-            f"• Proposal template: {(u.proposal_template[:40] + '…') if u.proposal_template else '(none)'}\n\n"
-            f"🎁 Trial until: {trial}\n"
-            f"🔒 License until: {lic}\n"
-            f"• Active: {active}\n\n"
-            "🛰 *Platforms monitored:*\n"
-            f"{plats}"
-        )
-        await update.message.reply_text(txt, parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
+        await update.message.reply_text(settings_text(u), parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
     finally:
         db.close()
 
@@ -255,7 +276,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_id = f"selftest-{kw.lower()}"
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💼 Proposal", url="https://www.freelancer.com") ,
+        [InlineKeyboardButton("💼 Proposal", url="https://www.freelancer.com"),
          InlineKeyboardButton("🔗 Original", url="https://www.freelancer.com")],
         [InlineKeyboardButton("⭐ Keep", callback_data=f"save:{job_id}"),
          InlineKeyboardButton("🗑 Delete", callback_data=f"dismiss:{job_id}")]
@@ -319,7 +340,7 @@ async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=constants.ParseMode.MARKDOWN,
         )
         await update.message.reply_text("✅ Sent to admin. You'll receive a reply here.")
-    except Exception as e:
+    except Exception:
         await update.message.reply_text("Could not deliver your message to admin.")
 
 async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -378,16 +399,19 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data = q.data or ""
-    if data == "menu:addkeywords":
-        await q.message.reply_text("Use /addkeyword <kw1> <kw2> …")
-    elif data == "menu:settings":
-        # call mysettings
-        fake_update = Update(update.update_id, message=q.message)  # not used actually
-        await mysettings_cmd(update, context)  # reuse
-    elif data == "menu:help":
-        await help_cmd(update, context)
-    elif data == "menu:contact":
-        await q.message.reply_text("Send a message to admin: /contact <your message>")
+    db = SessionLocal()
+    try:
+        u = await ensure_user(db, update.effective_user.id)
+        if data == "menu:addkeywords":
+            await q.message.reply_text("Use /addkeyword <kw1> <kw2> …")
+        elif data == "menu:settings":
+            await q.message.reply_text(settings_text(u), parse_mode=constants.ParseMode.MARKDOWN)
+        elif data == "menu:help":
+            await q.message.reply_text(help_text(), parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
+        elif data == "menu:contact":
+            await q.message.reply_text("Send a message to admin: /contact <your message>")
+    finally:
+        db.close()
 
 # ---------------- Build Application ----------------
 def build_application() -> Application:
@@ -429,7 +453,7 @@ def build_application() -> Application:
     return app
 
 
-# Allow running standalone with polling (useful for local dev)
+# Standalone run with polling (for local dev)
 if __name__ == "__main__":
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set.")
