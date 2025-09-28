@@ -9,10 +9,13 @@ import httpx
 from sqlalchemy.orm import joinedload
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, constants
 
-from db import SessionLocal, User, Keyword, JobSent, JobDismissed
+from db import SessionLocal, User, Keyword, JobSent, JobDismissed, ensure_schema
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [worker] %(levelname)s: %(message)s")
 logger = logging.getLogger("worker")
+
+# ---- Ensure DB schema on worker startup (CRUCIAL) ----
+ensure_schema()
 
 # ------------ Env / Config ------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -62,7 +65,7 @@ def user_is_active(u: User) -> bool:
     lic = to_aware(getattr(u, "access_until", None))
     return (trial and trial >= now) or (lic and lic >= now)
 
-# ---------- FX rates (USD base) ----------
+# ---------- FX rates ----------
 _RATES: Dict[str, float] = {}
 _RATES_FETCHED_AT: Optional[datetime] = None
 _RATES_TTL = timedelta(hours=12)
@@ -189,7 +192,6 @@ async def fetch_freelancer(keywords: List[str]) -> List[Dict[str, Any]]:
     if not keywords:
         return []
 
-    # Build queries
     queries = keywords if SEARCH_MODE == "single" else [",".join(keywords)]
     logger.info("Freelancer queries: %s", queries)
 
@@ -314,6 +316,7 @@ async def send_job_to_user(u: User, job: Dict[str, Any]) -> None:
 
 # ---------- Main cycle ----------
 async def worker_cycle():
+    from db import SessionLocal  # ensure fresh session factory
     db = SessionLocal()
     summary_lines = []
     try:
@@ -327,12 +330,10 @@ async def worker_cycle():
             if not active or not kws:
                 continue
 
-            # Fetch from sources
             jobs: List[Dict[str, Any]] = []
             jobs.extend(await fetch_freelancer(kws))
             jobs.extend(await fetch_fiverr(kws))
 
-            # Dedup
             seen = set()
             deduped: List[Dict[str, Any]] = []
             for j in jobs:
@@ -342,7 +343,6 @@ async def worker_cycle():
                 seen.add(jid)
                 deduped.append(j)
 
-            # Already sent / dismissed IDs for this user
             sent_ids = {row.job_id for row in db.query(JobSent).filter_by(user_id=u.id).all()}
             dismissed_ids = {row.job_id for row in db.query(JobDismissed).filter_by(user_id=u.id).all()}
             logger.info("User %s: %d candidates, %d sent, %d dismissed",
