@@ -84,7 +84,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         ],
     ])
 
-def features_text() -> str:
+def features_block() -> str:
     return (
         "✨ *Features*\n"
         "• Realtime job alerts (Freelancer API)\n"
@@ -93,28 +93,28 @@ def features_text() -> str:
         "• ⭐ *Keep* / 🗑 *Delete* buttons\n"
         "• 10-day free trial, extend via admin\n"
         "• Multi-keyword search (single/all modes)\n"
-        "• Platforms by country (incl. GR boards)\n"
+        "• Platforms by country (incl. GR boards)"
     )
 
 def help_text() -> str:
     return (
         "📖 *Help / How it works*\n\n"
-        "1️⃣ Add keywords with `/addkeyword python telegram` (ή από το μενού)\n"
-        "2️⃣ Set countries με `/setcountry US,UK` *(ή `ALL`)*\n"
-        "3️⃣ Αποθήκευσε proposal με `/setproposal <text>`\n"
+        "1️⃣ Add keywords with `/addkeyword python telegram` (or use the menu)\n"
+        "2️⃣ Set countries with `/setcountry US,UK` *(or `ALL`)*\n"
+        "3️⃣ Save a proposal template with `/setproposal <text>`\n"
         "   Placeholders: `{jobtitle}`, `{experience}`, `{stack}`, `{budgettime}`, `{portfolio}`, `{name}`\n"
-        "4️⃣ Όταν έρθει αγγελία:\n"
-        "   ⭐ *Keep* — αποθήκευση\n"
-        "   🗑 *Delete* — σβήσιμο & mute της αγγελίας\n"
-        "   💼 *Proposal* — affiliate link προς την αγγελία\n"
-        "   🔗 *Original* — ίδιο affiliate-wrapped link\n\n"
-        "🔎 `/mysettings` για φίλτρα & trial/license\n"
-        "🧪 `/selftest` δοκιμαστικό μήνυμα\n"
-        "🌍 `/platforms CC` (π.χ. `/platforms GR`) για τις πλατφόρμες\n\n"
+        "4️⃣ When a job arrives you can:\n"
+        "   ⭐ *Keep* — save it\n"
+        "   🗑 *Delete* — remove the message & mute that job\n"
+        "   💼 *Proposal* — direct affiliate link to job\n"
+        "   🔗 *Original* — same affiliate-wrapped job link\n\n"
+        "🔎 `/mysettings` to check filters & trial/license\n"
+        "🧪 `/selftest` for a test card\n"
+        "🌍 `/platforms CC` to see platforms per country (e.g. `/platforms GR`)\n\n"
         "🧰 *Shortcuts*\n"
-        "• `/keywords` ή `/listkeywords` — λίστα\n"
-        "• `/delkeyword <kw>` — διαγραφή\n"
-        "• `/clearkeywords` — καθαρισμός όλων\n\n"
+        "• `/keywords` or `/listkeywords` — list keywords\n"
+        "• `/delkeyword <kw>` — delete one\n"
+        "• `/clearkeywords` — delete all\n\n"
         "🛰 *Platforms*\n"
         "• *Global*: " + ", ".join(platforms_global()) + "\n"
         "• *Greece*: " + ", ".join(platforms_gr())
@@ -143,19 +143,36 @@ def settings_text(u: User) -> str:
 
 # ---------------- Commands ----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Single central card:
+    - Welcome + short description
+    - Features list
+    - Buttons under the same message
+    """
     db = SessionLocal()
     try:
-        u = await ensure_user(db, update.effective_user.id)
-        # Welcome card + menu
-        await update.message.reply_text(
-            "👋 Welcome to Freelancer Alert Bot!\n\n"
+        await ensure_user(db, update.effective_user.id)
+
+        # short one-liner description under welcome
+        description = (
+            "Automatically finds matching freelance jobs from top platforms and "
+            "sends you instant alerts with affiliate-safe links."
+        )
+
+        text = (
+            "👋 *Welcome to Freelancer Alert Bot!*\n\n"
             f"🎁 You have a *{TRIAL_DAYS}-day free trial*.\n"
-            "Use /help to see how it works.",
+            f"{description}\n\n"
+            + features_block() +
+            "\n\nUse /help to see all commands."
+        )
+
+        await update.message.reply_text(
+            text,
             parse_mode=constants.ParseMode.MARKDOWN,
+            disable_web_page_preview=True,
             reply_markup=main_menu_kb(),
         )
-        # Features card (όπως είχαμε συζητήσει)
-        await update.message.reply_text(features_text(), parse_mode=constants.ParseMode.MARKDOWN)
     finally:
         db.close()
 
@@ -405,7 +422,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "menu:addkeywords":
             await q.message.reply_text("Use /addkeyword <kw1> <kw2> …")
         elif data == "menu:settings":
-            await q.message.reply_text(settings_text(u), parse_mode=constants.ParseMode.MARKDOWN)
+            await q.message.reply_text(settings_text(u), parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
         elif data == "menu:help":
             await q.message.reply_text(help_text(), parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
         elif data == "menu:contact":
