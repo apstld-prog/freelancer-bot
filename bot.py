@@ -3,7 +3,7 @@ import os
 import re
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from telegram import (
     Update,
@@ -33,9 +33,21 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
 
+# affiliate helpers (for /saved Open)
+FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()  # e.g. "apstld"
+AFFILIATE_PREFIX    = os.getenv("AFFILIATE_PREFIX", "").strip()
+
+def affiliate_wrap(url: str) -> str:
+    return f"{AFFILIATE_PREFIX}{url}" if AFFILIATE_PREFIX else url
+
+def aff_for_source(source: str, url: str) -> str:
+    if source == "freelancer" and FREELANCER_REF_CODE and "freelancer.com" in url:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}f={FREELANCER_REF_CODE}"
+    return affiliate_wrap(url)
+
 # ------------- Time helpers -------------
 UTC = timezone.utc
-
 def now_utc() -> datetime:
     return datetime.now(UTC)
 
@@ -43,7 +55,7 @@ def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
     if dt is None:
         return None
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-            return dt.replace(tzinfo=UTC)
+        return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
 
 def fmt_dt(dt: Optional[datetime]) -> str:
@@ -102,6 +114,9 @@ def main_menu_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📖 Help", callback_data="menu:help"),
             InlineKeyboardButton("📬 Contact", callback_data="menu:contact"),
         ],
+        [
+            InlineKeyboardButton("⭐ Saved", callback_data="menu:saved"),
+        ]
     ])
 
 def features_block() -> str:
@@ -125,13 +140,14 @@ def help_text(is_admin_flag: bool) -> str:
         "3️⃣ Αποθήκευσε πρότυπο πρότασης με `/setproposal <text>`\n"
         "   Placeholders: `{jobtitle}`, `{experience}`, `{stack}`, `{budgettime}`, `{portfolio}`, `{name}`\n"
         "4️⃣ Όταν έρχεται αγγελία:\n"
-        "   ⭐ *Keep* — αποθήκευση\n"
+        "   ⭐ *Keep* — αποθήκευση (δες `/saved`)\n"
         "   🗑 *Delete* — σβήσιμο/σίγαση\n"
         "   💼 *Proposal* — affiliate link\n"
         "   🔗 *Original* — affiliate-wrapped link\n\n"
         "🔎 `/mysettings` για φίλτρα & trial/license\n"
         "🧪 `/selftest` για δοκιμαστική κάρτα\n"
-        "🌍 `/platforms CC` πλατφόρμες ανά χώρα (π.χ. `/platforms GR`)\n\n"
+        "🌍 `/platforms CC` πλατφόρμες ανά χώρα (π.χ. `/platforms GR`)\n"
+        "⭐ `/saved` για τις αποθηκευμένες αγγελίες\n\n"
         "🧰 *Shortcuts*\n"
         "• `/keywords` ή `/listkeywords` — λίστα keywords\n"
         "• `/delkeyword <kw>` — διαγραφή (χωρίς διάκριση πεζών/κεφαλαίων)\n"
@@ -174,13 +190,6 @@ def settings_text(u: User) -> str:
 
 # --------- Keyword parsing (comma-first, Greek-friendly) ---------
 def parse_keywords_from_text(full_text: str) -> List[str]:
-    """
-    Rules:
-    - If there are commas, split by comma -> many keywords.
-    - If there are NO commas, treat the whole remainder as ONE keyword (phrase allowed).
-    - Strip surrounding quotes (single/double).
-    - Deduplicate case-insensitively.
-    """
     parts = full_text.split(" ", 1)
     raw = parts[1] if len(parts) > 1 else ""
     raw = raw.strip()
@@ -197,7 +206,6 @@ def parse_keywords_from_text(full_text: str) -> List[str]:
         if raw:
             items = [strip_quotes(raw)]
 
-    # Deduplicate preserving order (case-insensitive)
     seen = set()
     out = []
     for item in items:
@@ -423,6 +431,107 @@ async def dismiss_job_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+# -------- Saved list (/saved) --------
+PAGE_SIZE = 5
+
+def job_url_from_id(job_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (url, source) if we can reconstruct it from the id, else (None, None)."""
+    if job_id.startswith("freelancer-"):
+        m = re.match(r"^freelancer-(\d+)$", job_id)
+        if m:
+            pid = m.group(1)
+            url = f"https://www.freelancer.com/projects/{pid}"
+            return aff_for_source("freelancer", url), "freelancer"
+    # fiverr-* ids (daily) δεν έχουν συγκεκριμένη αγγελία
+    return None, None
+
+def build_saved_view(items: List[str], page: int) -> Tuple[str, InlineKeyboardMarkup]:
+    total = len(items)
+    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(1, min(page, pages))
+
+    start = (page - 1) * PAGE_SIZE
+    chunk = items[start:start + PAGE_SIZE]
+
+    lines = [f"⭐ *Saved jobs* — page {page}/{pages}", ""]
+    kb_rows = []
+
+    if not chunk:
+        lines.append("_No saved jobs yet._")
+    else:
+        for jid in chunk:
+            url, src = job_url_from_id(jid)
+            title = f"{jid}"
+            lines.append(f"• `{jid}`")
+            row = []
+            if url:
+                row.append(InlineKeyboardButton("🔗 Open", url=url))
+            row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"saved:del:{jid}:{page}"))
+            kb_rows.append(row)
+
+    # Pagination
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"saved:page:{page-1}"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"saved:page:{page+1}"))
+    if nav:
+        kb_rows.append(nav)
+
+    kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
+    text = "\n".join(lines)
+    return text, kb
+
+async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    try:
+        u = await ensure_user(db, update.effective_user.id)
+        rows = db.query(JobSaved).filter_by(user_id=u.id).order_by(JobSaved.created_at.desc()).all()
+        items = [r.job_id for r in rows]
+        text, kb = build_saved_view(items, page=1)
+        await update.message.reply_text(
+            text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb, disable_web_page_preview=True
+        )
+    finally:
+        db.close()
+
+async def saved_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data or ""
+    db = SessionLocal()
+    try:
+        u = await ensure_user(db, update.effective_user.id)
+        rows = db.query(JobSaved).filter_by(user_id=u.id).order_by(JobSaved.created_at.desc()).all()
+        items = [r.job_id for r in rows]
+
+        if data.startswith("saved:page:"):
+            page = int(data.split(":")[2])
+            text, kb = build_saved_view(items, page)
+            await q.edit_message_text(text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb, disable_web_page_preview=True)
+            await q.answer()
+            return
+
+        if data.startswith("saved:del:"):
+            _, _, jid, page_s = data.split(":", 3)
+            page = int(page_s)
+            row = db.query(JobSaved).filter_by(user_id=u.id, job_id=jid).first()
+            if row:
+                db.delete(row)
+                db.commit()
+            # refresh list
+            rows = db.query(JobSaved).filter_by(user_id=u.id).order_by(JobSaved.created_at.desc()).all()
+            items = [r.job_id for r in rows]
+            text, kb = build_saved_view(items, page)
+            try:
+                await q.edit_message_text(text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb, disable_web_page_preview=True)
+            except Exception:
+                await q.message.reply_text(text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb, disable_web_page_preview=True)
+            await q.answer("Deleted")
+            return
+
+    finally:
+        db.close()
+
 # -------- Contact / Admin reply --------
 async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -511,6 +620,11 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif data == "menu:contact":
             await context.bot.send_message(chat_id, "Send a message to admin: /contact <your message>")
+        elif data == "menu:saved":
+            rows = db.query(JobSaved).filter_by(user_id=u.id).order_by(JobSaved.created_at.desc()).all()
+            items = [r.job_id for r in rows]
+            text, kb = build_saved_view(items, page=1)
+            await context.bot.send_message(chat_id, text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb, disable_web_page_preview=True)
     finally:
         db.close()
 
@@ -524,6 +638,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("whoami", whoami_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("platforms", platforms_cmd))
+    app.add_handler(CommandHandler("saved", saved_cmd))
 
     # keywords
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
@@ -547,9 +662,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("reply", reply_cmd))
 
     # callbacks
-    app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^menu:(addkeywords|settings|help|contact)$"))
+    app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^menu:(addkeywords|settings|help|contact|saved)$"))
     app.add_handler(CallbackQueryHandler(save_job_cb, pattern=r"^save:.+"))
     app.add_handler(CallbackQueryHandler(dismiss_job_cb, pattern=r"^dismiss:.+"))
+    app.add_handler(CallbackQueryHandler(saved_cb, pattern=r"^saved:(page|del):"))
 
     return app
 
