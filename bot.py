@@ -1,5 +1,6 @@
 # bot.py
 import os
+import re
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
@@ -36,7 +37,6 @@ def now_utc() -> datetime:
     return datetime.now(UTC)
 
 def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
-    """Return UTC-aware datetime (tolerates None and naive)."""
     if dt is None:
         return None
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
@@ -48,7 +48,6 @@ def fmt_dt(dt: Optional[datetime]) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S %Z") if dt else "None"
 
 def user_active(u: User) -> bool:
-    """A user is active if NOT blocked and has trial or license in the future."""
     if getattr(u, "is_blocked", False):
         return False
     now = now_utc()
@@ -121,7 +120,7 @@ def features_block() -> str:
 def help_text(is_admin_flag: bool) -> str:
     txt = (
         "📖 *Help / How it works*\n\n"
-        "1️⃣ Add keywords with `/addkeyword python telegram` (or use the menu)\n"
+        "1️⃣ Add keywords with `/addkeyword python, logo, ρελούξ` *(comma-separated)*\n"
         "2️⃣ Set countries with `/setcountry US,UK` *(or `ALL`)*\n"
         "3️⃣ Save a proposal template with `/setproposal <text>`\n"
         "   Placeholders: `{jobtitle}`, `{experience}`, `{stack}`, `{budgettime}`, `{portfolio}`, `{name}`\n"
@@ -135,7 +134,7 @@ def help_text(is_admin_flag: bool) -> str:
         "🌍 `/platforms CC` to see platforms per country (e.g. `/platforms GR`)\n\n"
         "🧰 *Shortcuts*\n"
         "• `/keywords` or `/listkeywords` — list keywords\n"
-        "• `/delkeyword <kw>` — delete one\n"
+        "• `/delkeyword <kw>` — delete one (case-insensitive)\n"
         "• `/clearkeywords` — delete all\n\n"
         "🛰 *Platforms*\n"
         "• *Global*: " + ", ".join(platforms_global()) + "\n"
@@ -173,17 +172,38 @@ def settings_text(u: User) -> str:
         "ℹ️ For extension, contact the admin."
     )
 
+# --------- Keyword parsing (comma-first, Unicode-safe) ---------
+def parse_keywords_from_text(full_text: str) -> List[str]:
+    """
+    Accept comma-separated keywords (supports Greek/Unicode).
+    If no comma exists, fall back to splitting by whitespace.
+    Keeps phrases if separated by comma.
+    """
+    # Remove command part
+    parts = full_text.split(" ", 1)
+    raw = parts[1] if len(parts) > 1 else ""
+    if "," in raw:
+        items = [p.strip() for p in raw.split(",")]
+    else:
+        # fallback: split by any whitespace (one-word tokens)
+        items = [p.strip() for p in re.split(r"\s+", raw) if p.strip()]
+    # Deduplicate preserving order, case-insensitive
+    seen = set()
+    out = []
+    for item in items:
+        if not item:
+            continue
+        key = item.casefold()
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
+
 # ---------------- Commands ----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Single central card with: welcome + short description + features + buttons.
-    Trial starts here on first /start.
-    """
     db = SessionLocal()
     try:
         u = await ensure_user(db, update.effective_user.id)
-
-        # Start trial on first /start
         if not getattr(u, "trial_until", None):
             u.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
             db.commit()
@@ -241,20 +261,24 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # -------- Keywords --------
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Usage: /addkeyword <kw1> <kw2> ...")
+    full_text = update.message.text or ""
+    kws = parse_keywords_from_text(full_text)
+    if not kws:
+        return await update.message.reply_text("Usage: /addkeyword python, logo, ρελούξ")
+
     db = SessionLocal()
     try:
         u = await ensure_user(db, update.effective_user.id)
+        existing = db.query(Keyword).filter_by(user_id=u.id).all()
+        existing_set = {k.keyword.casefold() for k in existing}
+
         added = 0
-        for raw in context.args:
-            kw = raw.strip()
-            if not kw:
+        for kw in kws:
+            if kw.casefold() in existing_set:
                 continue
-            exists = db.query(Keyword).filter_by(user_id=u.id, keyword=kw).first()
-            if not exists:
-                db.add(Keyword(user_id=u.id, keyword=kw))
-                added += 1
+            db.add(Keyword(user_id=u.id, keyword=kw))
+            existing_set.add(kw.casefold())
+            added += 1
         db.commit()
         await update.message.reply_text(f"✅ Added {added} keyword(s).")
     finally:
@@ -270,19 +294,26 @@ async def listkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
+    full_text = update.message.text or ""
+    target = full_text.split(" ", 1)[1].strip() if " " in full_text else ""
+    if not target:
         return await update.message.reply_text("Usage: /delkeyword <keyword>")
-    kw = context.args[0]
+
     db = SessionLocal()
     try:
         u = await ensure_user(db, update.effective_user.id)
-        row = db.query(Keyword).filter_by(user_id=u.id, keyword=kw).first()
+        # case-insensitive match
+        row = None
+        for k in u.keywords:
+            if k.keyword.casefold() == target.casefold():
+                row = k
+                break
         if row:
             db.delete(row)
             db.commit()
-            await update.message.reply_text(f"🗑 Deleted keyword '{kw}'.")
+            await update.message.reply_text(f"🗑 Deleted keyword '{row.keyword}'.")
         else:
-            await update.message.reply_text(f"Not found: '{kw}'.")
+            await update.message.reply_text(f"Not found: '{target}'.")
     finally:
         db.close()
 
@@ -459,7 +490,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = await ensure_user(db, update.effective_user.id)
         chat_id = q.message.chat_id
         if data == "menu:addkeywords":
-            await context.bot.send_message(chat_id, "Use /addkeyword <kw1> <kw2> …")
+            await context.bot.send_message(chat_id, "Use /addkeyword python, logo, ρελούξ")
         elif data == "menu:settings":
             await context.bot.send_message(
                 chat_id,
@@ -524,5 +555,5 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set.")
     app = build_application()
-    logger.info("Running bot with polling (dev mode).")
+    logging.info("Running bot with polling (dev mode).")
     app.run_polling(drop_pending_updates=True)
