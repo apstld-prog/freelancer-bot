@@ -14,19 +14,21 @@ from db import SessionLocal, User, Keyword, JobSent, JobDismissed
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [worker] %(levelname)s: %(message)s")
 logger = logging.getLogger("worker")
 
+# ------------ Env / Config ------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN is not set.")
+bot = Bot(BOT_TOKEN)
 
-# Affiliate / behavior
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
+DEBUG_TO_ADMIN = os.getenv("WORKER_DEBUG_TO_ADMIN", "0") in ("1", "true", "True", "yes")
+
 FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()  # e.g. "apstld"
-AFFILIATE_PREFIX    = os.getenv("AFFILIATE_PREFIX", "").strip()     # optional global prefix
+AFFILIATE_PREFIX    = os.getenv("AFFILIATE_PREFIX", "").strip()
 
-# Search behavior
 SEARCH_MODE = os.getenv("SEARCH_MODE", "all").lower()  # "all" or "single"
 INTERVAL    = int(os.getenv("WORKER_INTERVAL", "300"))
 
-# Freelancer filters
 FL_PROJECT_TYPE = os.getenv("FREELANCER_PROJECT_TYPE", "all").lower()  # "all" | "fixed" | "hourly"
 try:
     FL_MIN_BUDGET = float(os.getenv("FREELANCER_MIN_BUDGET", "0") or 0)
@@ -37,14 +39,30 @@ try:
 except Exception:
     FL_MAX_BUDGET = 0.0
 
-# Fiverr anti-spam mode (currently off by default)
 FIVERR_MODE         = os.getenv("FIVERR_MODE", "off").lower()  # "off" | "daily"
 FIVERR_AFF_TEMPLATE = os.getenv("FIVERR_AFF_TEMPLATE", "").strip()
 
-# Telegram bot
-bot = Bot(BOT_TOKEN)
+# ---------- Time helpers (UTC-aware) ----------
+UTC = timezone.utc
+def now_utc() -> datetime:
+    return datetime.now(UTC)
 
-# ---------- Currency rates cache (base USD) ----------
+def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+def user_is_active(u: User) -> bool:
+    if getattr(u, "is_blocked", False):
+        return False
+    now = now_utc()
+    trial = to_aware(getattr(u, "trial_until", None))
+    lic = to_aware(getattr(u, "access_until", None))
+    return (trial and trial >= now) or (lic and lic >= now)
+
+# ---------- FX rates (USD base) ----------
 _RATES: Dict[str, float] = {}
 _RATES_FETCHED_AT: Optional[datetime] = None
 _RATES_TTL = timedelta(hours=12)
@@ -52,7 +70,7 @@ RATES_URL = os.getenv("FX_RATES_URL", "https://open.er-api.com/v6/latest/USD")
 
 async def get_rates() -> Dict[str, float]:
     global _RATES, _RATES_FETCHED_AT
-    if _RATES and _RATES_FETCHED_AT and datetime.now(timezone.utc) - _RATES_FETCHED_AT < _RATES_TTL:
+    if _RATES and _RATES_FETCHED_AT and now_utc() - _RATES_FETCHED_AT < _RATES_TTL:
         return _RATES
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -61,25 +79,13 @@ async def get_rates() -> Dict[str, float]:
         rates = data.get("rates") or {}
         if isinstance(rates, dict) and rates:
             _RATES = rates
-            _RATES_FETCHED_AT = datetime.now(timezone.utc)
+            _RATES_FETCHED_AT = now_utc()
             logger.info("FX rates refreshed (%d currencies).", len(_RATES))
     except Exception as e:
         logger.warning("FX fetch failed: %s", e)
     return _RATES
 
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-def user_is_active(u: User) -> bool:
-    if getattr(u, "is_blocked", False):
-        return False
-    t = now_utc()
-    if getattr(u, "access_until", None) and u.access_until >= t:
-        return True
-    if getattr(u, "trial_until", None) and u.trial_until >= t:
-        return True
-    return False
-
+# ---------- Utils ----------
 def affiliate_wrap(url: str) -> str:
     return f"{AFFILIATE_PREFIX}{url}" if AFFILIATE_PREFIX else url
 
@@ -92,7 +98,7 @@ def aff_for_source(source: str, url: str) -> str:
 def timeago(ts: Optional[int]) -> str:
     if not ts:
         return "unknown"
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    dt = datetime.fromtimestamp(ts, tz=UTC)
     delta = now_utc() - dt
     secs = int(delta.total_seconds())
     if secs < 60: return f"{secs}s ago"
@@ -174,16 +180,18 @@ def format_budget(budget: Optional[Dict[str, Any]], proj_type: Optional[str]) ->
         if mx: return f"≤ {mx} {cur}"
         return f"— {cur}".strip()
 
-# ---------------- Fetchers ----------------
+# ---------- Fetchers ----------
 async def fetch_freelancer(keywords: List[str]) -> List[Dict[str, Any]]:
     if not FREELANCER_REF_CODE:
         logger.warning("Freelancer ref code missing, skipping Freelancer API.")
         return []
-
     base_url = "https://www.freelancer.com/api/projects/0.1/projects/active/"
     if not keywords:
         return []
+
+    # Build queries
     queries = keywords if SEARCH_MODE == "single" else [",".join(keywords)]
+    logger.info("Freelancer queries: %s", queries)
 
     out: List[Dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=25) as client:
@@ -203,7 +211,9 @@ async def fetch_freelancer(keywords: List[str]) -> List[Dict[str, Any]]:
                     logger.warning("Freelancer API non-200 (%s) for query '%s'", r.status_code, q)
                     continue
                 data = r.json()
-                for pr in data.get("result", {}).get("projects", []):
+                projects = data.get("result", {}).get("projects", []) or []
+                logger.info("Freelancer returned %d results for query '%s'", len(projects), q)
+                for pr in projects:
                     proj_type = pr.get("type") or pr.get("project_type")
                     if not passes_type(proj_type):
                         continue
@@ -234,17 +244,14 @@ async def fetch_freelancer(keywords: List[str]) -> List[Dict[str, Any]]:
     return out
 
 async def fetch_fiverr(keywords: List[str]) -> List[Dict[str, Any]]:
-    if FIVERR_MODE not in ("daily",):
-        return []
-    if not FIVERR_AFF_TEMPLATE:
-        logger.info("Fiverr mode is daily but template missing; skipping.")
+    if FIVERR_MODE != "daily" or not FIVERR_AFF_TEMPLATE:
         return []
     today = datetime.utcnow().strftime("%Y%m%d")
     out: List[Dict[str, Any]] = []
     for kw in keywords:
         url = FIVERR_AFF_TEMPLATE.replace("{kw}", kw)
         out.append({
-            "id": f"fiverr-{kw}-{today}",  # only once per day/keyword
+            "id": f"fiverr-{kw}-{today}",
             "title": f"Fiverr services for {kw}",
             "description": f"Browse Fiverr gigs related to '{kw}'.",
             "url": url,
@@ -256,7 +263,7 @@ async def fetch_fiverr(keywords: List[str]) -> List[Dict[str, Any]]:
         })
     return out
 
-# ---------------- Sending ----------------
+# ---------- Sending ----------
 async def send_job_to_user(u: User, job: Dict[str, Any]) -> None:
     src = job.get("source", "")
     proj_type = job.get("proj_type") or ""
@@ -305,19 +312,22 @@ async def send_job_to_user(u: User, job: Dict[str, Any]) -> None:
     except Exception as e:
         logger.warning("Error sending job %s to %s: %s", job.get("id"), u.telegram_id, e)
 
-# ---------------- Main loop ----------------
+# ---------- Main cycle ----------
 async def worker_cycle():
     db = SessionLocal()
+    summary_lines = []
     try:
         users = db.query(User).options(joinedload(User.keywords)).all()
         total_sent = 0
         for u in users:
-            if not user_is_active(u):
-                continue
+            active = user_is_active(u)
             kws = [k.keyword for k in u.keywords]
-            if not kws:
+            summary_lines.append(f"User {u.telegram_id}: active={active}, keywords={kws}")
+
+            if not active or not kws:
                 continue
 
+            # Fetch from sources
             jobs: List[Dict[str, Any]] = []
             jobs.extend(await fetch_freelancer(kws))
             jobs.extend(await fetch_fiverr(kws))
@@ -335,20 +345,38 @@ async def worker_cycle():
             # Already sent / dismissed IDs for this user
             sent_ids = {row.job_id for row in db.query(JobSent).filter_by(user_id=u.id).all()}
             dismissed_ids = {row.job_id for row in db.query(JobDismissed).filter_by(user_id=u.id).all()}
+            logger.info("User %s: %d candidates, %d sent, %d dismissed",
+                        u.telegram_id, len(deduped), len(sent_ids), len(dismissed_ids))
 
+            count_for_user = 0
             for job in deduped:
                 jid = job.get("id")
                 if not jid or jid in sent_ids or jid in dismissed_ids:
                     continue
                 db.add(JobSent(user_id=u.id, job_id=jid))
                 db.commit()
-
                 await send_job_to_user(u, job)
                 total_sent += 1
+                count_for_user += 1
+
+            summary_lines.append(f"  -> sent {count_for_user}")
 
         logger.info("Worker cycle complete. Sent %d messages.", total_sent)
+        if DEBUG_TO_ADMIN and ADMIN_ID:
+            try:
+                await bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text="🛠 Worker summary:\n" + "\n".join(summary_lines) + f"\nTotal sent: {total_sent}",
+                )
+            except Exception:
+                pass
     except Exception as e:
         logger.exception("Worker cycle error: %s", e)
+        if DEBUG_TO_ADMIN and ADMIN_ID:
+            try:
+                await bot.send_message(chat_id=ADMIN_ID, text=f"❗ Worker error: {e}")
+            except Exception:
+                pass
     finally:
         db.close()
 
