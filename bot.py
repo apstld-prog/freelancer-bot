@@ -19,11 +19,14 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from db import SessionLocal, User, Keyword, JobSaved, JobDismissed
+from db import SessionLocal, User, Keyword, JobSaved, JobDismissed, ensure_schema
 
 # ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [bot] %(levelname)s: %(message)s")
 logger = logging.getLogger("bot")
+
+# Ensure DB schema on bot startup (compat with new db.py)
+ensure_schema()
 
 # ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -60,7 +63,7 @@ def is_admin(update: Update) -> bool:
     return update.effective_user and update.effective_user.id == ADMIN_ID
 
 async def ensure_user(db, tg_id: int) -> User:
-    """Create user if missing. Trial starts on /start (όχι εδώ)."""
+    """Create user if missing. Trial starts on /start (not here)."""
     u = db.query(User).filter_by(telegram_id=str(tg_id)).first()
     if not u:
         u = User(
@@ -179,13 +182,11 @@ def parse_keywords_from_text(full_text: str) -> List[str]:
     If no comma exists, fall back to splitting by whitespace.
     Keeps phrases if separated by comma.
     """
-    # Remove command part
     parts = full_text.split(" ", 1)
     raw = parts[1] if len(parts) > 1 else ""
     if "," in raw:
         items = [p.strip() for p in raw.split(",")]
     else:
-        # fallback: split by any whitespace (one-word tokens)
         items = [p.strip() for p in re.split(r"\s+", raw) if p.strip()]
     # Deduplicate preserving order, case-insensitive
     seen = set()
@@ -204,6 +205,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         u = await ensure_user(db, update.effective_user.id)
+        # Start 10-day trial on first /start
         if not getattr(u, "trial_until", None):
             u.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
             db.commit()
@@ -302,7 +304,6 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         u = await ensure_user(db, update.effective_user.id)
-        # case-insensitive match
         row = None
         for k in u.keywords:
             if k.keyword.casefold() == target.casefold():
