@@ -25,7 +25,7 @@ from db import SessionLocal, User, Keyword, JobSaved, JobDismissed, ensure_schem
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [bot] %(levelname)s: %(message)s")
 logger = logging.getLogger("bot")
 
-# Ensure DB schema on bot startup (compat with new db.py)
+# Ensure DB schema on bot startup
 ensure_schema()
 
 # ---------------- Config ----------------
@@ -33,7 +33,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
 
-# ------------- Time helpers (fix naive vs aware) -------------
+# ------------- Time helpers -------------
 UTC = timezone.utc
 
 def now_utc() -> datetime:
@@ -43,7 +43,7 @@ def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
     if dt is None:
         return None
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-        return dt.replace(tzinfo=UTC)
+            return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
 
 def fmt_dt(dt: Optional[datetime]) -> str:
@@ -58,18 +58,14 @@ def user_active(u: User) -> bool:
     lic = to_aware(getattr(u, "access_until", None))
     return (trial and trial >= now) or (lic and lic >= now)
 
-# ------------- Other helpers -------------------
+# ------------- Helpers -------------------
 def is_admin(update: Update) -> bool:
     return update.effective_user and update.effective_user.id == ADMIN_ID
 
 async def ensure_user(db, tg_id: int) -> User:
-    """Create user if missing. Trial starts on /start (not here)."""
     u = db.query(User).filter_by(telegram_id=str(tg_id)).first()
     if not u:
-        u = User(
-            telegram_id=str(tg_id),
-            countries="ALL",
-        )
+        u = User(telegram_id=str(tg_id), countries="ALL")
         db.add(u)
         db.commit()
         db.refresh(u)
@@ -123,22 +119,23 @@ def features_block() -> str:
 def help_text(is_admin_flag: bool) -> str:
     txt = (
         "📖 *Help / How it works*\n\n"
-        "1️⃣ Add keywords with `/addkeyword python, logo, ρελούξ` *(comma-separated)*\n"
-        "2️⃣ Set countries with `/setcountry US,UK` *(or `ALL`)*\n"
-        "3️⃣ Save a proposal template with `/setproposal <text>`\n"
+        "1️⃣ Add keywords with `/addkeyword python, logo, \"μελέτη φωτισμού\"`\n"
+        "   • Χωρίζεις με *κόμμα* για πολλά. Χωρίς κόμμα, *όλο το κείμενο* γίνεται ένα keyword.\n"
+        "2️⃣ Set countries with `/setcountry US,UK` *(ή `ALL`)*\n"
+        "3️⃣ Αποθήκευσε πρότυπο πρότασης με `/setproposal <text>`\n"
         "   Placeholders: `{jobtitle}`, `{experience}`, `{stack}`, `{budgettime}`, `{portfolio}`, `{name}`\n"
-        "4️⃣ When a job arrives you can:\n"
-        "   ⭐ *Keep* — save it\n"
-        "   🗑 *Delete* — remove the message & mute that job\n"
-        "   💼 *Proposal* — direct affiliate link to job\n"
-        "   🔗 *Original* — same affiliate-wrapped job link\n\n"
-        "🔎 `/mysettings` to check filters & trial/license\n"
-        "🧪 `/selftest` for a test card\n"
-        "🌍 `/platforms CC` to see platforms per country (e.g. `/platforms GR`)\n\n"
+        "4️⃣ Όταν έρχεται αγγελία:\n"
+        "   ⭐ *Keep* — αποθήκευση\n"
+        "   🗑 *Delete* — σβήσιμο/σίγαση\n"
+        "   💼 *Proposal* — affiliate link\n"
+        "   🔗 *Original* — affiliate-wrapped link\n\n"
+        "🔎 `/mysettings` για φίλτρα & trial/license\n"
+        "🧪 `/selftest` για δοκιμαστική κάρτα\n"
+        "🌍 `/platforms CC` πλατφόρμες ανά χώρα (π.χ. `/platforms GR`)\n\n"
         "🧰 *Shortcuts*\n"
-        "• `/keywords` or `/listkeywords` — list keywords\n"
-        "• `/delkeyword <kw>` — delete one (case-insensitive)\n"
-        "• `/clearkeywords` — delete all\n\n"
+        "• `/keywords` ή `/listkeywords` — λίστα keywords\n"
+        "• `/delkeyword <kw>` — διαγραφή (χωρίς διάκριση πεζών/κεφαλαίων)\n"
+        "• `/clearkeywords` — διαγραφή όλων\n\n"
         "🛰 *Platforms*\n"
         "• *Global*: " + ", ".join(platforms_global()) + "\n"
         "• *Greece*: " + ", ".join(platforms_gr())
@@ -147,8 +144,8 @@ def help_text(is_admin_flag: bool) -> str:
         txt += (
             "\n\n🛡 *Admin*\n"
             "• `/stats` — users/active\n"
-            "• `/grant <telegram_id> <days>` — give license\n"
-            "• `/reply <telegram_id> <message>` — reply to a user"
+            "• `/grant <telegram_id> <days>` — license\n"
+            "• `/reply <telegram_id> <message>` — απάντηση σε χρήστη"
         )
     return txt
 
@@ -175,20 +172,32 @@ def settings_text(u: User) -> str:
         "ℹ️ For extension, contact the admin."
     )
 
-# --------- Keyword parsing (comma-first, Unicode-safe) ---------
+# --------- Keyword parsing (comma-first, Greek-friendly) ---------
 def parse_keywords_from_text(full_text: str) -> List[str]:
     """
-    Accept comma-separated keywords (supports Greek/Unicode).
-    If no comma exists, fall back to splitting by whitespace.
-    Keeps phrases if separated by comma.
+    Rules:
+    - If there are commas, split by comma -> many keywords.
+    - If there are NO commas, treat the whole remainder as ONE keyword (phrase allowed).
+    - Strip surrounding quotes (single/double).
+    - Deduplicate case-insensitively.
     """
     parts = full_text.split(" ", 1)
     raw = parts[1] if len(parts) > 1 else ""
+    raw = raw.strip()
+
+    def strip_quotes(s: str) -> str:
+        if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+            return s[1:-1].strip()
+        return s
+
+    items: List[str] = []
     if "," in raw:
-        items = [p.strip() for p in raw.split(",")]
+        items = [strip_quotes(p.strip()) for p in raw.split(",")]
     else:
-        items = [p.strip() for p in re.split(r"\s+", raw) if p.strip()]
-    # Deduplicate preserving order, case-insensitive
+        if raw:
+            items = [strip_quotes(raw)]
+
+    # Deduplicate preserving order (case-insensitive)
     seen = set()
     out = []
     for item in items:
@@ -205,7 +214,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         u = await ensure_user(db, update.effective_user.id)
-        # Start 10-day trial on first /start
         if not getattr(u, "trial_until", None):
             u.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
             db.commit()
@@ -214,7 +222,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Automatically finds matching freelance jobs from top platforms and "
             "sends you instant alerts with affiliate-safe links."
         )
-
         text = (
             "👋 *Welcome to Freelancer Alert Bot!*\n\n"
             f"🎁 You have a *{TRIAL_DAYS}-day free trial*.\n"
@@ -222,7 +229,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + features_block() +
             "\n\nUse /help to see all commands."
         )
-
         await update.message.reply_text(
             text,
             parse_mode=constants.ParseMode.MARKDOWN,
@@ -243,10 +249,7 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     txt = f"🆔 Your Telegram ID: `{u.id}`\n👤 Name: {u.full_name}\n"
     txt += f"🔗 Username: @{u.username}\n" if u.username else "🔗 Username: (none)\n"
-    if is_admin(update):
-        txt += "\n⭐ You are *ADMIN*."
-    else:
-        txt += "\n👤 You are a regular user."
+    txt += "\n⭐ You are *ADMIN*." if is_admin(update) else "\n👤 You are a regular user."
     await update.message.reply_text(txt, parse_mode=constants.ParseMode.MARKDOWN)
 
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -266,7 +269,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_text = update.message.text or ""
     kws = parse_keywords_from_text(full_text)
     if not kws:
-        return await update.message.reply_text("Usage: /addkeyword python, logo, ρελούξ")
+        return await update.message.reply_text('Usage: /addkeyword python, logo, "μελέτη φωτισμού"')
 
     db = SessionLocal()
     try:
@@ -491,7 +494,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = await ensure_user(db, update.effective_user.id)
         chat_id = q.message.chat_id
         if data == "menu:addkeywords":
-            await context.bot.send_message(chat_id, "Use /addkeyword python, logo, ρελούξ")
+            await context.bot.send_message(chat_id, 'Use /addkeyword python, logo, "μελέτη φωτισμού"')
         elif data == "menu:settings":
             await context.bot.send_message(
                 chat_id,
@@ -551,7 +554,6 @@ def build_application() -> Application:
     return app
 
 
-# Standalone run with polling (for local dev)
 if __name__ == "__main__":
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set.")
