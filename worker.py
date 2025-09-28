@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
 import httpx
@@ -10,44 +10,55 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, constants
 
 from db import SessionLocal, User, Keyword, JobSent
 
-# ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [worker] %(levelname)s: %(message)s")
 logger = logging.getLogger("worker")
 
-# ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN is not set.")
 
-# Affiliate / behavior
-FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()      # e.g. "apstld"
+FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
 AFFILIATE_PREFIX    = os.getenv("AFFILIATE_PREFIX", "").strip()
 
-# Search behavior
-SEARCH_MODE = os.getenv("SEARCH_MODE", "all").lower()  # "all" or "single"
+SEARCH_MODE = os.getenv("SEARCH_MODE", "all").lower()  # "all" | "single"
 INTERVAL    = int(os.getenv("WORKER_INTERVAL", "300"))
 
-# Freelancer filters
-FL_PROJECT_TYPE = os.getenv("FREELANCER_PROJECT_TYPE", "all").lower()  # "all" | "fixed" | "hourly"
+FL_PROJECT_TYPE = os.getenv("FREELANCER_PROJECT_TYPE", "all").lower()
 try:
     FL_MIN_BUDGET = float(os.getenv("FREELANCER_MIN_BUDGET", "0") or 0)
 except Exception:
     FL_MIN_BUDGET = 0.0
 try:
-    FL_MAX_BUDGET = float(os.getenv("FREELANCER_MAX_BUDGET", "0") or 0)  # 0 = no cap
+    FL_MAX_BUDGET = float(os.getenv("FREELANCER_MAX_BUDGET", "0") or 0)
 except Exception:
     FL_MAX_BUDGET = 0.0
 
-# Fiverr anti-spam mode:
-#   off   -> never send Fiverr messages (default)
-#   daily -> at most 1 message per keyword per day
-FIVERR_MODE         = os.getenv("FIVERR_MODE", "off").lower()
-FIVERR_AFF_TEMPLATE = os.getenv("FIVERR_AFF_TEMPLATE", "").strip()
-
-# Telegram bot (reusable)
+# Telegram bot
 bot = Bot(BOT_TOKEN)
 
-# ---------------- Helpers ----------------
+# ---------- Currency rates cache (base USD) ----------
+_RATES: Dict[str, float] = {}
+_RATES_FETCHED_AT: Optional[datetime] = None
+_RATES_TTL = timedelta(hours=12)
+RATES_URL = os.getenv("FX_RATES_URL", "https://open.er-api.com/v6/latest/USD")
+
+async def get_rates() -> Dict[str, float]:
+    global _RATES, _RATES_FETCHED_AT
+    if _RATES and _RATES_FETCHED_AT and datetime.now(timezone.utc) - _RATES_FETCHED_AT < _RATES_TTL:
+        return _RATES
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(RATES_URL)
+        data = r.json()
+        rates = data.get("rates") or {}
+        if isinstance(rates, dict) and "USD" in rates:
+            _RATES = rates
+            _RATES_FETCHED_AT = datetime.now(timezone.utc)
+            logger.info("FX rates refreshed (%d currencies).", len(_RATES))
+    except Exception as e:
+        logger.warning("FX fetch failed: %s", e)
+    return _RATES
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -65,11 +76,9 @@ def affiliate_wrap(url: str) -> str:
     return f"{AFFILIATE_PREFIX}{url}" if AFFILIATE_PREFIX else url
 
 def aff_for_source(source: str, url: str) -> str:
-    # Freelancer: append ?f=<code> if provided
     if source == "freelancer" and FREELANCER_REF_CODE and "freelancer.com" in url:
         sep = "&" if "?" in url else "?"
         return f"{url}{sep}f={FREELANCER_REF_CODE}"
-    # Other sources -> global prefix if any
     return affiliate_wrap(url)
 
 def timeago(ts: Optional[int]) -> str:
@@ -109,46 +118,61 @@ def passes_type(type_str: Optional[str]) -> bool:
         return True
     return False
 
+def fmt_usd(n: Optional[float]) -> Optional[str]:
+    if n is None:
+        return None
+    return f"{n:,.2f}"
+
+async def convert_budget_to_usd(budget: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Return a string like '~ $650.00–$1,200.00 USD' or None."""
+    if not budget:
+        return None
+    cur = (budget.get("currency") or {}).get("code") or ""
+    if not cur or cur.upper() == "USD":
+        mn = budget.get("minimum"); mx = budget.get("maximum")
+        if mn or mx:
+            lo = fmt_usd(float(mn) if mn else None)
+            hi = fmt_usd(float(mx) if mx else None)
+            if lo and hi: return f"~ ${lo}–${hi} USD"
+            if lo: return f"~ ≥ ${lo} USD"
+            if hi: return f"~ ≤ ${hi} USD"
+        return None
+
+    rates = await get_rates()
+    rate = rates.get(cur.upper())
+    if not rate or rate == 0:
+        return None
+    mn = budget.get("minimum"); mx = budget.get("maximum")
+    lo = (float(mn) / rate) if mn else None
+    hi = (float(mx) / rate) if mx else None
+    if lo and hi: return f"~ ${fmt_usd(lo)}–${fmt_usd(hi)} USD"
+    if lo: return f"~ ≥ ${fmt_usd(lo)} USD"
+    if hi: return f"~ ≤ ${fmt_usd(hi)} USD"
+    return None
+
 def format_budget(budget: Optional[Dict[str, Any]], proj_type: Optional[str]) -> str:
     if not budget:
         return "—"
     cur = (budget.get("currency") or {}).get("code") or ""
     mn = budget.get("minimum")
     mx = budget.get("maximum")
-    if proj_type and "hour" in (proj_type or "").lower():
-        if mn and mx:
-            return f"{mn}–{mx} {cur}/h"
-        if mn:
-            return f"≥ {mn} {cur}/h"
-        if mx:
-            return f"≤ {mx} {cur}/h"
-        return f"— {cur}/h"
-    else:
-        if mn and mx:
-            return f"{mn}–{mx} {cur}"
-        if mn:
-            return f"≥ {mn} {cur}"
-        if mx:
-            return f"≤ {mx} {cur}"
+    def base() -> str:
+        if mn and mx: return f"{mn}–{mx} {cur}"
+        if mn: return f"≥ {mn} {cur}"
+        if mx: return f"≤ {mx} {cur}"
         return f"— {cur}".strip()
+    return base()
 
 # ---------------- Fetchers ----------------
 async def fetch_freelancer(keywords: List[str]) -> List[Dict[str, Any]]:
-    """Fetch active projects from Freelancer public API using referral code."""
     if not FREELANCER_REF_CODE:
         logger.warning("Freelancer ref code missing, skipping Freelancer API.")
         return []
 
     base_url = "https://www.freelancer.com/api/projects/0.1/projects/active/"
-    queries: List[str] = []
-
     if not keywords:
         return []
-
-    if SEARCH_MODE == "single":
-        queries.extend(keywords)
-    else:
-        queries.append(",".join(keywords))
+    queries = keywords if SEARCH_MODE == "single" else [",".join(keywords)]
 
     out: List[Dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=25) as client:
@@ -175,7 +199,6 @@ async def fetch_freelancer(keywords: List[str]) -> List[Dict[str, Any]]:
                     budget = pr.get("budget")
                     if not passes_budget(budget):
                         continue
-
                     pid = pr.get("id")
                     url = f"https://www.freelancer.com/projects/{pid}"
                     title = pr.get("title") or "Untitled"
@@ -198,43 +221,12 @@ async def fetch_freelancer(keywords: List[str]) -> List[Dict[str, Any]]:
                 logger.warning("Error fetching Freelancer API for '%s': %s", q, e)
     return out
 
-async def fetch_fiverr(keywords: List[str]) -> List[Dict[str, Any]]:
-    """
-    Fiverr muted by default to avoid spam.
-    If FIVERR_MODE == 'daily' and FIVERR_AFF_TEMPLATE provided,
-    send at most one reminder per keyword per day (not "jobs", just a curated link).
-    """
-    if FIVERR_MODE not in ("daily",):
-        # Completely off (default)
-        return []
-
-    if not FIVERR_AFF_TEMPLATE:
-        logger.info("Fiverr mode is daily but template missing; skipping.")
-        return []
-
-    # Build one synthetic "job" per keyword per day (dedupe via JobSent)
-    today = datetime.utcnow().strftime("%Y%m%d")
-    out: List[Dict[str, Any]] = []
-    for kw in keywords:
-        url = FIVERR_AFF_TEMPLATE.replace("{kw}", kw)
-        out.append({
-            "id": f"fiverr-{kw}-{today}",  # stable id once per day per keyword (anti-spam)
-            "title": f"Fiverr services for {kw}",
-            "description": f"Browse Fiverr gigs related to '{kw}'.",
-            "url": url,
-            "source": "fiverr",
-            "budget": None,
-            "proj_type": None,
-            "bids": None,
-            "created_ts": int(now_utc().timestamp()),
-        })
-    return out
-
 # ---------------- Sending ----------------
 async def send_job_to_user(u: User, job: Dict[str, Any]) -> None:
     src = job.get("source", "")
     proj_type = job.get("proj_type") or ""
-    budget = format_budget(job.get("budget"), proj_type)
+    budget_str = format_budget(job.get("budget"), proj_type)
+    budget_usd = await convert_budget_to_usd(job.get("budget"))
     bids = job.get("bids")
     created = timeago(job.get("created_ts"))
 
@@ -242,7 +234,9 @@ async def send_job_to_user(u: User, job: Dict[str, Any]) -> None:
     if proj_type:
         pretty_type = "Hourly" if "hour" in proj_type.lower() else "Fixed"
         meta_lines.append(f"🧾 Type: *{pretty_type}*")
-    meta_lines.append(f"💰 Budget: *{budget}*")
+    meta_lines.append(f"💰 Budget: *{budget_str}*")
+    if budget_usd:
+        meta_lines.append(f"💵 {budget_usd}")
     if bids is not None:
         meta_lines.append(f"📨 Bids: *{bids}*")
     if created:
@@ -256,10 +250,15 @@ async def send_job_to_user(u: User, job: Dict[str, Any]) -> None:
     title = job.get("title", "New opportunity")
     final_url = aff_for_source(src, job.get("url", ""))
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💼 Proposal", url=final_url),
-         InlineKeyboardButton("🔗 Original", url=final_url)]
-    ])
+    # Row 1: Proposal / Original
+    row1 = [InlineKeyboardButton("💼 Proposal", url=final_url),
+            InlineKeyboardButton("🔗 Original", url=final_url)]
+    # Row 2: Keep / Delete
+    jid = job.get("id")
+    row2 = [InlineKeyboardButton("⭐ Keep", callback_data=f"save:{jid}"),
+            InlineKeyboardButton("🗑 Delete", callback_data=f"dismiss:{jid}")]
+
+    kb = InlineKeyboardMarkup([row1, row2])
 
     text = f"💼 *{title}*\n\n{meta}\n\n{text_desc}"
     try:
@@ -288,12 +287,9 @@ async def worker_cycle():
                 continue
 
             jobs: List[Dict[str, Any]] = []
-            # Main: Freelancer
             jobs.extend(await fetch_freelancer(kws))
-            # Optional: Fiverr (anti-spam controlled)
-            jobs.extend(await fetch_fiverr(kws))
 
-            # Dedup by job id
+            # Dedup
             seen = set()
             deduped: List[Dict[str, Any]] = []
             for j in jobs:
@@ -310,7 +306,6 @@ async def worker_cycle():
                 jid = job.get("id")
                 if not jid or jid in sent_ids:
                     continue
-                # Mark as sent (JobSent has only user_id, job_id)
                 db.add(JobSent(user_id=u.id, job_id=jid))
                 db.commit()
 
@@ -324,8 +319,8 @@ async def worker_cycle():
         db.close()
 
 async def worker_loop():
-    logger.info("Worker loop every %ss (SEARCH_MODE=%s, FL_TYPE=%s, MIN=%s, MAX=%s, FIVERR_MODE=%s)",
-                INTERVAL, SEARCH_MODE, FL_PROJECT_TYPE, FL_MIN_BUDGET, FL_MAX_BUDGET, FIVERR_MODE)
+    logger.info("Worker loop every %ss (SEARCH_MODE=%s, FL_TYPE=%s, MIN=%s, MAX=%s)",
+                INTERVAL, SEARCH_MODE, FL_PROJECT_TYPE, FL_MIN_BUDGET, FL_MAX_BUDGET)
     while True:
         await worker_cycle()
         await asyncio.sleep(INTERVAL)
