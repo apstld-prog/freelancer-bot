@@ -33,7 +33,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
 
-# affiliate helpers (for /saved Open)
+# Affiliate helpers (for /saved “Open” links)
 FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()  # e.g. "apstld"
 AFFILIATE_PREFIX    = os.getenv("AFFILIATE_PREFIX", "").strip()
 
@@ -134,24 +134,24 @@ def features_block() -> str:
 def help_text(is_admin_flag: bool) -> str:
     txt = (
         "📖 *Help / How it works*\n\n"
-        "1️⃣ Add keywords with `/addkeyword python, logo, \"μελέτη φωτισμού\"`\n"
-        "   • Χωρίζεις με *κόμμα* για πολλά. Χωρίς κόμμα, *όλο το κείμενο* γίνεται ένα keyword.\n"
-        "2️⃣ Set countries with `/setcountry US,UK` *(ή `ALL`)*\n"
-        "3️⃣ Αποθήκευσε πρότυπο πρότασης με `/setproposal <text>`\n"
+        "1️⃣ Add keywords with `/addkeyword python, logo, \"lighting study\"`\n"
+        "   • Use *comma* to separate many. Without a comma, the full text becomes *one* keyword.\n"
+        "2️⃣ Set countries with `/setcountry US,UK` (or `ALL`)\n"
+        "3️⃣ Save a proposal template with `/setproposal <text>`\n"
         "   Placeholders: `{jobtitle}`, `{experience}`, `{stack}`, `{budgettime}`, `{portfolio}`, `{name}`\n"
-        "4️⃣ Όταν έρχεται αγγελία:\n"
-        "   ⭐ *Keep* — αποθήκευση (δες `/saved`)\n"
-        "   🗑 *Delete* — σβήσιμο/σίγαση\n"
+        "4️⃣ When a job arrives:\n"
+        "   ⭐ *Keep* — save it (see `/saved`)\n"
+        "   🗑 *Delete* — remove & mute that job\n"
         "   💼 *Proposal* — affiliate link\n"
         "   🔗 *Original* — affiliate-wrapped link\n\n"
-        "🔎 `/mysettings` για φίλτρα & trial/license\n"
-        "🧪 `/selftest` για δοκιμαστική κάρτα\n"
-        "🌍 `/platforms CC` πλατφόρμες ανά χώρα (π.χ. `/platforms GR`)\n"
-        "⭐ `/saved` για τις αποθηκευμένες αγγελίες\n\n"
+        "🔎 `/mysettings` to review filters & trial/license\n"
+        "🧪 `/selftest` for a sample card\n"
+        "🌍 `/platforms CC` to see platforms by country (e.g. `/platforms GR`)\n"
+        "⭐ `/saved` to view your saved jobs\n\n"
         "🧰 *Shortcuts*\n"
-        "• `/keywords` ή `/listkeywords` — λίστα keywords\n"
-        "• `/delkeyword <kw>` — διαγραφή (χωρίς διάκριση πεζών/κεφαλαίων)\n"
-        "• `/clearkeywords` — διαγραφή όλων\n\n"
+        "• `/keywords` or `/listkeywords` — list keywords\n"
+        "• `/delkeyword <kw>` — delete one (case-insensitive)\n"
+        "• `/clearkeywords` — delete all\n\n"
         "🛰 *Platforms*\n"
         "• *Global*: " + ", ".join(platforms_global()) + "\n"
         "• *Greece*: " + ", ".join(platforms_gr())
@@ -161,7 +161,7 @@ def help_text(is_admin_flag: bool) -> str:
             "\n\n🛡 *Admin*\n"
             "• `/stats` — users/active\n"
             "• `/grant <telegram_id> <days>` — license\n"
-            "• `/reply <telegram_id> <message>` — απάντηση σε χρήστη"
+            "• `/reply <telegram_id> <message>` — reply to a user"
         )
     return txt
 
@@ -188,8 +188,15 @@ def settings_text(u: User) -> str:
         "ℹ️ For extension, contact the admin."
     )
 
-# --------- Keyword parsing (comma-first, Greek-friendly) ---------
+# --------- Keyword parsing (comma-first; accepts any Unicode/Greek) ---------
 def parse_keywords_from_text(full_text: str) -> List[str]:
+    """
+    Rules:
+    - If commas exist, split by comma -> many keywords.
+    - If NO commas, treat the remainder as ONE keyword (phrase allowed).
+    - Strip surrounding quotes (single/double).
+    - Deduplicate case-insensitively.
+    """
     parts = full_text.split(" ", 1)
     raw = parts[1] if len(parts) > 1 else ""
     raw = raw.strip()
@@ -277,7 +284,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_text = update.message.text or ""
     kws = parse_keywords_from_text(full_text)
     if not kws:
-        return await update.message.reply_text('Usage: /addkeyword python, logo, "μελέτη φωτισμού"')
+        return await update.message.reply_text('Usage: /addkeyword python, logo, "lighting study"')
 
     db = SessionLocal()
     try:
@@ -442,7 +449,7 @@ def job_url_from_id(job_id: str) -> Tuple[Optional[str], Optional[str]]:
             pid = m.group(1)
             url = f"https://www.freelancer.com/projects/{pid}"
             return aff_for_source("freelancer", url), "freelancer"
-    # fiverr-* ids (daily) δεν έχουν συγκεκριμένη αγγελία
+    # fiverr-* ids (daily) have no specific job
     return None, None
 
 def build_saved_view(items: List[str], page: int) -> Tuple[str, InlineKeyboardMarkup]:
@@ -461,7 +468,6 @@ def build_saved_view(items: List[str], page: int) -> Tuple[str, InlineKeyboardMa
     else:
         for jid in chunk:
             url, src = job_url_from_id(jid)
-            title = f"{jid}"
             lines.append(f"• `{jid}`")
             row = []
             if url:
@@ -469,7 +475,6 @@ def build_saved_view(items: List[str], page: int) -> Tuple[str, InlineKeyboardMa
             row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"saved:del:{jid}:{page}"))
             kb_rows.append(row)
 
-    # Pagination
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"saved:page:{page-1}"))
@@ -518,7 +523,6 @@ async def saved_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if row:
                 db.delete(row)
                 db.commit()
-            # refresh list
             rows = db.query(JobSaved).filter_by(user_id=u.id).order_by(JobSaved.created_at.desc()).all()
             items = [r.job_id for r in rows]
             text, kb = build_saved_view(items, page)
@@ -535,7 +539,7 @@ async def saved_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------- Contact / Admin reply --------
 async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        return await update.message.reply_text("Send me a message with: /contact <your message>")
+        return await update.message.reply_text("Send a message to the admin with: /contact <your message>")
     msg = " ".join(context.args)
     u = update.effective_user
     try:
@@ -544,7 +548,7 @@ async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"📩 *Contact* from `{u.id}` ({u.full_name}):\n\n{msg}",
             parse_mode=constants.ParseMode.MARKDOWN,
         )
-        await update.message.reply_text("✅ Sent to admin. You'll receive a reply here.")
+        await update.message.reply_text("✅ Message delivered to admin. You'll receive a reply here.")
     except Exception:
         await update.message.reply_text("Could not deliver your message to admin.")
 
@@ -603,7 +607,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = await ensure_user(db, update.effective_user.id)
         chat_id = q.message.chat_id
         if data == "menu:addkeywords":
-            await context.bot.send_message(chat_id, 'Use /addkeyword python, logo, "μελέτη φωτισμού"')
+            await context.bot.send_message(chat_id, 'Use /addkeyword python, logo, "lighting study"')
         elif data == "menu:settings":
             await context.bot.send_message(
                 chat_id,
@@ -619,7 +623,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True
             )
         elif data == "menu:contact":
-            await context.bot.send_message(chat_id, "Send a message to admin: /contact <your message>")
+            await context.bot.send_message(chat_id, "Send a message to the admin: /contact <your message>")
         elif data == "menu:saved":
             rows = db.query(JobSaved).filter_by(user_id=u.id).order_by(JobSaved.created_at.desc()).all()
             items = [r.job_id for r in rows]
