@@ -4,8 +4,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
-from sqlalchemy.orm import joinedload
-
 from telegram import (
     Update,
     InlineKeyboardMarkup,
@@ -39,11 +37,11 @@ def is_admin(update: Update) -> bool:
     return update.effective_user and update.effective_user.id == ADMIN_ID
 
 async def ensure_user(db, tg_id: int) -> User:
+    """Create user if missing. Trial ΔΕΝ ξεκινάει εδώ για να αρχίσει στο /start."""
     u = db.query(User).filter_by(telegram_id=str(tg_id)).first()
     if not u:
         u = User(
             telegram_id=str(tg_id),
-            trial_until=now_utc() + timedelta(days=TRIAL_DAYS),
             countries="ALL",
         )
         db.add(u)
@@ -96,8 +94,8 @@ def features_block() -> str:
         "• Platforms by country (incl. GR boards)"
     )
 
-def help_text() -> str:
-    return (
+def help_text(is_admin_flag: bool) -> str:
+    txt = (
         "📖 *Help / How it works*\n\n"
         "1️⃣ Add keywords with `/addkeyword python telegram` (or use the menu)\n"
         "2️⃣ Set countries with `/setcountry US,UK` *(or `ALL`)*\n"
@@ -119,41 +117,56 @@ def help_text() -> str:
         "• *Global*: " + ", ".join(platforms_global()) + "\n"
         "• *Greece*: " + ", ".join(platforms_gr())
     )
+    if is_admin_flag:
+        txt += (
+            "\n\n🛡 *Admin*\n"
+            "• `/stats` — users/active\n"
+            "• `/grant <telegram_id> <days>` — give license\n"
+            "• `/reply <telegram_id> <message>` — reply to a user"
+        )
+    return txt
 
 def settings_text(u: User) -> str:
     kws = ", ".join(k.keyword for k in u.keywords) if u.keywords else "(none)"
-    trial = u.trial_until.strftime("%Y-%m-%d") if u.trial_until else "None"
-    lic = u.access_until.strftime("%Y-%m-%d") if u.access_until else "None"
+    start = u.created_at.strftime("%Y-%m-%d %H:%M:%S %Z") if u.created_at else "—"
+    trial = u.trial_until.strftime("%Y-%m-%d %H:%M:%S %Z") if u.trial_until else "None"
+    lic = u.access_until.strftime("%Y-%m-%d %H:%M:%S %Z") if u.access_until else "None"
     active = "✅" if (
         (u.trial_until and u.trial_until >= now_utc()) or
         (u.access_until and u.access_until >= now_utc())
     ) and not u.is_blocked else "❌"
+    note = "For extension, contact the admin."
     return (
         "🛠 *Your Settings*\n\n"
         f"• Keywords: {kws}\n"
         f"• Countries: {u.countries or 'ALL'}\n"
         f"• Proposal template: {(u.proposal_template[:40] + '…') if u.proposal_template else '(none)'}\n\n"
-        f"🎁 Trial until: {trial}\n"
+        f"🟢 Start date: {start}\n"
+        f"🎁 Trial ends: {trial}\n"
         f"🔒 License until: {lic}\n"
-        f"• Active: {active}\n\n"
+        f"• Active: {active}\n"
+        f"• Blocked: {'✅' if u.is_blocked else '❌'}\n\n"
         "🛰 *Platforms monitored:*\n"
         "• Global: " + ", ".join(platforms_global()) + "\n"
-        "• Greece: " + ", ".join(platforms_gr())
+        "• Greece: " + ", ".join(platforms_gr()) + "\n\n"
+        f"ℹ️ {note}"
     )
 
 # ---------------- Commands ----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Single central card:
-    - Welcome + short description
-    - Features list
-    - Buttons under the same message
+    Single central card with: welcome + short description + features + buttons.
+    Trial starts here on first /start.
     """
     db = SessionLocal()
     try:
-        await ensure_user(db, update.effective_user.id)
+        u = await ensure_user(db, update.effective_user.id)
 
-        # short one-liner description under welcome
+        # Αν δεν έχει trial_until, ξεκινά τώρα (10 ημέρες)
+        if not u.trial_until:
+            u.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
+            db.commit()
+
         description = (
             "Automatically finds matching freelance jobs from top platforms and "
             "sends you instant alerts with affiliate-safe links."
@@ -177,7 +190,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(help_text(), parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
+    await update.message.reply_text(
+        help_text(is_admin(update)),
+        parse_mode=constants.ParseMode.MARKDOWN,
+        disable_web_page_preview=True
+    )
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -185,13 +202,19 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt += f"🔗 Username: @{u.username}\n" if u.username else "🔗 Username: (none)\n"
     if is_admin(update):
         txt += "\n⭐ You are *ADMIN*."
+    else:
+        txt += "\n👤 You are a regular user."
     await update.message.reply_text(txt, parse_mode=constants.ParseMode.MARKDOWN)
 
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         u = await ensure_user(db, update.effective_user.id)
-        await update.message.reply_text(settings_text(u), parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
+        await update.message.reply_text(
+            settings_text(u),
+            parse_mode=constants.ParseMode.MARKDOWN,
+            disable_web_page_preview=True
+        )
     finally:
         db.close()
 
@@ -419,14 +442,25 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         u = await ensure_user(db, update.effective_user.id)
+        chat_id = q.message.chat_id
         if data == "menu:addkeywords":
-            await q.message.reply_text("Use /addkeyword <kw1> <kw2> …")
+            await context.bot.send_message(chat_id, "Use /addkeyword <kw1> <kw2> …")
         elif data == "menu:settings":
-            await q.message.reply_text(settings_text(u), parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
+            await context.bot.send_message(
+                chat_id,
+                settings_text(u),
+                parse_mode=constants.ParseMode.MARKDOWN,
+                disable_web_page_preview=True
+            )
         elif data == "menu:help":
-            await q.message.reply_text(help_text(), parse_mode=constants.ParseMode.MARKDOWN, disable_web_page_preview=True)
+            await context.bot.send_message(
+                chat_id,
+                help_text(is_admin(update)),
+                parse_mode=constants.ParseMode.MARKDOWN,
+                disable_web_page_preview=True
+            )
         elif data == "menu:contact":
-            await q.message.reply_text("Send a message to admin: /contact <your message>")
+            await context.bot.send_message(chat_id, "Send a message to admin: /contact <your message>")
     finally:
         db.close()
 
