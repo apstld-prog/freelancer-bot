@@ -1,391 +1,340 @@
 # worker.py
 import os
-import asyncio
+import time
+import json
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any, Optional
+import unicodedata
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
 import httpx
-from sqlalchemy.orm import joinedload
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, constants
 
-from db import SessionLocal, User, Keyword, JobSent, JobDismissed, ensure_schema
+from db import (
+    ensure_schema,
+    SessionLocal,
+    User,
+    Keyword,
+    JobSent,
+)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [worker] %(levelname)s: %(message)s")
-logger = logging.getLogger("worker")
+# ---------------- Logging ----------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [db] %(levelname)s: %(message)s")
+log = logging.getLogger("db")
 
-# ---- Ensure DB schema on worker startup (CRUCIAL) ----
-ensure_schema()
-
-# ------------ Env / Config ------------
+# ---------------- Config (env) ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-if not BOT_TOKEN:
-    raise SystemExit("BOT_TOKEN is not set.")
-bot = Bot(BOT_TOKEN)
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
-DEBUG_TO_ADMIN = os.getenv("WORKER_DEBUG_TO_ADMIN", "0") in ("1", "true", "True", "yes")
+# Cycle interval
+WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "300"))
 
-FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()  # e.g. "apstld"
-AFFILIATE_PREFIX    = os.getenv("AFFILIATE_PREFIX", "").strip()
+# Freelancer
+FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()  # e.g. apstld
+FREELANCER_PROJECT_TYPE = os.getenv("FREELANCER_PROJECT_TYPE", "all").lower()  # all|fixed|hourly
+FREELANCER_MIN_BUDGET = float(os.getenv("FREELANCER_MIN_BUDGET", "0"))
+FREELANCER_MAX_BUDGET = float(os.getenv("FREELANCER_MAX_BUDGET", "0"))
 
-SEARCH_MODE = os.getenv("SEARCH_MODE", "all").lower()  # "all" or "single"
-INTERVAL    = int(os.getenv("WORKER_INTERVAL", "300"))
+# Matching behavior (NEW)
+JOB_MATCH_SCOPE = os.getenv("JOB_MATCH_SCOPE", "title_desc").lower()  # title | title_desc
+JOB_MATCH_REQUIRE = os.getenv("JOB_MATCH_REQUIRE", "any").lower()     # any | all
 
-FL_PROJECT_TYPE = os.getenv("FREELANCER_PROJECT_TYPE", "all").lower()  # "all" | "fixed" | "hourly"
-try:
-    FL_MIN_BUDGET = float(os.getenv("FREELANCER_MIN_BUDGET", "0") or 0)
-except Exception:
-    FL_MIN_BUDGET = 0.0
-try:
-    FL_MAX_BUDGET = float(os.getenv("FREELANCER_MAX_BUDGET", "0") or 0)  # 0 = no cap
-except Exception:
-    FL_MAX_BUDGET = 0.0
+# Optional: DM debug to admin
+ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
+WORKER_DEBUG_TO_ADMIN = os.getenv("WORKER_DEBUG_TO_ADMIN", "0") == "1"
 
-FIVERR_MODE         = os.getenv("FIVERR_MODE", "off").lower()  # "off" | "daily"
-FIVERR_AFF_TEMPLATE = os.getenv("FIVERR_AFF_TEMPLATE", "").strip()
+# Telegram API
+TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 
-# ---------- Time helpers (UTC-aware) ----------
 UTC = timezone.utc
-def now_utc() -> datetime:
+def now_utc():
     return datetime.now(UTC)
 
-def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
-    if dt is None:
-        return None
-    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-        return dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
+# Ensure schema up-front
+ensure_schema()
 
-def user_is_active(u: User) -> bool:
-    if getattr(u, "is_blocked", False):
-        return False
-    now = now_utc()
-    trial = to_aware(getattr(u, "trial_until", None))
-    lic = to_aware(getattr(u, "access_until", None))
-    return (trial and trial >= now) or (lic and lic >= now)
+# ---------------- Normalization / Matching ----------------
+def strip_accents(s: str) -> str:
+    # Makes matching accent-insensitive (works well for Greek)
+    return "".join(ch for ch in unicodedata.normalize("NFD", s) if unicodedata.category(ch) != "Mn")
 
-# ---------- FX rates ----------
-_RATES: Dict[str, float] = {}
-_RATES_FETCHED_AT: Optional[datetime] = None
-_RATES_TTL = timedelta(hours=12)
-RATES_URL = os.getenv("FX_RATES_URL", "https://open.er-api.com/v6/latest/USD")
+def norm_text(s: str) -> str:
+    if not s:
+        return ""
+    s = strip_accents(s)
+    return s.casefold()
 
-async def get_rates() -> Dict[str, float]:
-    global _RATES, _RATES_FETCHED_AT
-    if _RATES and _RATES_FETCHED_AT and now_utc() - _RATES_FETCHED_AT < _RATES_TTL:
-        return _RATES
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(RATES_URL)
-        data = r.json()
-        rates = data.get("rates") or {}
-        if isinstance(rates, dict) and rates:
-            _RATES = rates
-            _RATES_FETCHED_AT = now_utc()
-            logger.info("FX rates refreshed (%d currencies).", len(_RATES))
-    except Exception as e:
-        logger.warning("FX fetch failed: %s", e)
-    return _RATES
+def job_matches(
+    job: Dict,
+    keywords: List[str],
+    scope: str,
+    require: str,
+) -> Tuple[bool, List[str]]:
+    """
+    Return (ok, matched_keywords).
+    - scope: 'title' or 'title_desc'
+    - require: 'any' or 'all'
+    """
+    title = norm_text(job.get("title", ""))
+    desc = norm_text(job.get("description", ""))
 
-# ---------- Utils ----------
-def affiliate_wrap(url: str) -> str:
-    return f"{AFFILIATE_PREFIX}{url}" if AFFILIATE_PREFIX else url
+    haystack = title if scope == "title" else (title + " " + desc)
 
-def aff_for_source(source: str, url: str) -> str:
-    if source == "freelancer" and FREELANCER_REF_CODE and "freelancer.com" in url:
-        sep = "&" if "?" in url else "?"
-        return f"{url}{sep}f={FREELANCER_REF_CODE}"
-    return affiliate_wrap(url)
-
-def timeago(ts: Optional[int]) -> str:
-    if not ts:
-        return "unknown"
-    dt = datetime.fromtimestamp(ts, tz=UTC)
-    delta = now_utc() - dt
-    secs = int(delta.total_seconds())
-    if secs < 60: return f"{secs}s ago"
-    mins = secs // 60
-    if mins < 60: return f"{mins}m ago"
-    hrs = mins // 60
-    if hrs < 24: return f"{hrs}h ago"
-    days = hrs // 24
-    return f"{days}d ago"
-
-def passes_budget(budget: Optional[Dict[str, Any]]) -> bool:
-    if not budget:
-        return True
-    mn = float(budget.get("minimum") or 0)
-    mx = float(budget.get("maximum") or 0)
-    if FL_MIN_BUDGET and (mx or mn) and (mx < FL_MIN_BUDGET and mn < FL_MIN_BUDGET):
-        return False
-    if FL_MAX_BUDGET and (mn or mx) and (mn > FL_MAX_BUDGET and mx > FL_MAX_BUDGET):
-        return False
-    return True
-
-def passes_type(type_str: Optional[str]) -> bool:
-    if FL_PROJECT_TYPE == "all":
-        return True
-    if not type_str:
-        return True
-    t = type_str.lower()
-    if FL_PROJECT_TYPE == "fixed" and "fixed" in t:
-        return True
-    if FL_PROJECT_TYPE == "hourly" and "hour" in t:
-        return True
-    return False
-
-def fmt_usd(n: Optional[float]) -> Optional[str]:
-    if n is None:
-        return None
-    return f"{n:,.2f}"
-
-async def convert_budget_to_usd(budget: Optional[Dict[str, Any]]) -> Optional[str]:
-    if not budget:
-        return None
-    cur = (budget.get("currency") or {}).get("code") or ""
-    mn = budget.get("minimum"); mx = budget.get("maximum")
-    if not (mn or mx):
-        return None
-    if not cur or cur.upper() == "USD":
-        lo = fmt_usd(float(mn) if mn else None)
-        hi = fmt_usd(float(mx) if mx else None)
-        if lo and hi: return f"~ ${lo}–${hi} USD"
-        if lo: return f"~ ≥ ${lo} USD"
-        if hi: return f"~ ≤ ${hi} USD"
-        return None
-
-    rates = await get_rates()
-    rate = rates.get(cur.upper())
-    if not rate or rate == 0:
-        return None
-    lo = (float(mn) / rate) if mn else None
-    hi = (float(mx) / rate) if mx else None
-    if lo and hi: return f"~ ${fmt_usd(lo)}–${fmt_usd(hi)} USD"
-    if lo: return f"~ ≥ ${fmt_usd(lo)} USD"
-    if hi: return f"~ ≤ ${fmt_usd(hi)} USD"
-    return None
-
-def format_budget(budget: Optional[Dict[str, Any]], proj_type: Optional[str]) -> str:
-    if not budget:
-        return "—"
-    cur = (budget.get("currency") or {}).get("code") or ""
-    mn = budget.get("minimum")
-    mx = budget.get("maximum")
-    if proj_type and "hour" in (proj_type or "").lower():
-        if mn and mx: return f"{mn}–{mx} {cur}/h"
-        if mn: return f"≥ {mn} {cur}/h"
-        if mx: return f"≤ {mx} {cur}/h"
-        return f"— {cur}/h"
-    else:
-        if mn and mx: return f"{mn}–{mx} {cur}"
-        if mn: return f"≥ {mn} {cur}"
-        if mx: return f"≤ {mx} {cur}"
-        return f"— {cur}".strip()
-
-# ---------- Fetchers ----------
-async def fetch_freelancer(keywords: List[str]) -> List[Dict[str, Any]]:
-    if not FREELANCER_REF_CODE:
-        logger.warning("Freelancer ref code missing, skipping Freelancer API.")
-        return []
-    base_url = "https://www.freelancer.com/api/projects/0.1/projects/active/"
-    if not keywords:
-        return []
-
-    queries = keywords if SEARCH_MODE == "single" else [",".join(keywords)]
-    logger.info("Freelancer queries: %s", queries)
-
-    out: List[Dict[str, Any]] = []
-    async with httpx.AsyncClient(timeout=25) as client:
-        for q in queries:
-            params = {
-                "query": q,
-                "limit": 30,
-                "compact": "true",
-                "user_details": "true",
-                "job_details": "true",
-                "full_description": "true",
-                "referrer": FREELANCER_REF_CODE,
-            }
-            try:
-                r = await client.get(base_url, params=params)
-                if r.status_code != 200:
-                    logger.warning("Freelancer API non-200 (%s) for query '%s'", r.status_code, q)
-                    continue
-                data = r.json()
-                projects = data.get("result", {}).get("projects", []) or []
-                logger.info("Freelancer returned %d results for query '%s'", len(projects), q)
-                for pr in projects:
-                    proj_type = pr.get("type") or pr.get("project_type")
-                    if not passes_type(proj_type):
-                        continue
-                    budget = pr.get("budget")
-                    if not passes_budget(budget):
-                        continue
-
-                    pid = pr.get("id")
-                    url = f"https://www.freelancer.com/projects/{pid}"
-                    title = pr.get("title") or "Untitled"
-                    desc = pr.get("preview_description") or pr.get("description") or ""
-                    bids = pr.get("bid_count") or (pr.get("bid_stats") or {}).get("bid_count")
-                    created_ts = pr.get("time_submitted") or pr.get("submitdate")
-
-                    out.append({
-                        "id": f"freelancer-{pid}",
-                        "title": title,
-                        "description": desc,
-                        "url": url,
-                        "source": "freelancer",
-                        "budget": budget,
-                        "proj_type": proj_type,
-                        "bids": bids,
-                        "created_ts": created_ts,
-                    })
-            except Exception as e:
-                logger.warning("Error fetching Freelancer API for '%s': %s", q, e)
-    return out
-
-async def fetch_fiverr(keywords: List[str]) -> List[Dict[str, Any]]:
-    if FIVERR_MODE != "daily" or not FIVERR_AFF_TEMPLATE:
-        return []
-    today = datetime.utcnow().strftime("%Y%m%d")
-    out: List[Dict[str, Any]] = []
+    matched = []
     for kw in keywords:
-        url = FIVERR_AFF_TEMPLATE.replace("{kw}", kw)
-        out.append({
-            "id": f"fiverr-{kw}-{today}",
-            "title": f"Fiverr services for {kw}",
-            "description": f"Browse Fiverr gigs related to '{kw}'.",
-            "url": url,
-            "source": "fiverr",
-            "budget": None,
-            "proj_type": None,
-            "bids": None,
-            "created_ts": int(now_utc().timestamp()),
-        })
-    return out
+        kw_norm = norm_text(kw)
+        if kw_norm and kw_norm in haystack:
+            matched.append(kw)
 
-# ---------- Sending ----------
-async def send_job_to_user(u: User, job: Dict[str, Any]) -> None:
-    src = job.get("source", "")
-    proj_type = job.get("proj_type") or ""
-    budget_str = format_budget(job.get("budget"), proj_type)
-    budget_usd = await convert_budget_to_usd(job.get("budget"))
-    bids = job.get("bids")
-    created = timeago(job.get("created_ts"))
+    if require == "all":
+        ok = len(matched) == len([k for k in keywords if k.strip() != ""])
+    else:
+        ok = len(matched) > 0
+    return ok, matched
 
-    meta_lines = [f"👤 Source: *{src.capitalize()}*"]
-    if proj_type:
-        pretty_type = "Hourly" if "hour" in proj_type.lower() else "Fixed"
-        meta_lines.append(f"🧾 Type: *{pretty_type}*")
-    meta_lines.append(f"💰 Budget: *{budget_str}*")
-    if budget_usd:
-        meta_lines.append(f"💵 {budget_usd}")
-    if bids is not None:
-        meta_lines.append(f"📨 Bids: *{bids}*")
-    if created:
-        meta_lines.append(f"🕒 Posted: *{created}*")
-    meta = "\n".join(meta_lines)
+# ---------------- HTTP helpers ----------------
+HTTP_TIMEOUT = 20.0
 
-    text_desc = (job.get("description") or "").strip()
-    if len(text_desc) > 700:
-        text_desc = text_desc[:700] + "…"
+async def fetch_freelancer_projects(query: str) -> Dict:
+    """
+    Calls Freelancer public API for active projects.
+    We ask wide and then we filter locally with job_matches().
+    """
+    url = (
+        "https://www.freelancer.com/api/projects/0.1/projects/active/"
+        f"?query={query}&limit=30&compact=true&user_details=true&job_details=true&full_description=true"
+    )
+    # Adding ref code doesn't affect API response, only user-facing links; keep query clean
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers={"Accept": "application/json"}) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        return r.json()
 
-    title = job.get("title", "New opportunity")
-    final_url = aff_for_source(src, job.get("url", ""))
+def freelancer_job_to_card(p: Dict, matched: List[str]) -> Dict:
+    """
+    Convert Freelancer project to a generic job dict used by sender.
+    """
+    pid = str(p.get("id"))
+    title = p.get("title") or "Untitled"
+    type_ = "Fixed" if p.get("type") == "fixed" else ("Hourly" if p.get("type") == "hourly" else "Unknown")
+    budget = p.get("budget") or {}
+    minb = budget.get("minimum") or 0
+    maxb = budget.get("maximum") or 0
+    bids = p.get("bid_stats", {}).get("bid_count", 0)
+    time_submitted = p.get("time_submitted")
+    posted = "now"
+    if isinstance(time_submitted, (int, float)):
+        # seconds epoch
+        age_sec = max(0, int(now_utc().timestamp() - time_submitted))
+        if age_sec < 60:
+            posted = f"{age_sec}s ago"
+        elif age_sec < 3600:
+            posted = f"{age_sec//60}m ago"
+        elif age_sec < 86400:
+            posted = f"{age_sec//3600}h ago"
+        else:
+            posted = f"{age_sec//86400}d ago"
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💼 Proposal", url=final_url),
-         InlineKeyboardButton("🔗 Original", url=final_url)],
-        [InlineKeyboardButton("⭐ Keep", callback_data=f"save:{job.get('id')}"),
-         InlineKeyboardButton("🗑 Delete", callback_data=f"dismiss:{job.get('id')}")]
-    ])
+    # Link
+    base_url = f"https://www.freelancer.com/projects/{pid}"
+    sep = "&" if "?" in base_url else "?"
+    job_url = f"{base_url}{sep}f={FREELANCER_REF_CODE}" if FREELANCER_REF_CODE else base_url
 
-    text = f"💼 *{title}*\n\n{meta}\n\n{text_desc}"
+    # Description (short)
+    desc = (p.get("description") or "").strip().replace("\r", " ").replace("\n", " ")
+    if len(desc) > 220:
+        desc = desc[:217] + "…"
+
+    return {
+        "id": f"freelancer-{pid}",
+        "source": "Freelancer",
+        "title": title,
+        "type": type_,
+        "budget_min": minb,
+        "budget_max": maxb,
+        "bids": bids,
+        "posted": posted,
+        "description": desc,
+        "original_url": job_url,      # already affiliate-safe
+        "proposal_url": job_url,      # same for Freelancer
+        "matched": matched,
+    }
+
+# ---------------- Telegram send ----------------
+async def tg_send_message(chat_id: str, text: str, reply_markup: Optional[dict] = None):
+    if not TG_API:
+        return
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        r = await client.post(f"{TG_API}/sendMessage", json=payload)
+        r.raise_for_status()
+
+def job_markup(job: Dict) -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "💼 Proposal", "url": job["proposal_url"]},
+                {"text": "🔗 Original", "url": job["original_url"]},
+            ],
+            [
+                {"text": "⭐ Keep", "callback_data": f"save:{job['id']}"},
+                {"text": "🗑 Delete", "callback_data": f"dismiss:{job['id']}"},
+            ],
+        ]
+    }
+
+def job_text(job: Dict) -> str:
+    budget_line = "—"
+    if job["budget_min"] or job["budget_max"]:
+        budget_line = f"{job['budget_min']:.0f}–{job['budget_max']:.0f}"
+    matched_line = ", ".join(job.get("matched", [])) or "—"
+    desc = job.get("description") or ""
+    return (
+        f"*{job['title']}*\n\n"
+        f"👤 Source: *{job['source']}*\n"
+        f"🧾 Type: *{job['type']}*\n"
+        f"💰 Budget: *{budget_line}*\n"
+        f"📨 Bids: *{job['bids']}*\n"
+        f"🕒 Posted: *{job['posted']}*\n\n"
+        f"{desc}\n\n"
+        f"_Matched:_ {matched_line}"
+    )
+
+# ---------------- Core loop ----------------
+async def process_user(db, u: User) -> int:
+    """
+    Returns number of messages sent for this user in this cycle.
+    """
+    if not u:
+        return 0
+
+    # active?
+    active = False
+    now = now_utc()
+    trial = u.trial_until
+    lic = u.access_until
+    if trial and trial >= now:
+        active = True
+    if lic and lic >= now:
+        active = True
+    if not active:
+        return 0
+
+    # keywords
+    kws_rows: List[Keyword] = u.keywords or []
+    keywords = [k.keyword for k in kws_rows if (k.keyword or "").strip()]
+    if not keywords:
+        return 0
+
+    # Build a wide query for the platform, then filter locally
+    query_str = ",".join(keywords)
+
+    # Fetch from Freelancer
+    sent_count = 0
     try:
-        await bot.send_message(
-            chat_id=u.telegram_id,
-            text=text,
-            parse_mode=constants.ParseMode.MARKDOWN,
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        logger.info("Sent job %s to %s", job.get("id"), u.telegram_id)
+        data = await fetch_freelancer_projects(query_str)
+        projects = (data.get("result") or {}).get("projects") or []
     except Exception as e:
-        logger.warning("Error sending job %s to %s: %s", job.get("id"), u.telegram_id, e)
+        log.warning("Freelancer fetch error: %s", e)
+        projects = []
 
-# ---------- Main cycle ----------
-async def worker_cycle():
-    from db import SessionLocal  # ensure fresh session factory
-    db = SessionLocal()
-    summary_lines = []
-    try:
-        users = db.query(User).options(joinedload(User.keywords)).all()
+    # budget/type coarse filter first
+    filtered: List[Dict] = []
+    for p in projects:
+        # type
+        ptype = p.get("type")
+        if FREELANCER_PROJECT_TYPE == "fixed" and ptype != "fixed":
+            continue
+        if FREELANCER_PROJECT_TYPE == "hourly" and ptype != "hourly":
+            continue
+        # budget
+        b = p.get("budget") or {}
+        minb = float(b.get("minimum") or 0)
+        maxb = float(b.get("maximum") or 0)
+        if FREELANCER_MIN_BUDGET and maxb and maxb < FREELANCER_MIN_BUDGET:
+            continue
+        if FREELANCER_MAX_BUDGET and minb and minb > FREELANCER_MAX_BUDGET:
+            continue
+        filtered.append(p)
+
+    # local keyword match (strict)
+    strict: List[Tuple[Dict, List[str]]] = []
+    for p in filtered:
+        # Prepare a basic object for matching
+        obj = {
+            "title": p.get("title") or "",
+            "description": p.get("description") or "",
+        }
+        ok, matched = job_matches(obj, keywords, JOB_MATCH_SCOPE, JOB_MATCH_REQUIRE)
+        if ok:
+            strict.append((p, matched))
+
+    # dedup by project id & by previously sent
+    already: Dict[str, bool] = {
+        js.job_id: True
+        for js in db.query(JobSent).filter_by(user_id=u.id).all()
+    }
+
+    for p, matched in strict:
+        pid = str(p.get("id"))
+        jid = f"freelancer-{pid}"
+        if already.get(jid):
+            continue
+
+        job = freelancer_job_to_card(p, matched)
+        text = job_text(job)
+        markup = job_markup(job)
+
+        try:
+            await tg_send_message(u.telegram_id, text, markup)
+            sent_count += 1
+            # mark as sent
+            rec = JobSent(user_id=u.id, job_id=jid)
+            db.add(rec)
+            db.commit()
+            log.info("Sent job %s to %s", jid, u.telegram_id)
+        except Exception as e:
+            log.warning("Send error to %s: %s", u.telegram_id, e)
+
+    return sent_count
+
+async def worker_loop():
+    log.info(
+        "Worker loop every %ss (JOB_MATCH_SCOPE=%s, JOB_MATCH_REQUIRE=%s, FL_TYPE=%s, MIN=%.1f, MAX=%.1f)",
+        WORKER_INTERVAL, JOB_MATCH_SCOPE, JOB_MATCH_REQUIRE,
+        FREELANCER_PROJECT_TYPE, FREELANCER_MIN_BUDGET, FREELANCER_MAX_BUDGET
+    )
+    while True:
+        db = SessionLocal()
         total_sent = 0
-        for u in users:
-            active = user_is_active(u)
-            kws = [k.keyword for k in u.keywords]
-            summary_lines.append(f"User {u.telegram_id}: active={active}, keywords={kws}")
+        try:
+            users: List[User] = db.query(User).all()
+            for u in users:
+                total_sent += await process_user(db, u)
+        except Exception as e:
+            log.exception("Worker loop error: %s", e)
+        finally:
+            db.close()
 
-            if not active or not kws:
-                continue
+        log.info("Worker cycle complete. Sent %d messages.", total_sent)
 
-            jobs: List[Dict[str, Any]] = []
-            jobs.extend(await fetch_freelancer(kws))
-            jobs.extend(await fetch_fiverr(kws))
-
-            seen = set()
-            deduped: List[Dict[str, Any]] = []
-            for j in jobs:
-                jid = j.get("id")
-                if not jid or jid in seen:
-                    continue
-                seen.add(jid)
-                deduped.append(j)
-
-            sent_ids = {row.job_id for row in db.query(JobSent).filter_by(user_id=u.id).all()}
-            dismissed_ids = {row.job_id for row in db.query(JobDismissed).filter_by(user_id=u.id).all()}
-            logger.info("User %s: %d candidates, %d sent, %d dismissed",
-                        u.telegram_id, len(deduped), len(sent_ids), len(dismissed_ids))
-
-            count_for_user = 0
-            for job in deduped:
-                jid = job.get("id")
-                if not jid or jid in sent_ids or jid in dismissed_ids:
-                    continue
-                db.add(JobSent(user_id=u.id, job_id=jid))
-                db.commit()
-                await send_job_to_user(u, job)
-                total_sent += 1
-                count_for_user += 1
-
-            summary_lines.append(f"  -> sent {count_for_user}")
-
-        logger.info("Worker cycle complete. Sent %d messages.", total_sent)
-        if DEBUG_TO_ADMIN and ADMIN_ID:
+        # Optional debug DM to admin
+        if WORKER_DEBUG_TO_ADMIN and TG_API and ADMIN_ID:
             try:
-                await bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text="🛠 Worker summary:\n" + "\n".join(summary_lines) + f"\nTotal sent: {total_sent}",
+                await tg_send_message(
+                    ADMIN_ID,
+                    f"Worker cycle done. Sent *{total_sent}* messages.\n"
+                    f"`scope={JOB_MATCH_SCOPE}, require={JOB_MATCH_REQUIRE}`",
                 )
             except Exception:
                 pass
-    except Exception as e:
-        logger.exception("Worker cycle error: %s", e)
-        if DEBUG_TO_ADMIN and ADMIN_ID:
-            try:
-                await bot.send_message(chat_id=ADMIN_ID, text=f"❗ Worker error: {e}")
-            except Exception:
-                pass
-    finally:
-        db.close()
 
-async def worker_loop():
-    logger.info("Worker loop every %ss (SEARCH_MODE=%s, FL_TYPE=%s, MIN=%s, MAX=%s, FIVERR_MODE=%s)",
-                INTERVAL, SEARCH_MODE, FL_PROJECT_TYPE, FL_MIN_BUDGET, FL_MAX_BUDGET, FIVERR_MODE)
-    while True:
-        await worker_cycle()
-        await asyncio.sleep(INTERVAL)
+        time.sleep(WORKER_INTERVAL)
 
+# ---------------- Entrypoint ----------------
 if __name__ == "__main__":
-    asyncio.run(worker_loop())
+    import asyncio
+    try:
+        asyncio.run(worker_loop())
+    except KeyboardInterrupt:
+        pass
