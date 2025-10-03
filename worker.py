@@ -1,7 +1,6 @@
 # worker.py
 import os
 import time
-import json
 import logging
 import unicodedata
 from datetime import datetime, timezone
@@ -33,7 +32,7 @@ FREELANCER_PROJECT_TYPE = os.getenv("FREELANCER_PROJECT_TYPE", "all").lower()  #
 FREELANCER_MIN_BUDGET = float(os.getenv("FREELANCER_MIN_BUDGET", "0"))
 FREELANCER_MAX_BUDGET = float(os.getenv("FREELANCER_MAX_BUDGET", "0"))
 
-# Matching behavior (NEW)
+# Matching behavior
 JOB_MATCH_SCOPE = os.getenv("JOB_MATCH_SCOPE", "title_desc").lower()  # title | title_desc
 JOB_MATCH_REQUIRE = os.getenv("JOB_MATCH_REQUIRE", "any").lower()     # any | all
 
@@ -45,15 +44,26 @@ WORKER_DEBUG_TO_ADMIN = os.getenv("WORKER_DEBUG_TO_ADMIN", "0") == "1"
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 
 UTC = timezone.utc
-def now_utc():
+def now_utc() -> datetime:
     return datetime.now(UTC)
+
+def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Return dt in UTC, making it timezone-aware if it was naive."""
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    # unexpected type (e.g. string) -> ignore
+    return None
 
 # Ensure schema up-front
 ensure_schema()
 
 # ---------------- Normalization / Matching ----------------
 def strip_accents(s: str) -> str:
-    # Makes matching accent-insensitive (works well for Greek)
+    # accent-insensitive (works nicely for Greek)
     return "".join(ch for ch in unicodedata.normalize("NFD", s) if unicodedata.category(ch) != "Mn")
 
 def norm_text(s: str) -> str:
@@ -62,12 +72,7 @@ def norm_text(s: str) -> str:
     s = strip_accents(s)
     return s.casefold()
 
-def job_matches(
-    job: Dict,
-    keywords: List[str],
-    scope: str,
-    require: str,
-) -> Tuple[bool, List[str]]:
+def job_matches(job: Dict, keywords: List[str], scope: str, require: str) -> Tuple[bool, List[str]]:
     """
     Return (ok, matched_keywords).
     - scope: 'title' or 'title_desc'
@@ -85,7 +90,8 @@ def job_matches(
             matched.append(kw)
 
     if require == "all":
-        ok = len(matched) == len([k for k in keywords if k.strip() != ""])
+        needed = [k for k in keywords if k.strip() != ""]
+        ok = len(matched) == len(needed) and len(needed) > 0
     else:
         ok = len(matched) > 0
     return ok, matched
@@ -102,16 +108,12 @@ async def fetch_freelancer_projects(query: str) -> Dict:
         "https://www.freelancer.com/api/projects/0.1/projects/active/"
         f"?query={query}&limit=30&compact=true&user_details=true&job_details=true&full_description=true"
     )
-    # Adding ref code doesn't affect API response, only user-facing links; keep query clean
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers={"Accept": "application/json"}) as client:
         r = await client.get(url)
         r.raise_for_status()
         return r.json()
 
 def freelancer_job_to_card(p: Dict, matched: List[str]) -> Dict:
-    """
-    Convert Freelancer project to a generic job dict used by sender.
-    """
     pid = str(p.get("id"))
     title = p.get("title") or "Untitled"
     type_ = "Fixed" if p.get("type") == "fixed" else ("Hourly" if p.get("type") == "hourly" else "Unknown")
@@ -122,7 +124,6 @@ def freelancer_job_to_card(p: Dict, matched: List[str]) -> Dict:
     time_submitted = p.get("time_submitted")
     posted = "now"
     if isinstance(time_submitted, (int, float)):
-        # seconds epoch
         age_sec = max(0, int(now_utc().timestamp() - time_submitted))
         if age_sec < 60:
             posted = f"{age_sec}s ago"
@@ -133,12 +134,10 @@ def freelancer_job_to_card(p: Dict, matched: List[str]) -> Dict:
         else:
             posted = f"{age_sec//86400}d ago"
 
-    # Link
     base_url = f"https://www.freelancer.com/projects/{pid}"
     sep = "&" if "?" in base_url else "?"
     job_url = f"{base_url}{sep}f={FREELANCER_REF_CODE}" if FREELANCER_REF_CODE else base_url
 
-    # Description (short)
     desc = (p.get("description") or "").strip().replace("\r", " ").replace("\n", " ")
     if len(desc) > 220:
         desc = desc[:217] + "…"
@@ -153,7 +152,7 @@ def freelancer_job_to_card(p: Dict, matched: List[str]) -> Dict:
         "bids": bids,
         "posted": posted,
         "description": desc,
-        "original_url": job_url,      # already affiliate-safe
+        "original_url": job_url,      # affiliate-safe
         "proposal_url": job_url,      # same for Freelancer
         "matched": matched,
     }
@@ -202,17 +201,16 @@ def job_text(job: Dict) -> str:
 
 # ---------------- Core loop ----------------
 async def process_user(db, u: User) -> int:
-    """
-    Returns number of messages sent for this user in this cycle.
-    """
+    """Returns number of messages sent for this user in this cycle."""
     if not u:
         return 0
 
-    # active?
-    active = False
+    # --- FIX: make times timezone-aware before comparing ---
     now = now_utc()
-    trial = u.trial_until
-    lic = u.access_until
+    trial = to_aware(getattr(u, "trial_until", None))
+    lic = to_aware(getattr(u, "access_until", None))
+
+    active = False
     if trial and trial >= now:
         active = True
     if lic and lic >= now:
@@ -260,7 +258,6 @@ async def process_user(db, u: User) -> int:
     # local keyword match (strict)
     strict: List[Tuple[Dict, List[str]]] = []
     for p in filtered:
-        # Prepare a basic object for matching
         obj = {
             "title": p.get("title") or "",
             "description": p.get("description") or "",
@@ -270,10 +267,7 @@ async def process_user(db, u: User) -> int:
             strict.append((p, matched))
 
     # dedup by project id & by previously sent
-    already: Dict[str, bool] = {
-        js.job_id: True
-        for js in db.query(JobSent).filter_by(user_id=u.id).all()
-    }
+    already: Dict[str, bool] = {js.job_id: True for js in db.query(JobSent).filter_by(user_id=u.id).all()}
 
     for p, matched in strict:
         pid = str(p.get("id"))
@@ -288,9 +282,7 @@ async def process_user(db, u: User) -> int:
         try:
             await tg_send_message(u.telegram_id, text, markup)
             sent_count += 1
-            # mark as sent
-            rec = JobSent(user_id=u.id, job_id=jid)
-            db.add(rec)
+            db.add(JobSent(user_id=u.id, job_id=jid))
             db.commit()
             log.info("Sent job %s to %s", jid, u.telegram_id)
         except Exception as e:
