@@ -34,7 +34,7 @@ log = logging.getLogger("bot")
 
 # ───────────────────────── Env ─────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-BASE_URL = os.getenv("BASE_URL", "").rstrip("/")  # e.g. https://freelancer-bot-xxxx.onrender.com
+BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
@@ -58,7 +58,7 @@ def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
 # ───────────────────────── DB ensure ─────────────────────────
 ensure_schema()
 
-# ───────────────────────── Currency helpers (match worker) ─────────────────────────
+# ───────────────────────── Currency helpers ─────────────────────────
 DEFAULT_USD_RATES = {
     "USD": 1.0, "EUR": 1.07, "GBP": 1.25, "AUD": 0.65, "CAD": 0.73, "CHF": 1.10,
     "SEK": 0.09, "NOK": 0.09, "DKK": 0.14, "PLN": 0.25, "RON": 0.22, "BGN": 0.55,
@@ -200,21 +200,25 @@ def card_markup(card: Dict, saved_mode: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 # ───────────────────────── Texts & Menu ─────────────────────────
-WELCOME = (
-    "👋 Welcome to *Freelancer Alert Bot!*\n\n"
-    "🎁 You have a *10-day free trial*. Use /help to see how it works."
-)
-FEATURES = (
+WELCOME_FULL = (
+    "👋 *Welcome to Freelancer Alert Bot!*\n\n"
+    "🎁 You have a *10-day free trial*.\n"
+    "Automatically finds matching freelance jobs from top platforms and sends you instant alerts with affiliate-safe links.\n\n"
     "✨ *Features*\n"
     "• Realtime job alerts (Freelancer API)\n"
     "• Affiliate-wrapped *Proposal* & *Original* links\n"
     "• Budget shown + USD conversion\n"
     "• ⭐ *Keep* / 🗑 *Delete* buttons\n"
     "• 10-day free trial, extend via admin\n"
-    "• Multi-keyword search\n"
-    "• Platforms by country (incl. GR boards)"
+    "• Multi-keyword search (single/all modes)\n"
+    "• Platforms by country (incl. GR boards)\n\n"
+    "Use /help to see all commands."
 )
+
 def main_menu_kb() -> InlineKeyboardMarkup:
+    # 1η σειρά: Add Keywords, Settings
+    # 2η σειρά: Help, Contact
+    # 3η σειρά: Saved
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("➕ Add Keywords", callback_data="open:addkw"),
@@ -222,7 +226,10 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📚 Help", callback_data="open:help"),
-            InlineKeyboardButton("💾 Saved Jobs", callback_data="open:saved"),
+            InlineKeyboardButton("📞 Contact", callback_data="open:contact"),
+        ],
+        [
+            InlineKeyboardButton("💾 Saved", callback_data="open:saved"),
         ],
     ])
 
@@ -253,9 +260,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_id = update.effective_user.id
         db = SessionLocal()
         try:
-            user = db.query(User).filter_by(telegram_id=str(tg_id)).first()   # << str()
+            user = db.query(User).filter_by(telegram_id=str(tg_id)).first()
             if not user:
-                user = User(telegram_id=str(tg_id))                           # << str()
+                user = User(telegram_id=str(tg_id))
                 db.add(user)
             if not user.trial_until:
                 user.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
@@ -263,8 +270,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             db.close()
 
-        await update.message.reply_text(WELCOME, parse_mode="Markdown", reply_markup=main_menu_kb())
-        await update.message.reply_text(FEATURES, parse_mode="Markdown")
+        # ΕΝΙΑΙΟ μήνυμα όπως στην 1η εικόνα + πληκτρολόγιο 3 σειρών
+        await update.message.reply_text(
+            WELCOME_FULL, parse_mode="Markdown", reply_markup=main_menu_kb()
+        )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
@@ -305,7 +314,7 @@ def split_keywords(raw: str) -> List[str]:
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
+        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
         if not user:
             user = User(telegram_id=str(update.effective_user.id), trial_until=now_utc() + timedelta(days=TRIAL_DAYS))
             db.add(user)
@@ -332,7 +341,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
+        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
         words = ", ".join(k.keyword for k in (user.keywords or [])) if user else "(none)"
         await update.message.reply_text(f"Your keywords: {words}")
     finally:
@@ -345,7 +354,7 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kw = " ".join(context.args).strip().lower()
     db = SessionLocal()
     try:
-        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
+        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
         if not user:
             await update.message.reply_text("No keywords.")
             return
@@ -362,7 +371,7 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
+        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
         if not user or not user.keywords:
             await update.message.reply_text("No keywords to clear.")
             return
@@ -393,7 +402,7 @@ def settings_text(u: User) -> str:
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
+        u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
         if not u:
             await update.message.reply_text("No settings yet. Use /start.")
             return
@@ -414,7 +423,7 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db = SessionLocal()
     try:
-        u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
+        u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
         if not u:
             await update.message.reply_text("No saved jobs.")
             return
@@ -468,13 +477,15 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif where == "settings":
             db = SessionLocal()
             try:
-                u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
+                u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
                 if u:
                     await q.message.reply_text(settings_text(u), parse_mode="Markdown")
             finally:
                 db.close()
         elif where == "help":
             await help_cmd(update, context)
+        elif where == "contact":
+            await q.message.reply_text("Contact admin: please send your message here; the admin will reach out.")
         elif where == "saved":
             await saved_cmd(update, context)
         return
@@ -483,7 +494,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job_id = data.split(":", 1)[1]
         db = SessionLocal()
         try:
-            u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
+            u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
             if not u:
                 return
             exists = db.query(SavedJob).filter_by(user_id=u.id, job_id=job_id).first()
@@ -499,7 +510,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job_id = data.split(":", 1)[1]
         db = SessionLocal()
         try:
-            u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
+            u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
             if not u:
                 return
             row = db.query(SavedJob).filter_by(user_id=u.id, job_id=job_id).first()
