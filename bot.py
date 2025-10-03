@@ -1,15 +1,18 @@
 # bot.py
 import os
-import re
+import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Tuple
+from typing import Optional, List, Dict, Tuple
+
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import PlainTextResponse
+import uvicorn
 
 from telegram import (
     Update,
-    InlineKeyboardMarkup,
     InlineKeyboardButton,
-    constants,
+    InlineKeyboardMarkup,
 )
 from telegram.ext import (
     Application,
@@ -19,34 +22,36 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from db import SessionLocal, User, Keyword, JobSaved, JobDismissed, ensure_schema
+import httpx
+
+from db import (
+    ensure_schema,
+    SessionLocal,
+    User,
+    Keyword,
+    JobSent,
+    SavedJob,  # <-- Χρησιμοποιώ αυτό το μοντέλο για τα "Keep"
+)
 
 # ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [bot] %(levelname)s: %(message)s")
-logger = logging.getLogger("bot")
-
-# Ensure DB schema on bot startup
-ensure_schema()
+log = logging.getLogger("bot")
 
 # ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
+BASE_URL = os.getenv("BASE_URL", "")  # π.χ. https://freelancer-bot-xxx.onrender.com
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
 
-# Affiliate helpers (for /saved “Open” links)
-FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()  # e.g. "apstld"
-AFFILIATE_PREFIX    = os.getenv("AFFILIATE_PREFIX", "").strip()
+# Matching presentation settings (ίδια με worker για ομοιομορφία)
+FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
 
-def affiliate_wrap(url: str) -> str:
-    return f"{AFFILIATE_PREFIX}{url}" if AFFILIATE_PREFIX else url
+# ---------------- FastAPI ----------------
+app = FastAPI()
 
-def aff_for_source(source: str, url: str) -> str:
-    if source == "freelancer" and FREELANCER_REF_CODE and "freelancer.com" in url:
-        sep = "&" if "?" in url else "?"
-        return f"{url}{sep}f={FREELANCER_REF_CODE}"
-    return affiliate_wrap(url)
-
-# ------------- Time helpers -------------
+# ---------------- Time helpers ----------------
 UTC = timezone.utc
 def now_utc() -> datetime:
     return datetime.now(UTC)
@@ -58,625 +63,508 @@ def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
 
-def fmt_dt(dt: Optional[datetime]) -> str:
-    dt = to_aware(dt)
-    return dt.strftime("%Y-%m-%d %H:%M:%S %Z") if dt else "None"
+# ---------------- DB ensure ----------------
+ensure_schema()
 
-def user_active(u: User) -> bool:
-    if getattr(u, "is_blocked", False):
-        return False
-    now = now_utc()
-    trial = to_aware(getattr(u, "trial_until", None))
-    lic = to_aware(getattr(u, "access_until", None))
-    return (trial and trial >= now) or (lic and lic >= now)
+# ---------------- Currency helpers (ίδιο format με worker) ----------------
+DEFAULT_USD_RATES = {
+    "USD": 1.0, "EUR": 1.07, "GBP": 1.25, "AUD": 0.65, "CAD": 0.73, "CHF": 1.10,
+    "SEK": 0.09, "NOK": 0.09, "DKK": 0.14, "PLN": 0.25, "RON": 0.22, "BGN": 0.55,
+    "TRY": 0.03, "MXN": 0.055, "BRL": 0.19, "INR": 0.012,
+}
+def load_usd_rates() -> Dict[str, float]:
+    raw = os.getenv("FX_USD_RATES", "").strip()
+    if not raw:
+        return DEFAULT_USD_RATES
+    try:
+        data = json.loads(raw)
+        safe = {k.upper(): float(v) for k, v in data.items()}
+        safe["USD"] = 1.0
+        return {**DEFAULT_USD_RATES, **safe}
+    except Exception:
+        return DEFAULT_USD_RATES
+USD_RATES = load_usd_rates()
 
-# ------------- Helpers -------------------
-def is_admin(update: Update) -> bool:
-    return update.effective_user and update.effective_user.id == ADMIN_ID
+CURRENCY_SYMBOLS = {
+    "USD": "$", "EUR": "€", "GBP": "£",
+    "AUD": "A$", "CAD": "C$", "CHF": "CHF",
+    "SEK": "SEK", "NOK": "NOK", "DKK": "DKK",
+    "PLN": "zł", "RON": "lei", "BGN": "лв",
+    "TRY": "₺", "MXN": "MX$", "BRL": "R$", "INR": "₹",
+}
 
-async def ensure_user(db, tg_id: int) -> User:
-    u = db.query(User).filter_by(telegram_id=str(tg_id)).first()
-    if not u:
-        u = User(telegram_id=str(tg_id), countries="ALL")
-        db.add(u)
-        db.commit()
-        db.refresh(u)
-    return u
+def fmt_local_budget(minb: float, maxb: float, code: Optional[str]) -> str:
+    s = CURRENCY_SYMBOLS.get((code or "").upper(), "")
+    if minb or maxb:
+        if s:
+            return f"{minb:.0f}–{maxb:.0f} {s}".strip()
+        return f"{minb:.0f}–{maxb:.0f} {(code or '').upper()}".strip()
+    return "—"
 
-def platforms_global() -> List[str]:
-    return [
-        "Freelancer.com",
-        "Fiverr (affiliate links)",
-        "PeoplePerHour (UK)",
-        "Malt (FR/EU)",
-        "Workana (ES/EU/LatAm)",
-        "Upwork",
+def to_usd(minb: float, maxb: float, code: Optional[str]) -> Optional[Tuple[float, float]]:
+    c = (code or "USD").upper()
+    rate = USD_RATES.get(c)
+    if not rate:
+        return None
+    return minb * rate, maxb * rate
+
+def fmt_usd_line(min_usd: float, max_usd: float) -> str:
+    return f"~ ${min_usd:.0f}–${max_usd:.0f} USD"
+
+# ---------------- Freelancer helpers ----------------
+HTTP_TIMEOUT = 20.0
+
+async def fl_fetch_by_id(pid: str) -> Optional[Dict]:
+    url = (
+        "https://www.freelancer.com/api/projects/0.1/projects/"
+        f"{pid}/?full_description=true&job_details=true&compact=true"
+    )
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers={"Accept": "application/json"}) as client:
+        r = await client.get(url)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+    result = (data or {}).get("result") or {}
+    return result
+
+def fl_to_card(p: Dict, matched: Optional[List[str]] = None) -> Dict:
+    pid = str(p.get("id"))
+    title = p.get("title") or "Untitled"
+    type_ = "Fixed" if p.get("type") == "fixed" else ("Hourly" if p.get("type") == "hourly" else "Unknown")
+    budget = p.get("budget") or {}
+    minb = float(budget.get("minimum") or 0)
+    maxb = float(budget.get("maximum") or 0)
+    cur = budget.get("currency") or {}
+    code = (cur.get("code") or "USD").upper() if isinstance(cur, dict) else "USD"
+
+    bids = p.get("bid_stats", {}).get("bid_count", 0)
+    time_submitted = p.get("time_submitted")
+    posted = "now"
+    if isinstance(time_submitted, (int, float)):
+        age_sec = max(0, int(now_utc().timestamp() - time_submitted))
+        if age_sec < 60:
+            posted = f"{age_sec}s ago"
+        elif age_sec < 3600:
+            posted = f"{age_sec//60}m ago"
+        elif age_sec < 86400:
+            posted = f"{age_sec//3600}h ago"
+        else:
+            posted = f"{age_sec//86400}d ago"
+
+    base_url = f"https://www.freelancer.com/projects/{pid}"
+    sep = "&" if "?" in base_url else "?"
+    url = f"{base_url}{sep}f={FREELANCER_REF_CODE}" if FREELANCER_REF_CODE else base_url
+
+    desc = (p.get("description") or "").strip().replace("\r", " ").replace("\n", " ")
+    if len(desc) > 220:
+        desc = desc[:217] + "…"
+
+    local_line = fmt_local_budget(minb, maxb, code)
+    usd_pair = to_usd(minb, maxb, code)
+    usd_line = fmt_usd_line(*usd_pair) if usd_pair else None
+
+    return {
+        "id": f"freelancer-{pid}",
+        "source": "Freelancer",
+        "title": title,
+        "type": type_,
+        "budget_local": local_line,
+        "budget_usd": usd_line,
+        "bids": bids,
+        "posted": posted,
+        "description": desc,
+        "original_url": url,
+        "proposal_url": url,
+        "matched": matched or [],
+    }
+
+def job_text(card: Dict) -> str:
+    lines = [
+        f"*{card['title']}*",
+        "",
+        f"👤 Source: *{card['source']}*",
+        f"🧾 Type: *{card['type']}*",
+        f"💰 Budget: *{card['budget_local']}*",
     ]
+    if card.get("budget_usd"):
+        lines.append(f"💵 {card['budget_usd']}")
+    lines += [
+        f"📨 Bids: *{card['bids']}*",
+        f"🕒 Posted: *{card['posted']}*",
+        "",
+        card.get("description") or "",
+    ]
+    matched = ", ".join(card.get("matched", []) or [])
+    if matched:
+        lines += ["", f"_Matched:_ {matched}"]
+    return "\n".join(lines)
 
-def platforms_gr() -> List[str]:
-    return ["JobFind.gr", "Skywalker.gr", "Kariera.gr"]
+def job_markup(card: Dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💼 Proposal", url=card["proposal_url"]),
+            InlineKeyboardButton("🔗 Original", url=card["original_url"]),
+        ],
+        [
+            InlineKeyboardButton("⭐ Keep", callback_data=f"save:{card['id']}"),
+            InlineKeyboardButton("🗑 Delete", callback_data=f"dismiss:{card['id']}"),
+        ],
+    ])
 
-def platforms_by_country(cc: Optional[str]) -> List[str]:
-    cc = (cc or "").upper().strip()
-    if not cc or cc == "ALL":
-        return platforms_global() + platforms_gr()
-    if cc == "GR":
-        return platforms_gr()
-    return platforms_global()
+# ---------------- Telegram app ----------------
+def build_application() -> Application:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN not set")
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
+    app.add_handler(CommandHandler("keywords", keywords_cmd))
+    app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
+    app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
+    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
+    app.add_handler(CommandHandler("saved", saved_cmd))
+    app.add_handler(CommandHandler("whoami", whoami_cmd))
+
+    app.add_handler(CallbackQueryHandler(button_cb))
+
+    return app
+
+# ---------------- Handlers ----------------
+WELCOME = (
+    "👋 Welcome to *Freelancer Alert Bot!*\n\n"
+    "🎁 You have a *10-day free trial*. Use /help to see how it works."
+)
+
+FEATURES = (
+    "✨ *Features*\n"
+    "• Realtime job alerts (Freelancer API)\n"
+    "• Affiliate-wrapped *Proposal* & *Original* links\n"
+    "• Budget shown + USD conversion\n"
+    "• ⭐ *Keep* / 🗑 *Delete* buttons\n"
+    "• 10-day free trial, extend via admin\n"
+    "• Multi-keyword search (single/all modes)\n"
+    "• Platforms by country (incl. GR boards)"
+)
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("➕ Add Keywords", callback_data="menu:addkeywords"),
-            InlineKeyboardButton("⚙️ Settings", callback_data="menu:settings"),
+            InlineKeyboardButton("➕ Add Keywords", callback_data="open:addkw"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="open:settings"),
         ],
         [
-            InlineKeyboardButton("📖 Help", callback_data="menu:help"),
-            InlineKeyboardButton("📬 Contact", callback_data="menu:contact"),
-        ],
-        [
-            InlineKeyboardButton("⭐ Saved", callback_data="menu:saved"),
+            InlineKeyboardButton("📚 Help", callback_data="open:help"),
+            InlineKeyboardButton("💾 Saved Jobs", callback_data="open:saved"),
         ]
     ])
 
-def features_block() -> str:
-    return (
-        "✨ *Features*\n"
-        "• Realtime job alerts (Freelancer API)\n"
-        "• Affiliate-wrapped *Proposal* & *Original* links\n"
-        "• Budget shown + USD conversion\n"
-        "• ⭐ *Keep* / 🗑 *Delete* buttons\n"
-        "• 10-day free trial, extend via admin\n"
-        "• Multi-keyword search (single/all modes)\n"
-        "• Platforms by country (incl. GR boards)"
-    )
-
-def help_text(is_admin_flag: bool) -> str:
-    txt = (
-        "📖 *Help / How it works*\n\n"
-        "1️⃣ Add keywords with `/addkeyword python, logo, \"lighting study\"`\n"
-        "   • Use *comma* to separate many. Without a comma, the full text becomes *one* keyword.\n"
-        "2️⃣ Set countries with `/setcountry US,UK` (or `ALL`)\n"
-        "3️⃣ Save a proposal template with `/setproposal <text>`\n"
-        "   Placeholders: `{jobtitle}`, `{experience}`, `{stack}`, `{budgettime}`, `{portfolio}`, `{name}`\n"
-        "4️⃣ When a job arrives:\n"
-        "   ⭐ *Keep* — save it (see `/saved`)\n"
-        "   🗑 *Delete* — remove & mute that job\n"
-        "   💼 *Proposal* — affiliate link\n"
-        "   🔗 *Original* — affiliate-wrapped link\n\n"
-        "🔎 `/mysettings` to review filters & trial/license\n"
-        "🧪 `/selftest` for a sample card\n"
-        "🌍 `/platforms CC` to see platforms by country (e.g. `/platforms GR`)\n"
-        "⭐ `/saved` to view your saved jobs\n\n"
-        "🧰 *Shortcuts*\n"
-        "• `/keywords` or `/listkeywords` — list keywords\n"
-        "• `/delkeyword <kw>` — delete one (case-insensitive)\n"
-        "• `/clearkeywords` — delete all\n\n"
-        "🛰 *Platforms*\n"
-        "• *Global*: " + ", ".join(platforms_global()) + "\n"
-        "• *Greece*: " + ", ".join(platforms_gr())
-    )
-    if is_admin_flag:
-        txt += (
-            "\n\n🛡 *Admin*\n"
-            "• `/stats` — users/active\n"
-            "• `/grant <telegram_id> <days>` — license\n"
-            "• `/reply <telegram_id> <message>` — reply to a user"
-        )
-    return txt
-
-def settings_text(u: User) -> str:
-    kws = ", ".join(k.keyword for k in u.keywords) if u.keywords else "(none)"
-    start = fmt_dt(getattr(u, "created_at", None))
-    trial = fmt_dt(getattr(u, "trial_until", None))
-    lic = fmt_dt(getattr(u, "access_until", None))
-    active = "✅" if user_active(u) else "❌"
-    blocked = "✅" if getattr(u, "is_blocked", False) else "❌"
-    return (
-        "🛠 *Your Settings*\n\n"
-        f"• Keywords: {kws}\n"
-        f"• Countries: {u.countries or 'ALL'}\n"
-        f"• Proposal template: {(u.proposal_template[:40] + '…') if u.proposal_template else '(none)'}\n\n"
-        f"🟢 Start date: {start}\n"
-        f"🎁 Trial ends: {trial}\n"
-        f"🔒 License until: {lic}\n"
-        f"• Active: {active}\n"
-        f"• Blocked: {blocked}\n\n"
-        "🛰 *Platforms monitored:*\n"
-        "• Global: " + ", ".join(platforms_global()) + "\n"
-        "• Greece: " + ", ".join(platforms_gr()) + "\n\n"
-        "ℹ️ For extension, contact the admin."
-    )
-
-# --------- Keyword parsing (comma-first; accepts any Unicode/Greek) ---------
-def parse_keywords_from_text(full_text: str) -> List[str]:
-    """
-    Rules:
-    - If commas exist, split by comma -> many keywords.
-    - If NO commas, treat the remainder as ONE keyword (phrase allowed).
-    - Strip surrounding quotes (single/double).
-    - Deduplicate case-insensitively.
-    """
-    parts = full_text.split(" ", 1)
-    raw = parts[1] if len(parts) > 1 else ""
-    raw = raw.strip()
-
-    def strip_quotes(s: str) -> str:
-        if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
-            return s[1:-1].strip()
-        return s
-
-    items: List[str] = []
-    if "," in raw:
-        items = [strip_quotes(p.strip()) for p in raw.split(",")]
-    else:
-        if raw:
-            items = [strip_quotes(raw)]
-
-    seen = set()
-    out = []
-    for item in items:
-        if not item:
-            continue
-        key = item.casefold()
-        if key not in seen:
-            seen.add(key)
-            out.append(item)
-    return out
-
-# ---------------- Commands ----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
     db = SessionLocal()
     try:
-        u = await ensure_user(db, update.effective_user.id)
-        if not getattr(u, "trial_until", None):
-            u.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
-            db.commit()
-
-        description = (
-            "Automatically finds matching freelance jobs from top platforms and "
-            "sends you instant alerts with affiliate-safe links."
-        )
-        text = (
-            "👋 *Welcome to Freelancer Alert Bot!*\n\n"
-            f"🎁 You have a *{TRIAL_DAYS}-day free trial*.\n"
-            f"{description}\n\n"
-            + features_block() +
-            "\n\nUse /help to see all commands."
-        )
-        await update.message.reply_text(
-            text,
-            parse_mode=constants.ParseMode.MARKDOWN,
-            disable_web_page_preview=True,
-            reply_markup=main_menu_kb(),
-        )
+        user = db.query(User).filter_by(telegram_id=tg_id).first()
+        if not user:
+            user = User(telegram_id=tg_id)
+            db.add(user)
+        if not user.trial_until:
+            user.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
+        db.commit()
     finally:
         db.close()
 
+    await update.message.reply_text(WELCOME, parse_mode="Markdown", reply_markup=main_menu_kb())
+    await update.message.reply_text(FEATURES, parse_mode="Markdown")
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        help_text(is_admin(update)),
-        parse_mode=constants.ParseMode.MARKDOWN,
-        disable_web_page_preview=True
+    txt = (
+        "📘 *How it works*\n"
+        "1) Add keywords with `/addkeyword python, telegram` (comma-separated; Greek supported)\n"
+        "2) See your filters with `/keywords` or `/mysettings`\n"
+        "3) Tap ⭐ Keep to store a job, 🗑 Delete to remove it from chat\n"
+        "4) View saved jobs with `/saved` (full cards)\n\n"
+        "Admin can extend licenses manually."
     )
+    await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=main_menu_kb())
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
-    txt = f"🆔 Your Telegram ID: `{u.id}`\n👤 Name: {u.full_name}\n"
-    txt += f"🔗 Username: @{u.username}\n" if u.username else "🔗 Username: (none)\n"
-    txt += "\n⭐ You are *ADMIN*." if is_admin(update) else "\n👤 You are a regular user."
-    await update.message.reply_text(txt, parse_mode=constants.ParseMode.MARKDOWN)
+    admin_line = "👤 You are *admin*." if ADMIN_ID and u.id == ADMIN_ID else "👤 You are a regular user."
+    await update.message.reply_text(
+        f"🆔 Your Telegram ID: `{u.id}`\n"
+        f"👤 Name: {u.first_name or ''}\n"
+        f"{admin_line}",
+        parse_mode="Markdown"
+    )
 
-async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = SessionLocal()
-    try:
-        u = await ensure_user(db, update.effective_user.id)
-        await update.message.reply_text(
-            settings_text(u),
-            parse_mode=constants.ParseMode.MARKDOWN,
-            disable_web_page_preview=True
-        )
-    finally:
-        db.close()
+# ----- Keywords -----
+def split_keywords(raw: str) -> List[str]:
+    # διαχωρισμός με κόμμα ή κενά, remove duplicates, keep order
+    if not raw:
+        return []
+    parts = [p.strip() for p in raw.replace(";", ",").split(",")]
+    parts = [p for p in parts if p]
+    seen = set()
+    out = []
+    for p in parts:
+        if p.lower() not in seen:
+            out.append(p)
+            seen.add(p.lower())
+    return out
 
-# -------- Keywords --------
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    full_text = update.message.text or ""
-    kws = parse_keywords_from_text(full_text)
-    if not kws:
-        return await update.message.reply_text('Usage: /addkeyword python, logo, "lighting study"')
-
     db = SessionLocal()
     try:
-        u = await ensure_user(db, update.effective_user.id)
-        existing = db.query(Keyword).filter_by(user_id=u.id).all()
-        existing_set = {k.keyword.casefold() for k in existing}
+        user = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        if not user:
+            user = User(telegram_id=update.effective_user.id, trial_until=now_utc() + timedelta(days=TRIAL_DAYS))
+            db.add(user)
+            db.commit()
 
+        text = " ".join(context.args) if context.args else (update.message.text.partition(" ")[2] or "")
+        kws = split_keywords(text)
+        if not kws:
+            await update.message.reply_text("Please provide keywords separated by commas.")
+            return
+
+        existing = {k.keyword.lower() for k in (user.keywords or [])}
         added = 0
         for kw in kws:
-            if kw.casefold() in existing_set:
+            if kw.lower() in existing:
                 continue
-            db.add(Keyword(user_id=u.id, keyword=kw))
-            existing_set.add(kw.casefold())
+            db.add(Keyword(user_id=user.id, keyword=kw))
             added += 1
         db.commit()
-        await update.message.reply_text(f"✅ Added {added} keyword(s).")
+        await update.message.reply_text(f"Added {added} keyword(s).")
     finally:
         db.close()
 
-async def listkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        u = await ensure_user(db, update.effective_user.id)
-        kws = ", ".join(k.keyword for k in u.keywords) if u.keywords else "(none)"
-        await update.message.reply_text(f"Your keywords: {kws}")
+        user = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        words = ", ".join(k.keyword for k in (user.keywords or [])) if user else "(none)"
+        await update.message.reply_text(f"Your keywords: {words}")
     finally:
         db.close()
 
 async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    full_text = update.message.text or ""
-    target = full_text.split(" ", 1)[1].strip() if " " in full_text else ""
-    if not target:
-        return await update.message.reply_text("Usage: /delkeyword <keyword>")
-
+    if not context.args:
+        await update.message.reply_text("Usage: /delkeyword <kw>")
+        return
+    kw = " ".join(context.args).strip().lower()
     db = SessionLocal()
     try:
-        u = await ensure_user(db, update.effective_user.id)
-        row = None
-        for k in u.keywords:
-            if k.keyword.casefold() == target.casefold():
-                row = k
-                break
-        if row:
-            db.delete(row)
-            db.commit()
-            await update.message.reply_text(f"🗑 Deleted keyword '{row.keyword}'.")
-        else:
-            await update.message.reply_text(f"Not found: '{target}'.")
+        user = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        if not user:
+            await update.message.reply_text("No keywords.")
+            return
+        deleted = 0
+        for k in list(user.keywords or []):
+            if k.keyword.lower() == kw:
+                db.delete(k)
+                deleted += 1
+        db.commit()
+        await update.message.reply_text(f"Deleted {deleted} entries.")
     finally:
         db.close()
 
 async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        u = await ensure_user(db, update.effective_user.id)
-        for k in list(u.keywords):
+        user = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        if not user or not user.keywords:
+            await update.message.reply_text("No keywords to clear.")
+            return
+        for k in list(user.keywords):
             db.delete(k)
         db.commit()
-        await update.message.reply_text("🧹 All keywords cleared.")
+        await update.message.reply_text("All keywords cleared.")
     finally:
         db.close()
 
-# -------- Proposal template / countries --------
-async def setproposal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").split(" ", 1)
-    if len(text) < 2 or not text[1].strip():
-        return await update.message.reply_text("Usage: /setproposal <your proposal text with placeholders>")
-    prop = text[1].strip()
-    db = SessionLocal()
-    try:
-        u = await ensure_user(db, update.effective_user.id)
-        u.proposal_template = prop
-        db.commit()
-        await update.message.reply_text("💾 Proposal template saved.")
-    finally:
-        db.close()
+# ----- Settings / MySettings -----
+def settings_text(u: User) -> str:
+    trial = to_aware(u.trial_until)
+    lic = to_aware(u.access_until)
+    now = now_utc()
+    active = (trial and trial >= now) or (lic and lic >= now)
 
-async def setcountry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = (update.message.text or "").split(" ", 1)
-    val = raw[1].strip() if len(raw) > 1 else "ALL"
-    db = SessionLocal()
-    try:
-        u = await ensure_user(db, update.effective_user.id)
-        u.countries = val
-        db.commit()
-        await update.message.reply_text(f"🌍 Countries set to: {val}")
-    finally:
-        db.close()
-
-# -------- Platforms --------
-async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cc = context.args[0] if context.args else "ALL"
-    lst = platforms_by_country(cc)
-    txt = f"🌍 Platforms for *{cc.upper()}*:\n• " + "\n• ".join(lst)
-    await update.message.reply_text(txt, parse_mode=constants.ParseMode.MARKDOWN)
-
-# -------- Self-test --------
-async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kw = "TEST"
-    job_id = f"selftest-{kw.lower()}"
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💼 Proposal", url="https://www.freelancer.com"),
-         InlineKeyboardButton("🔗 Original", url="https://www.freelancer.com")],
-        [InlineKeyboardButton("⭐ Keep", callback_data=f"save:{job_id}"),
-         InlineKeyboardButton("🗑 Delete", callback_data=f"dismiss:{job_id}")]
-    ])
-    text = (
-        "🧪 *[TEST]* Example job card\n\n"
-        "👤 Source: *Freelancer*\n"
-        "🧾 Type: *Fixed*\n"
-        "💰 Budget: *100–300 USD*\n"
-        "💵 ~ $100.00–$300.00 USD\n"
-        "📨 Bids: *12*\n"
-        "🕒 Posted: *0s ago*\n\n"
-        f"Keyword matched: *{kw}*"
+    trial_line = f"Trial until: *{trial.isoformat()}*" if trial else "Trial until: *None*"
+    lic_line = f"License until: *{lic.isoformat()}*" if lic else "License until: *None*"
+    kw_line = ", ".join(k.keyword for k in (u.keywords or [])) or "(none)"
+    return (
+        "🛠 *Your Settings*\n\n"
+        f"• Keywords: {kw_line}\n"
+        f"• {trial_line}\n"
+        f"• {lic_line}\n"
+        f"• Active: {'✅' if active else '❌'}"
     )
-    await update.message.reply_text(text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb)
 
-# -------- Keep / Delete callbacks --------
-async def save_job_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    _, job_id = (q.data or "").split(":", 1)
+async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        u = await ensure_user(db, update.effective_user.id)
-        exists = db.query(JobSaved).filter_by(user_id=u.id, job_id=job_id).first()
-        if not exists:
-            db.add(JobSaved(user_id=u.id, job_id=job_id))
-            db.commit()
-        await q.answer("Saved ✅", show_alert=False)
+        u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        if not u:
+            await update.message.reply_text("No settings yet. Use /start.")
+            return
+        await update.message.reply_text(settings_text(u), parse_mode="Markdown", reply_markup=main_menu_kb())
     finally:
         db.close()
 
-async def dismiss_job_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    _, job_id = (q.data or "").split(":", 1)
-    db = SessionLocal()
-    try:
-        u = await ensure_user(db, update.effective_user.id)
-        exists = db.query(JobDismissed).filter_by(user_id=u.id, job_id=job_id).first()
-        if not exists:
-            db.add(JobDismissed(user_id=u.id, job_id=job_id))
-            db.commit()
-    finally:
-        db.close()
-    try:
-        await q.message.delete()
-    except Exception:
-        pass
-
-# -------- Saved list (/saved) --------
-PAGE_SIZE = 5
-
-def job_url_from_id(job_id: str) -> Tuple[Optional[str], Optional[str]]:
-    """Return (url, source) if we can reconstruct it from the id, else (None, None)."""
-    if job_id.startswith("freelancer-"):
-        m = re.match(r"^freelancer-(\d+)$", job_id)
-        if m:
-            pid = m.group(1)
-            url = f"https://www.freelancer.com/projects/{pid}"
-            return aff_for_source("freelancer", url), "freelancer"
-    # fiverr-* ids (daily) have no specific job
-    return None, None
-
-def build_saved_view(items: List[str], page: int) -> Tuple[str, InlineKeyboardMarkup]:
-    total = len(items)
-    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = max(1, min(page, pages))
-
-    start = (page - 1) * PAGE_SIZE
-    chunk = items[start:start + PAGE_SIZE]
-
-    lines = [f"⭐ *Saved jobs* — page {page}/{pages}", ""]
-    kb_rows = []
-
-    if not chunk:
-        lines.append("_No saved jobs yet._")
-    else:
-        for jid in chunk:
-            url, src = job_url_from_id(jid)
-            lines.append(f"• `{jid}`")
-            row = []
-            if url:
-                row.append(InlineKeyboardButton("🔗 Open", url=url))
-            row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"saved:del:{jid}:{page}"))
-            kb_rows.append(row)
-
-    nav = []
-    if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"saved:page:{page-1}"))
-    if page < pages:
-        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"saved:page:{page+1}"))
-    if nav:
-        kb_rows.append(nav)
-
-    kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
-    text = "\n".join(lines)
-    return text, kb
+# ----- Saved (FULL CARDS) -----
+PAGE_SIZE = int(os.getenv("SAVED_PAGE_SIZE", "5"))
 
 async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    page = 1
+    if context.args:
+        try:
+            page = max(1, int(context.args[0]))
+        except ValueError:
+            page = 1
+
     db = SessionLocal()
     try:
-        u = await ensure_user(db, update.effective_user.id)
-        rows = db.query(JobSaved).filter_by(user_id=u.id).order_by(JobSaved.created_at.desc()).all()
-        items = [r.job_id for r in rows]
-        text, kb = build_saved_view(items, page=1)
-        await update.message.reply_text(
-            text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb, disable_web_page_preview=True
-        )
+        u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        if not u:
+            await update.message.reply_text("No saved jobs.")
+            return
+        q = db.query(SavedJob).filter_by(user_id=u.id).order_by(SavedJob.created_at.desc())
+        total = q.count()
+        if total == 0:
+            await update.message.reply_text("No saved jobs yet. Tap ⭐ *Keep* on a job to save it.", parse_mode="Markdown")
+            return
+
+        max_page = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        if page > max_page:
+            page = max_page
+
+        items = q.offset((page - 1) * PAGE_SIZE).limit(PAGE_SIZE).all()
+
+        await update.message.reply_text(f"💾 Saved jobs — page {page}/{max_page}")
+
+        # Render each saved item as a FULL card by refetching from platform
+        for it in items:
+            job_id = it.job_id  # e.g. freelancer-39847081
+            if job_id.startswith("freelancer-"):
+                pid = job_id.split("-", 1)[1]
+                data = await fl_fetch_by_id(pid)
+                if not data:
+                    await update.message.reply_text(f"⚠️ Job {job_id} not available anymore.")
+                    continue
+                card = fl_to_card(data, matched=None)
+                text = job_text(card)
+                kb = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("💼 Proposal", url=card["proposal_url"]),
+                        InlineKeyboardButton("🔗 Original", url=card["original_url"]),
+                    ],
+                    [
+                        InlineKeyboardButton("🗑 Remove from Saved", callback_data=f"unsave:{job_id}"),
+                    ],
+                ])
+                await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=kb)
+            else:
+                # Unknown source fallback
+                await update.message.reply_text(f"Saved: {job_id}")
     finally:
         db.close()
 
-async def saved_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ----- Callback buttons -----
+async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
-    db = SessionLocal()
-    try:
-        u = await ensure_user(db, update.effective_user.id)
-        rows = db.query(JobSaved).filter_by(user_id=u.id).order_by(JobSaved.created_at.desc()).all()
-        items = [r.job_id for r in rows]
+    await q.answer()
 
-        if data.startswith("saved:page:"):
-            page = int(data.split(":")[2])
-            text, kb = build_saved_view(items, page)
-            await q.edit_message_text(text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb, disable_web_page_preview=True)
-            await q.answer()
-            return
+    if data.startswith("open:"):
+        # Menu buttons
+        _, where = data.split(":", 1)
+        if where == "addkw":
+            await q.message.reply_text("Add keywords:\n`/addkeyword python, telegram, μελέτη φωτισμού`", parse_mode="Markdown")
+        elif where == "settings":
+            db = SessionLocal()
+            try:
+                u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+                if u:
+                    await q.message.reply_text(settings_text(u), parse_mode="Markdown")
+            finally:
+                db.close()
+        elif where == "help":
+            await help_cmd(update, context)
+        elif where == "saved":
+            await saved_cmd(update, context)
+        return
 
-        if data.startswith("saved:del:"):
-            _, _, jid, page_s = data.split(":", 3)
-            page = int(page_s)
-            row = db.query(JobSaved).filter_by(user_id=u.id, job_id=jid).first()
+    if data.startswith("save:"):
+        job_id = data.split(":", 1)[1]
+        db = SessionLocal()
+        try:
+            u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+            if not u:
+                return
+            # insert if not exists
+            exists = db.query(SavedJob).filter_by(user_id=u.id, job_id=job_id).first()
+            if not exists:
+                db.add(SavedJob(user_id=u.id, job_id=job_id))
+                db.commit()
+            await q.answer("Saved ✅", show_alert=False)
+        finally:
+            db.close()
+        return
+
+    if data.startswith("unsave:"):
+        job_id = data.split(":", 1)[1]
+        db = SessionLocal()
+        try:
+            u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+            if not u:
+                return
+            row = db.query(SavedJob).filter_by(user_id=u.id, job_id=job_id).first()
             if row:
                 db.delete(row)
                 db.commit()
-            rows = db.query(JobSaved).filter_by(user_id=u.id).order_by(JobSaved.created_at.desc()).all()
-            items = [r.job_id for r in rows]
-            text, kb = build_saved_view(items, page)
+            await q.answer("Removed from saved.", show_alert=False)
             try:
-                await q.edit_message_text(text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb, disable_web_page_preview=True)
+                await q.message.delete()
             except Exception:
-                await q.message.reply_text(text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb, disable_web_page_preview=True)
-            await q.answer("Deleted")
-            return
-
-    finally:
-        db.close()
-
-# -------- Contact / Admin reply --------
-async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Send a message to the admin with: /contact <your message>")
-    msg = " ".join(context.args)
-    u = update.effective_user
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"📩 *Contact* from `{u.id}` ({u.full_name}):\n\n{msg}",
-            parse_mode=constants.ParseMode.MARKDOWN,
-        )
-        await update.message.reply_text("✅ Message delivered to admin. You'll receive a reply here.")
-    except Exception:
-        await update.message.reply_text("Could not deliver your message to admin.")
-
-async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+                pass
+        finally:
+            db.close()
         return
-    if len(context.args) < 2:
-        return await update.message.reply_text("Usage: /reply <telegram_id> <message>")
-    target = context.args[0]
-    text = " ".join(context.args[1:])
-    try:
-        await context.bot.send_message(chat_id=target, text=f"👨‍💼 Admin reply:\n\n{text}")
-        await update.message.reply_text("✅ Delivered.")
-    except Exception as e:
-        await update.message.reply_text(f"Failed to deliver: {e}")
 
-# -------- Admin --------
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if data.startswith("dismiss:"):
+        # απλώς σβήνουμε το message από το chat
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
         return
-    db = SessionLocal()
-    try:
-        users = db.query(User).all()
-        active = sum(1 for u in users if user_active(u))
-        txt = f"👥 Users: {len(users)} (active: {active})"
-        await update.message.reply_text(txt)
-    finally:
-        db.close()
 
-async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    if len(context.args) < 2:
-        return await update.message.reply_text("Usage: /grant <telegram_id> <days>")
-    uid = context.args[0]
-    days = int(context.args[1])
-    db = SessionLocal()
-    try:
-        u = db.query(User).filter_by(telegram_id=uid).first()
-        if not u:
-            return await update.message.reply_text("User not found.")
-        until = now_utc() + timedelta(days=days)
-        u.access_until = until
-        db.commit()
-        await update.message.reply_text(f"✅ Granted until {until.strftime('%Y-%m-%d')} to {uid}.")
-    finally:
-        db.close()
+# ---------------- Webhook endpoints ----------------
+# PTB Application is built once on import for webhook mode
+tg_app: Optional[Application] = None
 
-# -------- Inline menu callbacks --------
-async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data or ""
-    db = SessionLocal()
-    try:
-        u = await ensure_user(db, update.effective_user.id)
-        chat_id = q.message.chat_id
-        if data == "menu:addkeywords":
-            await context.bot.send_message(chat_id, 'Use /addkeyword python, logo, "lighting study"')
-        elif data == "menu:settings":
-            await context.bot.send_message(
-                chat_id,
-                settings_text(u),
-                parse_mode=constants.ParseMode.MARKDOWN,
-                disable_web_page_preview=True
-            )
-        elif data == "menu:help":
-            await context.bot.send_message(
-                chat_id,
-                help_text(is_admin(update)),
-                parse_mode=constants.ParseMode.MARKDOWN,
-                disable_web_page_preview=True
-            )
-        elif data == "menu:contact":
-            await context.bot.send_message(chat_id, "Send a message to the admin: /contact <your message>")
-        elif data == "menu:saved":
-            rows = db.query(JobSaved).filter_by(user_id=u.id).order_by(JobSaved.created_at.desc()).all()
-            items = [r.job_id for r in rows]
-            text, kb = build_saved_view(items, page=1)
-            await context.bot.send_message(chat_id, text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=kb, disable_web_page_preview=True)
-    finally:
-        db.close()
+def get_app() -> Application:
+    global tg_app
+    if tg_app is None:
+        tg_app = build_application()
+    return tg_app
 
-# ---------------- Build Application ----------------
-def build_application() -> Application:
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+@app.post(f"/webhook/{WEBHOOK_SECRET}")
+async def telegram_webhook(request: Request):
+    app_ = get_app()
+    data = await request.json()
+    update = Update.de_json(data, app_.bot)
+    await app_.process_update(update)
+    return PlainTextResponse("OK")
 
-    # Core / user commands
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("whoami", whoami_cmd))
-    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
-    app.add_handler(CommandHandler("platforms", platforms_cmd))
-    app.add_handler(CommandHandler("saved", saved_cmd))
+@app.get("/")
+async def root():
+    return PlainTextResponse("OK")
 
-    # keywords
-    app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
-    app.add_handler(CommandHandler(["keywords", "listkeywords"], listkeywords_cmd))
-    app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
-    app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
-
-    # templates / country
-    app.add_handler(CommandHandler("setproposal", setproposal_cmd))
-    app.add_handler(CommandHandler("setcountry", setcountry_cmd))
-
-    # test
-    app.add_handler(CommandHandler("selftest", selftest_cmd))
-
-    # contact
-    app.add_handler(CommandHandler("contact", contact_cmd))
-
-    # admin
-    app.add_handler(CommandHandler("stats", stats_cmd))
-    app.add_handler(CommandHandler("grant", grant_cmd))
-    app.add_handler(CommandHandler("reply", reply_cmd))
-
-    # callbacks
-    app.add_handler(CallbackQueryHandler(button_cb, pattern=r"^menu:(addkeywords|settings|help|contact|saved)$"))
-    app.add_handler(CallbackQueryHandler(save_job_cb, pattern=r"^save:.+"))
-    app.add_handler(CallbackQueryHandler(dismiss_job_cb, pattern=r"^dismiss:.+"))
-    app.add_handler(CallbackQueryHandler(saved_cb, pattern=r"^saved:(page|del):"))
-
-    return app
-
-
+# ---------------- Entrypoint (webhook) ----------------
 if __name__ == "__main__":
-    if not BOT_TOKEN:
-        raise SystemExit("BOT_TOKEN is not set.")
-    app = build_application()
-    logging.info("Running bot with polling (dev mode).")
-    app.run_polling(drop_pending_updates=True)
+    # Start FastAPI (webhook mode)
+    uvicorn.run("bot:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
