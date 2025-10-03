@@ -5,15 +5,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple
 
+import httpx
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-import uvicorn
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -22,33 +19,31 @@ from telegram.ext import (
     ContextTypes,
 )
 
-import httpx
-
 from db import (
     ensure_schema,
     SessionLocal,
     User,
     Keyword,
     JobSent,
-    SavedJob,        # <-- used for ⭐ saved items
+    SavedJob,
 )
 
-# ---------------- Logging ----------------
+# ───────────────────────── Logging ─────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [bot] %(levelname)s: %(message)s")
 log = logging.getLogger("bot")
 
-# ---------------- Config ----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# ───────────────────────── Env ─────────────────────────
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BASE_URL = os.getenv("BASE_URL", "").rstrip("/")  # π.χ. https://freelancer-bot-xxx.onrender.com
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
-BASE_URL = os.getenv("BASE_URL", "")  # e.g. https://freelancer-bot-xxxx.onrender.com
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
 FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
 
-# ---------------- FastAPI ----------------
+# ───────────────────────── FastAPI ─────────────────────────
 app = FastAPI()
 
-# ---------------- Time helpers ----------------
+# ───────────────────────── Time helpers ─────────────────────────
 UTC = timezone.utc
 def now_utc() -> datetime:
     return datetime.now(UTC)
@@ -60,10 +55,10 @@ def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
 
-# ---------------- DB ensure ----------------
+# ───────────────────────── DB ensure ─────────────────────────
 ensure_schema()
 
-# ---------------- Currency helpers (same as worker) ----------------
+# ───────────────────────── Currency helpers (match worker) ─────────────────────────
 DEFAULT_USD_RATES = {
     "USD": 1.0, "EUR": 1.07, "GBP": 1.25, "AUD": 0.65, "CAD": 0.73, "CHF": 1.10,
     "SEK": 0.09, "NOK": 0.09, "DKK": 0.14, "PLN": 0.25, "RON": 0.22, "BGN": 0.55,
@@ -105,7 +100,7 @@ def to_usd(minb: float, maxb: float, code: Optional[str]) -> Optional[Tuple[floa
 def fmt_usd_line(min_usd: float, max_usd: float) -> str:
     return f"~ ${min_usd:.0f}–${max_usd:.0f} USD"
 
-# ---------------- Freelancer helpers ----------------
+# ───────────────────────── Freelancer helpers ─────────────────────────
 HTTP_TIMEOUT = 20.0
 
 async def fl_fetch_by_id(pid: str) -> Optional[Dict]:
@@ -191,12 +186,10 @@ def job_text(card: Dict) -> str:
     return "\n".join(lines)
 
 def card_markup(card: Dict, saved_mode: bool = False) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton("💼 Proposal", url=card["proposal_url"]),
-            InlineKeyboardButton("🔗 Original", url=card["original_url"]),
-        ]
-    ]
+    rows = [[
+        InlineKeyboardButton("💼 Proposal", url=card["proposal_url"]),
+        InlineKeyboardButton("🔗 Original", url=card["original_url"]),
+    ]]
     if saved_mode:
         rows.append([InlineKeyboardButton("🗑 Remove from Saved", callback_data=f"unsave:{card['id']}")])
     else:
@@ -206,7 +199,7 @@ def card_markup(card: Dict, saved_mode: bool = False) -> InlineKeyboardMarkup:
         ])
     return InlineKeyboardMarkup(rows)
 
-# ---------------- Main menu & texts ----------------
+# ───────────────────────── Texts & Menu ─────────────────────────
 WELCOME = (
     "👋 Welcome to *Freelancer Alert Bot!*\n\n"
     "🎁 You have a *10-day free trial*. Use /help to see how it works."
@@ -233,38 +226,45 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         ],
     ])
 
-# ---------------- Handlers ----------------
+# ───────────────────────── Telegram Application ─────────────────────────
+tg_app: Optional[Application] = None
+
 def build_application() -> Application:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN not set")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
-    app.add_handler(CommandHandler("keywords", keywords_cmd))
-    app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
-    app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
-    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
-    app.add_handler(CommandHandler("saved", saved_cmd))
-    app.add_handler(CommandHandler("whoami", whoami_cmd))
-    app.add_handler(CallbackQueryHandler(button_cb))
-    return app
+    app_ = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    app_.add_handler(CommandHandler("start", start_cmd))
+    app_.add_handler(CommandHandler("help", help_cmd))
+    app_.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
+    app_.add_handler(CommandHandler("keywords", keywords_cmd))
+    app_.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
+    app_.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
+    app_.add_handler(CommandHandler("mysettings", mysettings_cmd))
+    app_.add_handler(CommandHandler("saved", saved_cmd))
+    app_.add_handler(CommandHandler("whoami", whoami_cmd))
+    app_.add_handler(CallbackQueryHandler(button_cb))
+
+    return app_
+
+# ───────────────────────── Handlers ─────────────────────────
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg_id = update.effective_user.id
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter_by(telegram_id=tg_id).first()
-        if not user:
-            user = User(telegram_id=tg_id)
-            db.add(user)
-        if not user.trial_until:
-            user.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
-        db.commit()
-    finally:
-        db.close()
-    await update.message.reply_text(WELCOME, parse_mode="Markdown", reply_markup=main_menu_kb())
-    await update.message.reply_text(FEATURES, parse_mode="Markdown")
+    if update.message:
+        tg_id = update.effective_user.id
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter_by(telegram_id=tg_id).first()
+            if not user:
+                user = User(telegram_id=tg_id)
+                db.add(user)
+            if not user.trial_until:
+                user.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
+            db.commit()
+        finally:
+            db.close()
+
+        await update.message.reply_text(WELCOME, parse_mode="Markdown", reply_markup=main_menu_kb())
+        await update.message.reply_text(FEATURES, parse_mode="Markdown")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
@@ -287,7 +287,7 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ----- Keywords -----
+# keywords
 def split_keywords(raw: str) -> List[str]:
     if not raw:
         return []
@@ -373,7 +373,7 @@ async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ----- Settings -----
+# settings
 def settings_text(u: User) -> str:
     trial = to_aware(u.trial_until)
     lic = to_aware(u.access_until)
@@ -401,11 +401,10 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ----- Saved (FULL CARDS) -----
+# saved (full cards)
 PAGE_SIZE = int(os.getenv("SAVED_PAGE_SIZE", "5"))
 
 async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # page param (optional)
     page = 1
     if context.args:
         try:
@@ -433,9 +432,8 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(f"💾 Saved jobs — page {page}/{max_page}")
 
-        # Render each saved item as FULL CARD by refetching from the platform
         for it in items:
-            job_id = it.job_id  # e.g. freelancer-39842794
+            job_id = it.job_id
             if job_id.startswith("freelancer-"):
                 pid = job_id.split("-", 1)[1]
                 data = await fl_fetch_by_id(pid)
@@ -443,17 +441,18 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(f"⚠️ Job {job_id} not available anymore.")
                     continue
                 card = fl_to_card(data, matched=None)
-                text = job_text(card)
-                kb = card_markup(card, saved_mode=True)
                 await update.message.reply_text(
-                    text, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=kb
+                    job_text(card),
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                    reply_markup=card_markup(card, saved_mode=True),
                 )
             else:
                 await update.message.reply_text(f"Saved: {job_id}")
     finally:
         db.close()
 
-# ----- Callback buttons -----
+# callbacks
 async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
@@ -462,8 +461,10 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("open:"):
         where = data.split(":", 1)[1]
         if where == "addkw":
-            await q.message.reply_text("Add keywords:\n`/addkeyword python, lighting design, μελέτη φωτισμού`",
-                                       parse_mode="Markdown")
+            await q.message.reply_text(
+                "Add keywords:\n`/addkeyword python, lighting design, μελέτη φωτισμού`",
+                parse_mode="Markdown"
+            )
         elif where == "settings":
             db = SessionLocal()
             try:
@@ -521,26 +522,53 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-# ---------------- Webhook endpoints ----------------
-tg_app: Optional[Application] = None
-def get_app() -> Application:
+# ───────────────────────── Webhook lifecycle ─────────────────────────
+def get_webhook_url() -> str:
+    if not BASE_URL:
+        raise RuntimeError("BASE_URL is not set")
+    return f"{BASE_URL}/webhook/{WEBHOOK_SECRET}"
+
+@app.on_event("startup")
+async def on_startup():
     global tg_app
-    if tg_app is None:
-        tg_app = build_application()
-    return tg_app
+    tg_app = build_application()
+    await tg_app.initialize()
+    await tg_app.start()
+    # Ρύθμιση webhook μέσω PTB API (πιο αξιόπιστο)
+    url = get_webhook_url()
+    await tg_app.bot.delete_webhook(drop_pending_updates=True)
+    await tg_app.bot.set_webhook(url=url, allowed_updates=Update.ALL_TYPES)
+    me = await tg_app.bot.get_me()
+    log.info("PTB app initialized. Webhook set to %s (bot=%s).", url, me.username)
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    if tg_app:
+        await tg_app.bot.delete_webhook()
+        await tg_app.stop()
+        await tg_app.shutdown()
+        log.info("PTB app stopped.")
 
 @app.post(f"/webhook/{WEBHOOK_SECRET}")
 async def telegram_webhook(request: Request):
-    app_ = get_app()
+    """
+    Κάθε update περνάει από εδώ. Κάνουμε έντονο logging ώστε να βλέπεις στα Render logs.
+    """
     data = await request.json()
-    update = Update.de_json(data, app_.bot)
-    await app_.process_update(update)
+    if tg_app is None:
+        return PlainTextResponse("App not ready", status_code=503)
+    try:
+        update = Update.de_json(data, tg_app.bot)
+        log.info("Webhook update: %s", update.to_dict().get("update_id"))
+        await tg_app.process_update(update)
+    except Exception as e:
+        log.exception("Webhook processing error: %s", e)
     return PlainTextResponse("OK")
 
 @app.get("/")
 async def root():
     return PlainTextResponse("OK")
 
-# ---------------- Entrypoint (webhook) ----------------
+# ───────────────────────── Entrypoint ─────────────────────────
 if __name__ == "__main__":
     uvicorn.run("bot:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
