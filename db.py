@@ -14,13 +14,10 @@ from sqlalchemy import inspect
 log = logging.getLogger("db")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [db] %(levelname)s: %(message)s")
 
-# ---------------------------------------------------------------------
-# Engine / Session
-# ---------------------------------------------------------------------
+# ───────────────────────── Engine / Session ─────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if not DATABASE_URL:
-    # fallback μόνο για dev. Στο Render βάλε Postgres!
-    DATABASE_URL = "sqlite:///./freelancer.db"
+    raise RuntimeError("DATABASE_URL is not set. Configure your Postgres connection on BOTH web and worker services.")
 
 engine: Engine = create_engine(
     DATABASE_URL,
@@ -35,21 +32,19 @@ UTC = timezone.utc
 def now_utc():
     return datetime.now(UTC)
 
-# ---------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------
+# ───────────────────────── Models ─────────────────────────
 class User(Base):
     __tablename__ = "user"
 
     id = Column(Integer, primary_key=True)
-    telegram_id = Column(String(64), unique=True, index=True, nullable=False)
+    telegram_id = Column(String(64), unique=True, index=True, nullable=False)  # always stored as string
 
     trial_until = Column(DateTime(timezone=True), nullable=True)
     access_until = Column(DateTime(timezone=True), nullable=True)
 
     is_blocked = Column(Boolean, nullable=False, default=False)
 
-    countries = Column(String(64), nullable=True)               # e.g. "ALL" ή "GR,UK"
+    countries = Column(String(64), nullable=True)
     proposal_template = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), nullable=False, default=now_utc)
@@ -69,7 +64,6 @@ class Keyword(Base):
 
     user = relationship("User", back_populates="keywords")
 
-    # ΧΡΗΣΙΜΟ: νέο όνομα για να αποφύγουμε collision με παλιό constraint/index
     __table_args__ = (
         UniqueConstraint("user_id", "keyword", name="uq_user_keyword2"),
     )
@@ -79,7 +73,7 @@ class JobSent(Base):
     __tablename__ = "job_sent"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
-    job_id = Column(String(128), nullable=False)  # p.x. freelancer-39847081
+    job_id = Column(String(128), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=now_utc)
 
     user = relationship("User", back_populates="sent_jobs")
@@ -102,27 +96,16 @@ class SavedJob(Base):
         UniqueConstraint("user_id", "job_id", name="uq_saved_job2"),
     )
 
-# ---------------------------------------------------------------------
-# Schema management
-# ---------------------------------------------------------------------
+# ───────────────────────── Schema management ─────────────────────────
 def ensure_schema() -> None:
-    """
-    Δημιουργεί μόνο ό,τι λείπει. Δεν ρίχνει ποτέ drop.
-    """
     insp = inspect(engine)
-    # Αν λείπει ο βασικός πίνακας, θεωρούμε fresh install.
-    if not insp.has_table("user"):
-        Base.metadata.create_all(bind=engine, checkfirst=True)
-        log.info("DB schema ensured (fresh create).")
-        return
-
-    # Αλλιώς, απλώς βεβαιώσου ότι υπάρχουν όλα (idempotent).
     Base.metadata.create_all(bind=engine, checkfirst=True)
-    log.info("DB schema ensured.")
+    if insp.has_table("user"):
+        log.info("DB schema ensured.")
+    else:
+        log.info("DB schema ensured (fresh create).")
 
-# ---------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------
+# ───────────────────────── Public API ─────────────────────────
 __all__ = [
     "engine",
     "SessionLocal",

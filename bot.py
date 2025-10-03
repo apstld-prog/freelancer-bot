@@ -215,10 +215,16 @@ WELCOME_FULL = (
     "Use /help to see all commands."
 )
 
+HELP_TEXT = (
+    "📘 *How it works*\n"
+    "• Add keywords with `/addkeyword python, lighting design, μελέτη φωτισμού`\n"
+    "• See filters with `/keywords` or `/mysettings`\n"
+    "• Tap ⭐ *Keep* to store a job, 🗑 *Delete* to remove it from chat\n"
+    "• View saved jobs with `/saved` — full cards\n"
+    "• Admin can extend licenses manually"
+)
+
 def main_menu_kb() -> InlineKeyboardMarkup:
-    # 1η σειρά: Add Keywords, Settings
-    # 2η σειρά: Help, Contact
-    # 3η σειρά: Saved
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("➕ Add Keywords", callback_data="open:addkw"),
@@ -270,21 +276,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             db.close()
 
-        # ΕΝΙΑΙΟ μήνυμα όπως στην 1η εικόνα + πληκτρολόγιο 3 σειρών
         await update.message.reply_text(
             WELCOME_FULL, parse_mode="Markdown", reply_markup=main_menu_kb()
         )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (
-        "📘 *How it works*\n"
-        "• Add keywords with `/addkeyword python, lighting design, μελέτη φωτισμού`\n"
-        "• See filters with `/keywords` or `/mysettings`\n"
-        "• Tap ⭐ *Keep* to store a job, 🗑 *Delete* to remove it from chat\n"
-        "• View saved jobs with `/saved` — full cards\n"
-        "• Admin can extend licenses manually"
-    )
-    await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=main_menu_kb())
+    # Ασφαλές και από /help και από callback (θα το καλούμε μόνο από /help)
+    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown", reply_markup=main_menu_kb())
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -483,7 +481,8 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 db.close()
         elif where == "help":
-            await help_cmd(update, context)
+            # Διορθώθηκε: στέλνουμε άμεσα το help από το callback
+            await q.message.reply_text(HELP_TEXT, parse_mode="Markdown")
         elif where == "contact":
             await q.message.reply_text("Contact admin: please send your message here; the admin will reach out.")
         elif where == "saved":
