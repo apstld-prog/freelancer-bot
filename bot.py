@@ -34,7 +34,7 @@ log = logging.getLogger("bot")
 
 # ───────────────────────── Env ─────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-BASE_URL = os.getenv("BASE_URL", "").rstrip("/")  # π.χ. https://freelancer-bot-xxx.onrender.com
+BASE_URL = os.getenv("BASE_URL", "").rstrip("/")  # e.g. https://freelancer-bot-xxxx.onrender.com
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
@@ -253,9 +253,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_id = update.effective_user.id
         db = SessionLocal()
         try:
-            user = db.query(User).filter_by(telegram_id=tg_id).first()
+            user = db.query(User).filter_by(telegram_id=str(tg_id)).first()   # << str()
             if not user:
-                user = User(telegram_id=tg_id)
+                user = User(telegram_id=str(tg_id))                           # << str()
                 db.add(user)
             if not user.trial_until:
                 user.trial_until = now_utc() + timedelta(days=TRIAL_DAYS)
@@ -305,9 +305,9 @@ def split_keywords(raw: str) -> List[str]:
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        user = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
         if not user:
-            user = User(telegram_id=update.effective_user.id, trial_until=now_utc() + timedelta(days=TRIAL_DAYS))
+            user = User(telegram_id=str(update.effective_user.id), trial_until=now_utc() + timedelta(days=TRIAL_DAYS))
             db.add(user)
             db.commit()
 
@@ -332,7 +332,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        user = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
         words = ", ".join(k.keyword for k in (user.keywords or [])) if user else "(none)"
         await update.message.reply_text(f"Your keywords: {words}")
     finally:
@@ -345,7 +345,7 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kw = " ".join(context.args).strip().lower()
     db = SessionLocal()
     try:
-        user = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
         if not user:
             await update.message.reply_text("No keywords.")
             return
@@ -362,7 +362,7 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        user = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        user = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
         if not user or not user.keywords:
             await update.message.reply_text("No keywords to clear.")
             return
@@ -393,7 +393,7 @@ def settings_text(u: User) -> str:
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
         if not u:
             await update.message.reply_text("No settings yet. Use /start.")
             return
@@ -414,7 +414,7 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db = SessionLocal()
     try:
-        u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+        u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
         if not u:
             await update.message.reply_text("No saved jobs.")
             return
@@ -468,7 +468,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif where == "settings":
             db = SessionLocal()
             try:
-                u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+                u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
                 if u:
                     await q.message.reply_text(settings_text(u), parse_mode="Markdown")
             finally:
@@ -483,7 +483,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job_id = data.split(":", 1)[1]
         db = SessionLocal()
         try:
-            u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+            u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
             if not u:
                 return
             exists = db.query(SavedJob).filter_by(user_id=u.id, job_id=job_id).first()
@@ -499,7 +499,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job_id = data.split(":", 1)[1]
         db = SessionLocal()
         try:
-            u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
+            u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()  # str()
             if not u:
                 return
             row = db.query(SavedJob).filter_by(user_id=u.id, job_id=job_id).first()
@@ -523,6 +523,8 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # ───────────────────────── Webhook lifecycle ─────────────────────────
+tg_app: Optional[Application] = None
+
 def get_webhook_url() -> str:
     if not BASE_URL:
         raise RuntimeError("BASE_URL is not set")
@@ -534,7 +536,6 @@ async def on_startup():
     tg_app = build_application()
     await tg_app.initialize()
     await tg_app.start()
-    # Ρύθμιση webhook μέσω PTB API (πιο αξιόπιστο)
     url = get_webhook_url()
     await tg_app.bot.delete_webhook(drop_pending_updates=True)
     await tg_app.bot.set_webhook(url=url, allowed_updates=Update.ALL_TYPES)
@@ -551,18 +552,15 @@ async def on_shutdown():
 
 @app.post(f"/webhook/{WEBHOOK_SECRET}")
 async def telegram_webhook(request: Request):
-    """
-    Κάθε update περνάει από εδώ. Κάνουμε έντονο logging ώστε να βλέπεις στα Render logs.
-    """
     data = await request.json()
     if tg_app is None:
         return PlainTextResponse("App not ready", status_code=503)
     try:
         update = Update.de_json(data, tg_app.bot)
-        log.info("Webhook update: %s", update.to_dict().get("update_id"))
+        logging.info("Webhook update received.")
         await tg_app.process_update(update)
     except Exception as e:
-        log.exception("Webhook processing error: %s", e)
+        logging.exception("Webhook processing error: %s", e)
     return PlainTextResponse("OK")
 
 @app.get("/")
