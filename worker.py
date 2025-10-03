@@ -1,5 +1,6 @@
 # worker.py
 import os
+import json
 import logging
 import unicodedata
 from datetime import datetime, timezone
@@ -96,6 +97,67 @@ def job_matches(job: Dict, keywords: List[str], scope: str, require: str) -> Tup
         ok = len(matched) > 0
     return ok, matched
 
+# ---------------- Currency conversion ----------------
+# Default USD rates (override with FX_USD_RATES env as JSON: {"EUR":1.07, ...})
+DEFAULT_USD_RATES = {
+    "USD": 1.0,
+    "EUR": 1.07,
+    "GBP": 1.25,
+    "AUD": 0.65,
+    "CAD": 0.73,
+    "CHF": 1.10,
+    "SEK": 0.09,
+    "NOK": 0.09,
+    "DKK": 0.14,
+    "PLN": 0.25,
+    "RON": 0.22,
+    "BGN": 0.55,
+    "TRY": 0.03,
+    "MXN": 0.055,
+    "BRL": 0.19,
+    "INR": 0.012,
+}
+def load_usd_rates() -> Dict[str, float]:
+    raw = os.getenv("FX_USD_RATES", "").strip()
+    if not raw:
+        return DEFAULT_USD_RATES
+    try:
+        data = json.loads(raw)
+        safe = {k.upper(): float(v) for k, v in data.items()}
+        safe["USD"] = 1.0
+        return {**DEFAULT_USD_RATES, **safe}
+    except Exception:
+        return DEFAULT_USD_RATES
+
+USD_RATES = load_usd_rates()
+
+CURRENCY_SYMBOLS = {
+    "USD": "$", "EUR": "€", "GBP": "£",
+    "AUD": "A$", "CAD": "C$", "CHF": "CHF",
+    "SEK": "SEK", "NOK": "NOK", "DKK": "DKK",
+    "PLN": "zł", "RON": "lei", "BGN": "лв",
+    "TRY": "₺", "MXN": "MX$", "BRL": "R$", "INR": "₹",
+}
+
+def fmt_local_budget(minb: float, maxb: float, code: Optional[str]) -> str:
+    s = CURRENCY_SYMBOLS.get((code or "").upper(), "")
+    if minb or maxb:
+        if s:
+            return f"{minb:.0f}–{maxb:.0f} {s}".strip()
+        return f"{minb:.0f}–{maxb:.0f} {(code or '').upper()}".strip()
+    return "—"
+
+def to_usd(minb: float, maxb: float, code: Optional[str]) -> Optional[Tuple[float, float]]:
+    c = (code or "USD").upper()
+    rate = USD_RATES.get(c)
+    if not rate:
+        return None
+    # local * rate_to_usd
+    return minb * rate, maxb * rate
+
+def fmt_usd_line(min_usd: float, max_usd: float) -> str:
+    return f"~ ${min_usd:.0f}–${max_usd:.0f} USD"
+
 # ---------------- HTTP helpers ----------------
 HTTP_TIMEOUT = 20.0
 
@@ -117,8 +179,13 @@ def freelancer_job_to_card(p: Dict, matched: List[str]) -> Dict:
     title = p.get("title") or "Untitled"
     type_ = "Fixed" if p.get("type") == "fixed" else ("Hourly" if p.get("type") == "hourly" else "Unknown")
     budget = p.get("budget") or {}
-    minb = budget.get("minimum") or 0
-    maxb = budget.get("maximum") or 0
+    minb = float(budget.get("minimum") or 0)
+    maxb = float(budget.get("maximum") or 0)
+    currency_code = None
+    cur = budget.get("currency") or {}
+    # Freelancer returns e.g. {"code":"USD", ...}
+    currency_code = (cur.get("code") or "").upper() if isinstance(cur, dict) else None
+
     bids = p.get("bid_stats", {}).get("bid_count", 0)
     time_submitted = p.get("time_submitted")
     posted = "now"
@@ -141,6 +208,11 @@ def freelancer_job_to_card(p: Dict, matched: List[str]) -> Dict:
     if len(desc) > 220:
         desc = desc[:217] + "…"
 
+    # Compute display budget lines
+    local_line = fmt_local_budget(minb, maxb, currency_code)
+    usd_pair = to_usd(minb, maxb, currency_code)
+    usd_line = fmt_usd_line(*usd_pair) if usd_pair else None
+
     return {
         "id": f"freelancer-{pid}",
         "source": "Freelancer",
@@ -148,6 +220,9 @@ def freelancer_job_to_card(p: Dict, matched: List[str]) -> Dict:
         "type": type_,
         "budget_min": minb,
         "budget_max": maxb,
+        "currency": currency_code or "USD",
+        "budget_local_line": local_line,
+        "budget_usd_line": usd_line,  # may be None
         "bids": bids,
         "posted": posted,
         "description": desc,
@@ -182,21 +257,28 @@ def job_markup(job: Dict) -> dict:
     }
 
 def job_text(job: Dict) -> str:
-    budget_line = "—"
-    if job["budget_min"] or job["budget_max"]:
-        budget_line = f"{job['budget_min']:.0f}–{job['budget_max']:.0f}"
+    budget_local = job.get("budget_local_line") or "—"
+    usd_line = job.get("budget_usd_line")  # string or None
     matched_line = ", ".join(job.get("matched", [])) or "—"
     desc = job.get("description") or ""
-    return (
-        f"*{job['title']}*\n\n"
-        f"👤 Source: *{job['source']}*\n"
-        f"🧾 Type: *{job['type']}*\n"
-        f"💰 Budget: *{budget_line}*\n"
-        f"📨 Bids: *{job['bids']}*\n"
-        f"🕒 Posted: *{job['posted']}*\n\n"
-        f"{desc}\n\n"
+    lines = [
+        f"*{job['title']}*",
+        "",
+        f"👤 Source: *{job['source']}*",
+        f"🧾 Type: *{job['type']}*",
+        f"💰 Budget: *{budget_local}*",
+    ]
+    if usd_line:
+        lines.append(f"💵 {usd_line}")
+    lines += [
+        f"📨 Bids: *{job['bids']}*",
+        f"🕒 Posted: *{job['posted']}*",
+        "",
+        desc,
+        "",
         f"_Matched:_ {matched_line}"
-    )
+    ]
+    return "\n".join(lines)
 
 # ---------------- Core per-user processing ----------------
 async def process_user(db, u: User) -> int:
