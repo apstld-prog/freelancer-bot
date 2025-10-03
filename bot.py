@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 import uvicorn
 
@@ -30,7 +30,7 @@ from db import (
     User,
     Keyword,
     JobSent,
-    SavedJob,  # <-- Χρησιμοποιώ αυτό το μοντέλο για τα "Keep"
+    SavedJob,        # <-- used for ⭐ saved items
 )
 
 # ---------------- Logging ----------------
@@ -40,12 +40,9 @@ log = logging.getLogger("bot")
 # ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
-BASE_URL = os.getenv("BASE_URL", "")  # π.χ. https://freelancer-bot-xxx.onrender.com
+BASE_URL = os.getenv("BASE_URL", "")  # e.g. https://freelancer-bot-xxxx.onrender.com
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
-
-# Matching presentation settings (ίδια με worker για ομοιομορφία)
 FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
 
 # ---------------- FastAPI ----------------
@@ -66,7 +63,7 @@ def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
 # ---------------- DB ensure ----------------
 ensure_schema()
 
-# ---------------- Currency helpers (ίδιο format με worker) ----------------
+# ---------------- Currency helpers (same as worker) ----------------
 DEFAULT_USD_RATES = {
     "USD": 1.0, "EUR": 1.07, "GBP": 1.25, "AUD": 0.65, "CAD": 0.73, "CHF": 1.10,
     "SEK": 0.09, "NOK": 0.09, "DKK": 0.14, "PLN": 0.25, "RON": 0.22, "BGN": 0.55,
@@ -92,22 +89,19 @@ CURRENCY_SYMBOLS = {
     "PLN": "zł", "RON": "lei", "BGN": "лв",
     "TRY": "₺", "MXN": "MX$", "BRL": "R$", "INR": "₹",
 }
-
 def fmt_local_budget(minb: float, maxb: float, code: Optional[str]) -> str:
     s = CURRENCY_SYMBOLS.get((code or "").upper(), "")
     if minb or maxb:
         if s:
-            return f"{minb:.0f}–{maxb:.0f} {s}".strip()
-        return f"{minb:.0f}–{maxb:.0f} {(code or '').upper()}".strip()
+            return f"{minb:.0f}–{maxb:.0f} {s}"
+        return f"{minb:.0f}–{maxb:.0f} {(code or '').upper()}"
     return "—"
-
 def to_usd(minb: float, maxb: float, code: Optional[str]) -> Optional[Tuple[float, float]]:
     c = (code or "USD").upper()
     rate = USD_RATES.get(c)
     if not rate:
         return None
     return minb * rate, maxb * rate
-
 def fmt_usd_line(min_usd: float, max_usd: float) -> str:
     return f"~ ${min_usd:.0f}–${max_usd:.0f} USD"
 
@@ -124,13 +118,13 @@ async def fl_fetch_by_id(pid: str) -> Optional[Dict]:
         if r.status_code != 200:
             return None
         data = r.json()
-    result = (data or {}).get("result") or {}
-    return result
+    return (data or {}).get("result") or None
 
 def fl_to_card(p: Dict, matched: Optional[List[str]] = None) -> Dict:
     pid = str(p.get("id"))
     title = p.get("title") or "Untitled"
     type_ = "Fixed" if p.get("type") == "fixed" else ("Hourly" if p.get("type") == "hourly" else "Unknown")
+
     budget = p.get("budget") or {}
     minb = float(budget.get("minimum") or 0)
     maxb = float(budget.get("maximum") or 0)
@@ -142,14 +136,12 @@ def fl_to_card(p: Dict, matched: Optional[List[str]] = None) -> Dict:
     posted = "now"
     if isinstance(time_submitted, (int, float)):
         age_sec = max(0, int(now_utc().timestamp() - time_submitted))
-        if age_sec < 60:
-            posted = f"{age_sec}s ago"
-        elif age_sec < 3600:
-            posted = f"{age_sec//60}m ago"
-        elif age_sec < 86400:
-            posted = f"{age_sec//3600}h ago"
-        else:
-            posted = f"{age_sec//86400}d ago"
+        posted = (
+            f"{age_sec}s ago" if age_sec < 60 else
+            f"{age_sec//60}m ago" if age_sec < 3600 else
+            f"{age_sec//3600}h ago" if age_sec < 86400 else
+            f"{age_sec//86400}d ago"
+        )
 
     base_url = f"https://www.freelancer.com/projects/{pid}"
     sep = "&" if "?" in base_url else "?"
@@ -173,8 +165,8 @@ def fl_to_card(p: Dict, matched: Optional[List[str]] = None) -> Dict:
         "bids": bids,
         "posted": posted,
         "description": desc,
-        "original_url": url,
         "proposal_url": url,
+        "original_url": url,
         "matched": matched or [],
     }
 
@@ -194,50 +186,31 @@ def job_text(card: Dict) -> str:
         "",
         card.get("description") or "",
     ]
-    matched = ", ".join(card.get("matched", []) or [])
-    if matched:
-        lines += ["", f"_Matched:_ {matched}"]
+    if card.get("matched"):
+        lines += ["", f"_Matched:_ {', '.join(card['matched'])}"]
     return "\n".join(lines)
 
-def job_markup(card: Dict) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def card_markup(card: Dict, saved_mode: bool = False) -> InlineKeyboardMarkup:
+    rows = [
         [
             InlineKeyboardButton("💼 Proposal", url=card["proposal_url"]),
             InlineKeyboardButton("🔗 Original", url=card["original_url"]),
-        ],
-        [
+        ]
+    ]
+    if saved_mode:
+        rows.append([InlineKeyboardButton("🗑 Remove from Saved", callback_data=f"unsave:{card['id']}")])
+    else:
+        rows.append([
             InlineKeyboardButton("⭐ Keep", callback_data=f"save:{card['id']}"),
             InlineKeyboardButton("🗑 Delete", callback_data=f"dismiss:{card['id']}"),
-        ],
-    ])
+        ])
+    return InlineKeyboardMarkup(rows)
 
-# ---------------- Telegram app ----------------
-def build_application() -> Application:
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN not set")
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
-    app.add_handler(CommandHandler("keywords", keywords_cmd))
-    app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
-    app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
-    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
-    app.add_handler(CommandHandler("saved", saved_cmd))
-    app.add_handler(CommandHandler("whoami", whoami_cmd))
-
-    app.add_handler(CallbackQueryHandler(button_cb))
-
-    return app
-
-# ---------------- Handlers ----------------
+# ---------------- Main menu & texts ----------------
 WELCOME = (
     "👋 Welcome to *Freelancer Alert Bot!*\n\n"
     "🎁 You have a *10-day free trial*. Use /help to see how it works."
 )
-
 FEATURES = (
     "✨ *Features*\n"
     "• Realtime job alerts (Freelancer API)\n"
@@ -245,10 +218,9 @@ FEATURES = (
     "• Budget shown + USD conversion\n"
     "• ⭐ *Keep* / 🗑 *Delete* buttons\n"
     "• 10-day free trial, extend via admin\n"
-    "• Multi-keyword search (single/all modes)\n"
+    "• Multi-keyword search\n"
     "• Platforms by country (incl. GR boards)"
 )
-
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -258,8 +230,25 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("📚 Help", callback_data="open:help"),
             InlineKeyboardButton("💾 Saved Jobs", callback_data="open:saved"),
-        ]
+        ],
     ])
+
+# ---------------- Handlers ----------------
+def build_application() -> Application:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN not set")
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
+    app.add_handler(CommandHandler("keywords", keywords_cmd))
+    app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
+    app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
+    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
+    app.add_handler(CommandHandler("saved", saved_cmd))
+    app.add_handler(CommandHandler("whoami", whoami_cmd))
+    app.add_handler(CallbackQueryHandler(button_cb))
+    return app
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
@@ -274,18 +263,17 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.commit()
     finally:
         db.close()
-
     await update.message.reply_text(WELCOME, parse_mode="Markdown", reply_markup=main_menu_kb())
     await update.message.reply_text(FEATURES, parse_mode="Markdown")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "📘 *How it works*\n"
-        "1) Add keywords with `/addkeyword python, telegram` (comma-separated; Greek supported)\n"
-        "2) See your filters with `/keywords` or `/mysettings`\n"
-        "3) Tap ⭐ Keep to store a job, 🗑 Delete to remove it from chat\n"
-        "4) View saved jobs with `/saved` (full cards)\n\n"
-        "Admin can extend licenses manually."
+        "• Add keywords with `/addkeyword python, lighting design, μελέτη φωτισμού`\n"
+        "• See filters with `/keywords` or `/mysettings`\n"
+        "• Tap ⭐ *Keep* to store a job, 🗑 *Delete* to remove it from chat\n"
+        "• View saved jobs with `/saved` — full cards\n"
+        "• Admin can extend licenses manually"
     )
     await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=main_menu_kb())
 
@@ -301,7 +289,6 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----- Keywords -----
 def split_keywords(raw: str) -> List[str]:
-    # διαχωρισμός με κόμμα ή κενά, remove duplicates, keep order
     if not raw:
         return []
     parts = [p.strip() for p in raw.replace(";", ",").split(",")]
@@ -309,9 +296,10 @@ def split_keywords(raw: str) -> List[str]:
     seen = set()
     out = []
     for p in parts:
-        if p.lower() not in seen:
+        low = p.lower()
+        if low not in seen:
             out.append(p)
-            seen.add(p.lower())
+            seen.add(low)
     return out
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -385,13 +373,12 @@ async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ----- Settings / MySettings -----
+# ----- Settings -----
 def settings_text(u: User) -> str:
     trial = to_aware(u.trial_until)
     lic = to_aware(u.access_until)
     now = now_utc()
     active = (trial and trial >= now) or (lic and lic >= now)
-
     trial_line = f"Trial until: *{trial.isoformat()}*" if trial else "Trial until: *None*"
     lic_line = f"License until: *{lic.isoformat()}*" if lic else "License until: *None*"
     kw_line = ", ".join(k.keyword for k in (u.keywords or [])) or "(none)"
@@ -418,6 +405,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 PAGE_SIZE = int(os.getenv("SAVED_PAGE_SIZE", "5"))
 
 async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # page param (optional)
     page = 1
     if context.args:
         try:
@@ -445,9 +433,9 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(f"💾 Saved jobs — page {page}/{max_page}")
 
-        # Render each saved item as a FULL card by refetching from platform
+        # Render each saved item as FULL CARD by refetching from the platform
         for it in items:
-            job_id = it.job_id  # e.g. freelancer-39847081
+            job_id = it.job_id  # e.g. freelancer-39842794
             if job_id.startswith("freelancer-"):
                 pid = job_id.split("-", 1)[1]
                 data = await fl_fetch_by_id(pid)
@@ -456,18 +444,11 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 card = fl_to_card(data, matched=None)
                 text = job_text(card)
-                kb = InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("💼 Proposal", url=card["proposal_url"]),
-                        InlineKeyboardButton("🔗 Original", url=card["original_url"]),
-                    ],
-                    [
-                        InlineKeyboardButton("🗑 Remove from Saved", callback_data=f"unsave:{job_id}"),
-                    ],
-                ])
-                await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=kb)
+                kb = card_markup(card, saved_mode=True)
+                await update.message.reply_text(
+                    text, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=kb
+                )
             else:
-                # Unknown source fallback
                 await update.message.reply_text(f"Saved: {job_id}")
     finally:
         db.close()
@@ -479,10 +460,10 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
     if data.startswith("open:"):
-        # Menu buttons
-        _, where = data.split(":", 1)
+        where = data.split(":", 1)[1]
         if where == "addkw":
-            await q.message.reply_text("Add keywords:\n`/addkeyword python, telegram, μελέτη φωτισμού`", parse_mode="Markdown")
+            await q.message.reply_text("Add keywords:\n`/addkeyword python, lighting design, μελέτη φωτισμού`",
+                                       parse_mode="Markdown")
         elif where == "settings":
             db = SessionLocal()
             try:
@@ -504,7 +485,6 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             u = db.query(User).filter_by(telegram_id=update.effective_user.id).first()
             if not u:
                 return
-            # insert if not exists
             exists = db.query(SavedJob).filter_by(user_id=u.id, job_id=job_id).first()
             if not exists:
                 db.add(SavedJob(user_id=u.id, job_id=job_id))
@@ -535,7 +515,6 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("dismiss:"):
-        # απλώς σβήνουμε το message από το chat
         try:
             await q.message.delete()
         except Exception:
@@ -543,9 +522,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # ---------------- Webhook endpoints ----------------
-# PTB Application is built once on import for webhook mode
 tg_app: Optional[Application] = None
-
 def get_app() -> Application:
     global tg_app
     if tg_app is None:
@@ -566,5 +543,4 @@ async def root():
 
 # ---------------- Entrypoint (webhook) ----------------
 if __name__ == "__main__":
-    # Start FastAPI (webhook mode)
     uvicorn.run("bot:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
