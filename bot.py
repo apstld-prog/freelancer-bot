@@ -359,8 +359,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     admin_line = "You are admin." if is_admin(update) else "You are a regular user."
+    uname = f"@{u.username}" if u.username else "(none)"
     await update.message.reply_text(
-        f"Your Telegram ID: {u.id}\nName: {u.first_name or ''}\nUsername: @{u.username}" if u.username else f"Your Telegram ID: {u.id}\nName: {u.first_name or ''}\nUsername: (none)\n{admin_line}"
+        f"Your Telegram ID: {u.id}\nName: {u.first_name or ''}\nUsername: {uname}\n\n{admin_line}"
     )
 
 def split_keywords(raw: str) -> List[str]:
@@ -613,7 +614,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(context.args) >= 1 and context.args[0].isdigit():
             page = max(1, int(context.args[0]))
         if len(context.args) >= 2 and context.args[1].isdigit():
-            size = max(1, min(100, int(context.args[1]))))
+            size = max(1, min(100, int(context.args[1])))  # ← FIX: αφαιρέθηκε το επιπλέον ')'
 
     db = SessionLocal()
     try:
@@ -857,7 +858,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not u:
                 return
             exists = db.query(SavedJob).filter_by(user_id=u.id, job_id=job_id).first()
-            if not exists:
+            if exists is None:
                 db.add(SavedJob(user_id=u.id, job_id=job_id))
                 db.commit()
             await q.answer("Saved ✅", show_alert=False)
@@ -893,8 +894,6 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # ───────────────────────── Webhook lifecycle ─────────────────────────
-tg_app: Optional[Application] = None
-
 def get_webhook_url() -> str:
     if not BASE_URL:
         raise RuntimeError("BASE_URL is not set")
