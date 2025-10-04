@@ -44,7 +44,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
 FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
 
-# Email (SMTP) — προαιρετικό, για forward των Contact
+# Email (SMTP)
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "77chrisap@gmail.com").strip()
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -227,22 +227,22 @@ WELCOME_FULL = (
     "Use /help to see all commands."
 )
 
-def get_help_text_html(is_admin: bool) -> str:
+def get_help_text_plain(is_admin: bool) -> str:
     base = (
-        "<b>📘 How it works</b><br>"
-        "• Add keywords with <code>/addkeyword python, lighting design, μελέτη φωτισμού</code><br>"
-        "• See filters with <code>/keywords</code> or <code>/mysettings</code><br>"
-        "• Tap ⭐ Keep to store a job, 🗑 Delete to remove it from chat<br>"
-        "• View saved jobs with <code>/saved</code> — full cards<br>"
+        "📘 How it works\n"
+        "• Add keywords: /addkeyword python, lighting design, μελέτη φωτισμού\n"
+        "• See your keywords: /keywords (or /mysettings)\n"
+        "• Tap ⭐ Keep to store a job, 🗑 Delete to remove it from chat\n"
+        "• View saved jobs: /saved\n"
     )
     if is_admin:
         admin = (
-            "<br><b>🔐 Admin only</b><br>"
-            "<code>/stats</code> – overall stats<br>"
-            "<code>/users [page] [size]</code> – list users<br>"
-            "<code>/grant &lt;telegram_id&gt; &lt;days&gt;</code> – extend/set license<br>"
-            "<code>/trialextend &lt;telegram_id&gt; &lt;days&gt;</code> – extend trial<br>"
-            "<code>/revoke &lt;telegram_id&gt;</code> – clear license<br>"
+            "\n🔐 Admin only\n"
+            "/stats – overall stats\n"
+            "/users [page] [size] – list users\n"
+            "/grant <telegram_id> <days> – set license\n"
+            "/trialextend <telegram_id> <days> – extend trial\n"
+            "/revoke <telegram_id> – clear license\n"
         )
         return base + admin
     return base
@@ -347,20 +347,18 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # plain text to avoid entity issues
     await update.message.reply_text(
-        get_help_text_html(is_admin(update)),
-        parse_mode="HTML",
+        get_help_text_plain(is_admin(update)),
         disable_web_page_preview=True,
         reply_markup=main_menu_kb()
     )
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
-    admin_line = "👤 You are <b>admin</b>." if is_admin(update) else "👤 You are a regular user."
-    await update.message.reply_html(
-        f"🆔 Your Telegram ID: <code>{u.id}</code>\n"
-        f"👤 Name: {u.first_name or ''}\n"
-        f"{admin_line}"
+    admin_line = "You are admin." if is_admin(update) else "You are a regular user."
+    await update.message.reply_text(
+        f"Your Telegram ID: {u.id}\nName: {u.first_name or ''}\n{admin_line}"
     )
 
 def split_keywords(raw: str) -> List[str]:
@@ -462,23 +460,21 @@ def settings_text(u: User) -> str:
     proposal = u.proposal_template or "(none)"
 
     lines = [
-        "🛠 <b>Your Settings</b>",
+        "🛠 Your Settings",
         "",
         f"• Keywords: {kw_line}",
         f"• Countries: {countries}",
         f"• Proposal template: {proposal}",
         "",
-        f"🟢 <b>Start date:</b> {start_dt.strftime('%Y-%m-%d %H:%M:%S UTC') if start_dt else '—'}",
-        f"🕑 <b>Trial ends:</b> {trial.strftime('%Y-%m-%d %H:%M:%S UTC') if trial else 'None'}",
-        f"🧾 <b>License until:</b> {lic.strftime('%Y-%m-%d %H:%M:%S UTC') if lic else 'None'}",
-        f"✅ <b>Active:</b> {'✅' if active else '❌'}",
-        f"⛔ <b>Blocked:</b> {'❗' if blocked else '❌'}",
+        f"🟢 Start date: {start_dt.strftime('%Y-%m-%d %H:%M:%S UTC') if start_dt else '—'}",
+        f"🕑 Trial ends: {trial.strftime('%Y-%m-%d %H:%M:%S UTC') if trial else 'None'}",
+        f"🧾 License until: {lic.strftime('%Y-%m-%d %H:%M:%S UTC') if lic else 'None'}",
+        f"✅ Active: {'✅' if active else '❌'}",
+        f"⛔ Blocked: {'❗' if blocked else '❌'}",
         "",
-        "🧭 <b>Platforms monitored:</b>",
-        "• <b>Global</b>: <a href='https://www.freelancer.com'>Freelancer.com</a>, Fiverr (affiliate links), "
-        "PeoplePerHour (UK), Malt (FR/EU), Workana (ES/EU/LatAm), Upwork",
-        "• <b>Greece</b>: <a href='https://www.jobfind.gr'>JobFind.gr</a>, "
-        "<a href='https://www.skywalker.gr'>Skywalker.gr</a>, <a href='https://www.kariera.gr'>Kariera.gr</a>",
+        "🧭 Platforms monitored:",
+        "• Global: Freelancer.com, Fiverr (affiliate links), PeoplePerHour (UK), Malt (FR/EU), Workana (ES/EU/LatAm), Upwork",
+        "• Greece: JobFind.gr, Skywalker.gr, Kariera.gr",
         "",
         "🧩 For extension, contact the admin."
     ]
@@ -491,7 +487,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not u:
             await update.message.reply_text("No settings yet. Use /start.")
             return
-        await update.message.reply_html(
+        await update.message.reply_text(
             settings_text(u),
             disable_web_page_preview=True,
             reply_markup=main_menu_kb()
@@ -499,7 +495,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ── Saved (ως full cards)
+# ── Saved (full cards)
 PAGE_SIZE = int(os.getenv("SAVED_PAGE_SIZE", "5"))
 
 async def send_saved_cards(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user: User, page: int = 1):
@@ -559,18 +555,18 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ───────────────────────── Admin Handlers ─────────────────────────
 ADMIN_HELP = (
-    "<b>Admin commands:</b><br>"
-    "<code>/stats</code> – overall stats<br>"
-    "<code>/users [page] [size]</code> – list users<br>"
-    "<code>/grant &lt;telegram_id&gt; &lt;days&gt;</code> – extend/set license<br>"
-    "<code>/trialextend &lt;telegram_id&gt; &lt;days&gt;</code> – extend trial<br>"
-    "<code>/revoke &lt;telegram_id&gt;</code> – clear license<br>"
+    "Admin commands:\n"
+    "/stats – overall stats\n"
+    "/users [page] [size] – list users\n"
+    "/grant <telegram_id> <days> – set license\n"
+    "/trialextend <telegram_id> <days> – extend trial\n"
+    "/revoke <telegram_id> – clear license\n"
 )
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
-    await update.message.reply_html(ADMIN_HELP)
+    await update.message.reply_text(ADMIN_HELP)
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -589,8 +585,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if u.keywords:
                 with_keywords += 1
         await update.message.reply_text(
-            f"*Stats*\n• Users: {total}\n• Active: {active}\n• With keywords: {with_keywords}",
-            parse_mode="Markdown"
+            f"Stats\n• Users: {total}\n• Active: {active}\n• With keywords: {with_keywords}"
         )
     finally:
         db.close()
@@ -616,17 +611,17 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users = q.offset((page - 1) * size).limit(size).all()
 
         now = now_utc()
-        lines = [f"*Users* — page {page}/{max_page} (size {size})"]
+        lines = [f"Users — page {page}/{max_page} (size {size})"]
         for u in users:
             trial = to_aware(u.trial_until)
             lic = to_aware(u.access_until)
             active = (trial and trial >= now) or (lic and lic >= now)
             kw_count = len(u.keywords or [])
             lines.append(
-                f"`{u.telegram_id}` • kw:{kw_count} • trial:{trial.isoformat() if trial else '-'} • "
+                f"{u.telegram_id} • kw:{kw_count} • trial:{trial.isoformat() if trial else '-'} • "
                 f"license:{lic.isoformat() if lic else '-'} • {'✅' if active else '❌'}"
             )
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(lines))
     finally:
         db.close()
 
@@ -658,7 +653,7 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             base = now
         u.access_until = base + timedelta(days=days)
         db.commit()
-        await update.message.reply_text(f"License set to {u.access_until.isoformat()} for `{u.telegram_id}`", parse_mode="Markdown")
+        await update.message.reply_text(f"License set to {u.access_until.isoformat()} for {u.telegram_id}")
         try:
             await tg_app.bot.send_message(chat_id=int(u.telegram_id), text=f"🔑 Your license is active until {u.access_until.isoformat()}.")
         except Exception:
@@ -694,7 +689,7 @@ async def trialextend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             base = now
         u.trial_until = base + timedelta(days=days)
         db.commit()
-        await update.message.reply_text(f"Trial set to {u.trial_until.isoformat()} for `{u.telegram_id}`", parse_mode="Markdown")
+        await update.message.reply_text(f"Trial set to {u.trial_until.isoformat()} for {u.telegram_id}")
         try:
             await tg_app.bot.send_message(chat_id=int(u.telegram_id), text=f"🎁 Your trial is extended until {u.trial_until.isoformat()}.")
         except Exception:
@@ -717,7 +712,7 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         u.access_until = None
         db.commit()
-        await update.message.reply_text(f"License revoked for `{u.telegram_id}`", parse_mode="Markdown")
+        await update.message.reply_text(f"License revoked for {u.telegram_id}")
         try:
             await tg_app.bot.send_message(chat_id=int(u.telegram_id), text="⛔ Your license has been revoked.")
         except Exception:
@@ -727,15 +722,13 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ───────────────────────── Callback buttons & Contact flow ─────────────────────────
 async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catch plain text. If user pressed Contact before, forward to admin + email."""
+    """If user pressed Contact, forward to admin + email."""
     if context.user_data.get("awaiting_contact"):
         context.user_data["awaiting_contact"] = False
         msg = update.message.text
 
-        # confirm to user
         await update.message.reply_text("✅ Your message has been sent to the admin. You'll receive a reply here.")
 
-        # gather some context for admin (username + keywords)
         db = SessionLocal()
         try:
             urec = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
@@ -745,33 +738,22 @@ async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         u = update.effective_user
         uname = f"@{u.username}" if u.username else "(no username)"
-        header_html = (
-            "📩 <b>Contact from user</b>\n"
-            f"ID: <code>{u.id}</code>\n"
+        header = (
+            "Contact from user\n"
+            f"ID: {u.id}\n"
             f"Name: {u.first_name or ''}\n"
             f"Username: {uname}\n"
             f"Keywords: {user_keywords}\n\n"
         )
 
-        # forward to admin (Telegram)
         if ADMIN_ID:
             try:
-                await tg_app.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=header_html + msg,
-                    parse_mode="HTML"
-                )
+                await tg_app.bot.send_message(chat_id=ADMIN_ID, text=header + msg)
             except Exception:
                 pass
 
-        # forward by Email (if SMTP configured)
         subject = "Freelancer Bot — New Contact message"
-        body = (
-            f"From Telegram user {u.id} ({u.first_name or ''})\n"
-            f"Username: {uname}\n"
-            f"Keywords: {user_keywords}\n\n"
-            f"{msg}"
-        )
+        body = header + msg
         ok = send_email(subject, body)
         if not ok:
             log.warning("Contact email not sent (SMTP not configured).")
@@ -784,22 +766,22 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("open:"):
         where = data.split(":", 1)[1]
         if where == "addkw":
-            await q.message.reply_html(
-                "Add keywords with <code>/addkeyword python, lighting design, μελέτη φωτισμού</code>"
+            await q.message.reply_text(
+                "Add keywords with: /addkeyword python, lighting design, μελέτη φωτισμού"
             )
         elif where == "settings":
             db = SessionLocal()
             try:
                 u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
                 if u:
-                    await q.message.reply_html(
+                    await q.message.reply_text(
                         settings_text(u), disable_web_page_preview=True
                     )
             finally:
                 db.close()
         elif where == "help":
-            await q.message.reply_html(
-                get_help_text_html(is_admin(update)),
+            await q.message.reply_text(
+                get_help_text_plain(is_admin(update)),
                 disable_web_page_preview=True
             )
         elif where == "contact":
