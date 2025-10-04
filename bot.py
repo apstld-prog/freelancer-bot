@@ -244,6 +244,7 @@ def get_help_text_plain(is_admin: bool) -> str:
             "/trialextend <telegram_id> <days> – extend trial\n"
             "/revoke <telegram_id> – clear license\n"
             "/reply <telegram_id> <message> – reply to user via bot (also emails you a copy)\n"
+            "/admintest – send test DM+email to the admin\n"
         )
         return base + admin
     return base
@@ -272,7 +273,6 @@ def smtp_available() -> bool:
     return all([SMTP_HOST, SMTP_USER, SMTP_PASS, ADMIN_EMAIL])
 
 def send_email(subject: str, body: str) -> bool:
-    """Send email via SMTP; returns True on success."""
     if not smtp_available():
         log.warning("SMTP not configured; skipping email send.")
         return False
@@ -318,7 +318,8 @@ def build_application() -> Application:
     app_.add_handler(CommandHandler("grant", grant_cmd))
     app_.add_handler(CommandHandler("trialextend", trialextend_cmd))
     app_.add_handler(CommandHandler("revoke", revoke_cmd))
-    app_.add_handler(CommandHandler("reply", reply_cmd))  # ← NEW
+    app_.add_handler(CommandHandler("reply", reply_cmd))
+    app_.add_handler(CommandHandler("admintest", admintest_cmd))
 
     # callbacks
     app_.add_handler(CallbackQueryHandler(button_cb))
@@ -359,7 +360,7 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     admin_line = "You are admin." if is_admin(update) else "You are a regular user."
     await update.message.reply_text(
-        f"Your Telegram ID: {u.id}\nName: {u.first_name or ''}\n{admin_line}"
+        f"Your Telegram ID: {u.id}\nName: {u.first_name or ''}\nUsername: @{u.username}" if u.username else f"Your Telegram ID: {u.id}\nName: {u.first_name or ''}\nUsername: (none)\n{admin_line}"
     )
 
 def split_keywords(raw: str) -> List[str]:
@@ -447,7 +448,6 @@ async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ── Settings (αναλυτικό)
 def settings_text(u: User) -> str:
     trial = to_aware(u.trial_until)
     lic = to_aware(u.access_until)
@@ -496,7 +496,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ── Saved (full cards)
+# Saved jobs — full cards
 PAGE_SIZE = int(os.getenv("SAVED_PAGE_SIZE", "5"))
 
 async def send_saved_cards(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user: User, page: int = 1):
@@ -563,12 +563,24 @@ ADMIN_HELP = (
     "/trialextend <telegram_id> <days> – extend trial\n"
     "/revoke <telegram_id> – clear license\n"
     "/reply <telegram_id> <message> – reply to user via bot (also emails you a copy)\n"
+    "/admintest – send test DM+email to the admin\n"
 )
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     await update.message.reply_text(ADMIN_HELP)
+
+async def admintest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text="✅ Admin DM test — if you see this, DM works.")
+        send_email("Freelancer Bot — Admin DM test", "This is a test message to confirm DM+email path.")
+        await update.message.reply_text("Sent test DM and email to admin.")
+    except Exception as e:
+        log.exception("Admin test failed: %s", e)
+        await update.message.reply_text(f"Admin test failed: {e}")
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -601,7 +613,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(context.args) >= 1 and context.args[0].isdigit():
             page = max(1, int(context.args[0]))
         if len(context.args) >= 2 and context.args[1].isdigit():
-            size = max(1, min(100, int(context.args[1])))
+            size = max(1, min(100, int(context.args[1]))))
 
     db = SessionLocal()
     try:
@@ -657,9 +669,9 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.commit()
         await update.message.reply_text(f"License set to {u.access_until.isoformat()} for {u.telegram_id}")
         try:
-            await tg_app.bot.send_message(chat_id=int(u.telegram_id), text=f"🔑 Your license is active until {u.access_until.isoformat()}.")
-        except Exception:
-            pass
+            await context.bot.send_message(chat_id=int(u.telegram_id), text=f"🔑 Your license is active until {u.access_until.isoformat()}.")
+        except Exception as e:
+            log.exception("Notify user failed: %s", e)
     finally:
         db.close()
 
@@ -693,9 +705,9 @@ async def trialextend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.commit()
         await update.message.reply_text(f"Trial set to {u.trial_until.isoformat()} for {u.telegram_id}")
         try:
-            await tg_app.bot.send_message(chat_id=int(u.telegram_id), text=f"🎁 Your trial is extended until {u.trial_until.isoformat()}.")
-        except Exception:
-            pass
+            await context.bot.send_message(chat_id=int(u.telegram_id), text=f"🎁 Your trial is extended until {u.trial_until.isoformat()}.")
+        except Exception as e:
+            log.exception("Notify user failed: %s", e)
     finally:
         db.close()
 
@@ -716,15 +728,13 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.commit()
         await update.message.reply_text(f"License revoked for {u.telegram_id}")
         try:
-            await tg_app.bot.send_message(chat_id=int(u.telegram_id), text="⛔ Your license has been revoked.")
-        except Exception:
-            pass
+            await context.bot.send_message(chat_id=int(u.telegram_id), text="⛔ Your license has been revoked.")
+        except Exception as e:
+            log.exception("Notify user failed: %s", e)
     finally:
         db.close()
 
-# NEW: /reply admin command
 async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin replies to user: /reply <telegram_id> <message>"""
     if not is_admin(update):
         return
     if len(context.args) < 2:
@@ -738,30 +748,26 @@ async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("First argument must be a numeric Telegram ID.")
         return
 
-    # Compose message text from the rest args (preserve spaces)
     full_text = update.message.text
-    # strip the command and id
     prefix = f"/reply {tg_str}"
     msg = full_text[len(prefix):].strip()
     if not msg:
         await update.message.reply_text("Please provide the reply message text.")
         return
 
-    # Send to user
     try:
-        await tg_app.bot.send_message(chat_id=target_id, text=f"💬 *Admin reply:*\n{msg}", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=target_id, text=f"💬 *Admin reply:*\n{msg}", parse_mode="Markdown")
         await update.message.reply_text("Reply sent ✅")
     except Exception as e:
+        log.exception("Reply send failed: %s", e)
         await update.message.reply_text(f"Failed to send reply: {e}")
 
-    # Email a copy to admin inbox
     subject = "Freelancer Bot — Admin reply sent"
     body = f"To user: {target_id}\n\n{msg}"
     send_email(subject, body)
 
 # ───────────────────────── Callback buttons & Contact flow ─────────────────────────
 async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """If user pressed Contact, forward to admin + email."""
     if context.user_data.get("awaiting_contact"):
         context.user_data["awaiting_contact"] = False
         msg = update.message.text
@@ -785,12 +791,17 @@ async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Keywords: {user_keywords}\n\n"
         )
 
-        if ADMIN_ID:
-            try:
-                await tg_app.bot.send_message(chat_id=ADMIN_ID, text=header + msg)
-            except Exception:
-                pass
+        # Telegram forward to admin
+        try:
+            if ADMIN_ID:
+                log.info("Forwarding contact message to admin chat_id=%s", ADMIN_ID)
+                await context.bot.send_message(chat_id=ADMIN_ID, text=header + msg)
+            else:
+                log.warning("ADMIN_ID not set; cannot DM admin.")
+        except Exception as e:
+            log.exception("Failed to forward to admin: %s", e)
 
+        # Email copy
         subject = "Freelancer Bot — New Contact message"
         body = header + msg
         ok = send_email(subject, body)
