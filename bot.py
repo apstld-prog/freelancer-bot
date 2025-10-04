@@ -324,7 +324,7 @@ def build_application() -> Application:
     # callbacks
     app_.add_handler(CallbackQueryHandler(button_cb))
 
-    # capture plain text (Contact flow)
+    # capture plain text (Contact & Admin reply flow)
     app_.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, inbound_text_handler))
 
     return app_
@@ -614,7 +614,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(context.args) >= 1 and context.args[0].isdigit():
             page = max(1, int(context.args[0]))
         if len(context.args) >= 2 and context.args[1].isdigit():
-            size = max(1, min(100, int(context.args[1])))  # ← FIX: αφαιρέθηκε το επιπλέον ')'
+            size = max(1, min(100, int(context.args[1])))
 
     db = SessionLocal()
     try:
@@ -767,8 +767,24 @@ async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     body = f"To user: {target_id}\n\n{msg}"
     send_email(subject, body)
 
-# ───────────────────────── Callback buttons & Contact flow ─────────────────────────
+# ───────────────────────── Callback buttons & Contact/Admin Reply flow ─────────────────────────
 async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1) Admin quick-reply flow
+    if is_admin(update) and context.user_data.get("admin_reply_to"):
+        target_id = context.user_data.pop("admin_reply_to")
+        msg = update.message.text
+        # Send to user
+        try:
+            await context.bot.send_message(chat_id=target_id, text=f"💬 *Admin reply:*\n{msg}", parse_mode="Markdown")
+            await update.message.reply_text("Reply sent ✅")
+        except Exception as e:
+            log.exception("Admin quick-reply failed: %s", e)
+            await update.message.reply_text(f"Failed to send reply: {e}")
+        # Email copy
+        send_email("Freelancer Bot — Admin reply sent", f"To user: {target_id}\n\n{msg}")
+        return
+
+    # 2) User contact flow
     if context.user_data.get("awaiting_contact"):
         context.user_data["awaiting_contact"] = False
         msg = update.message.text
@@ -792,11 +808,15 @@ async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Keywords: {user_keywords}\n\n"
         )
 
-        # Telegram forward to admin
+        # Telegram forward to admin with Reply/Decline buttons
         try:
             if ADMIN_ID:
                 log.info("Forwarding contact message to admin chat_id=%s", ADMIN_ID)
-                await context.bot.send_message(chat_id=ADMIN_ID, text=header + msg)
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ Reply", callback_data=f"adminreply:{u.id}"),
+                    InlineKeyboardButton("🚫 Decline", callback_data=f"admindecline:{u.id}"),
+                ]])
+                await context.bot.send_message(chat_id=ADMIN_ID, text=header + msg, reply_markup=kb)
             else:
                 log.warning("ADMIN_ID not set; cannot DM admin.")
         except Exception as e:
@@ -808,12 +828,42 @@ async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         ok = send_email(subject, body)
         if not ok:
             log.warning("Contact email not sent (SMTP not configured).")
+        return
+
+    # (fallback: ignore plain text to keep chat clean)
+    return
 
 async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
     await q.answer()
 
+    # Admin quick actions from forwarded Contact
+    if data.startswith("adminreply:") and is_admin(update):
+        try:
+            target_id = int(data.split(":", 1)[1])
+            context.user_data["admin_reply_to"] = target_id
+            await q.message.reply_text(f"Type your reply to user {target_id}. Your next message will be sent to them.")
+        except Exception as e:
+            log.exception("adminreply parse error: %s", e)
+        return
+
+    if data.startswith("admindecline:") and is_admin(update):
+        try:
+            target_id = int(data.split(":", 1)[1])
+            text = ("Hello! The admin has reviewed your message and cannot proceed at this time.\n"
+                    "Thank you for reaching out.")
+            try:
+                await context.bot.send_message(chat_id=target_id, text=text)
+            except Exception as e:
+                log.exception("Decline send failed: %s", e)
+            send_email("Freelancer Bot — Admin decline sent", f"To user: {target_id}\n\n{text}")
+            await q.message.reply_text("Decline sent ✅")
+        except Exception as e:
+            log.exception("admindecline parse error: %s", e)
+        return
+
+    # Regular opens
     if data.startswith("open:"):
         where = data.split(":", 1)[1]
         if where == "addkw":
@@ -850,6 +900,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db.close()
         return
 
+    # Save / Unsave / Dismiss for job cards
     if data.startswith("save:"):
         job_id = data.split(":", 1)[1]
         db = SessionLocal()
