@@ -2,6 +2,8 @@
 import os
 import json
 import logging
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple
 
@@ -41,6 +43,14 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
 FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
+
+# Email (SMTP) — προαιρετικό, για forward των Contact
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "77chrisap@gmail.com").strip()
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASS = os.getenv("SMTP_PASS", "").strip()
+SMTP_TLS = (os.getenv("SMTP_TLS", "true").lower() != "false")
 
 # ───────────────────────── FastAPI ─────────────────────────
 app = FastAPI()
@@ -257,6 +267,30 @@ def is_admin(update: Update) -> bool:
     u = update.effective_user
     return bool(ADMIN_ID) and u and u.id == ADMIN_ID
 
+def smtp_available() -> bool:
+    return all([SMTP_HOST, SMTP_USER, SMTP_PASS, ADMIN_EMAIL])
+
+def send_email(subject: str, body: str) -> bool:
+    """Send email via SMTP; returns True on success."""
+    if not smtp_available():
+        log.warning("SMTP not configured; skipping email send.")
+        return False
+    try:
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_USER or "bot@localhost"
+        msg["To"] = ADMIN_EMAIL
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+            if SMTP_TLS:
+                s.starttls()
+            if SMTP_USER and SMTP_PASS:
+                s.login(SMTP_USER, SMTP_PASS)
+            s.send_message(msg)
+        return True
+    except Exception as e:
+        log.exception("Email send failed: %s", e)
+        return False
+
 # ───────────────────────── Telegram Application ─────────────────────────
 tg_app: Optional[Application] = None
 
@@ -287,7 +321,7 @@ def build_application() -> Application:
     # callbacks
     app_.add_handler(CallbackQueryHandler(button_cb))
 
-    # contact-flow capture (must be after command handlers)
+    # capture plain text (Contact flow)
     app_.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, inbound_text_handler))
 
     return app_
@@ -693,24 +727,54 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ───────────────────────── Callback buttons & Contact flow ─────────────────────────
 async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catch plain text. If user pressed Contact before, forward to admin."""
+    """Catch plain text. If user pressed Contact before, forward to admin + email."""
     if context.user_data.get("awaiting_contact"):
         context.user_data["awaiting_contact"] = False
         msg = update.message.text
+
         # confirm to user
         await update.message.reply_text("✅ Your message has been sent to the admin. You'll receive a reply here.")
-        # forward to admin (if set)
+
+        # gather some context for admin (username + keywords)
+        db = SessionLocal()
+        try:
+            urec = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
+            user_keywords = ", ".join(k.keyword for k in (urec.keywords or [])) if urec else "(none)"
+        finally:
+            db.close()
+
+        u = update.effective_user
+        uname = f"@{u.username}" if u.username else "(no username)"
+        header_html = (
+            "📩 <b>Contact from user</b>\n"
+            f"ID: <code>{u.id}</code>\n"
+            f"Name: {u.first_name or ''}\n"
+            f"Username: {uname}\n"
+            f"Keywords: {user_keywords}\n\n"
+        )
+
+        # forward to admin (Telegram)
         if ADMIN_ID:
-            u = update.effective_user
-            header = f"📩 <b>Contact from user</b>\nID: <code>{u.id}</code>\nName: {u.first_name or ''}\n\n"
             try:
                 await tg_app.bot.send_message(
                     chat_id=ADMIN_ID,
-                    text=header + msg,
+                    text=header_html + msg,
                     parse_mode="HTML"
                 )
             except Exception:
                 pass
+
+        # forward by Email (if SMTP configured)
+        subject = "Freelancer Bot — New Contact message"
+        body = (
+            f"From Telegram user {u.id} ({u.first_name or ''})\n"
+            f"Username: {uname}\n"
+            f"Keywords: {user_keywords}\n\n"
+            f"{msg}"
+        )
+        ok = send_email(subject, body)
+        if not ok:
+            log.warning("Contact email not sent (SMTP not configured).")
 
 async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
