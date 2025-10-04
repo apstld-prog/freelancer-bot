@@ -214,14 +214,26 @@ WELCOME_FULL = (
     "• Platforms by country (incl. GR boards)\n\n"
     "Use /help to see all commands."
 )
-HELP_TEXT = (
-    "📘 *How it works*\n"
-    "• Add keywords with `/addkeyword python, lighting design, μελέτη φωτισμού`\n"
-    "• See filters with `/keywords` or `/mysettings`\n"
-    "• Tap ⭐ *Keep* to store a job, 🗑 *Delete* to remove it from chat\n"
-    "• View saved jobs with `/saved` — full cards\n"
-    "• Admin can extend licenses manually"
-)
+
+def get_help_text(is_admin: bool) -> str:
+    base = (
+        "📘 *How it works*\n"
+        "• Add keywords with `/addkeyword python, lighting design, μελέτη φωτισμού`\n"
+        "• See filters with `/keywords` or `/mysettings`\n"
+        "• Tap ⭐ *Keep* to store a job, 🗑 *Delete* to remove it from chat\n"
+        "• View saved jobs with `/saved` — full cards\n"
+    )
+    if is_admin:
+        admin = (
+            "\n🔐 *Admin only*\n"
+            "/stats – overall stats\n"
+            "/users [page] [size] – list users\n"
+            "/grant <telegram_id> <days> – extend/set license\n"
+            "/trialextend <telegram_id> <days> – extend trial\n"
+            "/revoke <telegram_id> – clear license\n"
+        )
+        return base + admin
+    return base
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -242,12 +254,6 @@ def main_menu_kb() -> InlineKeyboardMarkup:
 def is_admin(update: Update) -> bool:
     u = update.effective_user
     return bool(ADMIN_ID) and u and u.id == ADMIN_ID
-
-def parse_int(s: str) -> Optional[int]:
-    try:
-        return int(s)
-    except Exception:
-        return None
 
 # ───────────────────────── Telegram Application ─────────────────────────
 tg_app: Optional[Application] = None
@@ -301,11 +307,15 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown", reply_markup=main_menu_kb())
+    await update.message.reply_text(
+        get_help_text(is_admin(update)),
+        parse_mode="Markdown",
+        reply_markup=main_menu_kb()
+    )
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
-    admin_line = "👤 You are *admin*." if ADMIN_ID and u.id == ADMIN_ID else "👤 You are a regular user."
+    admin_line = "👤 You are *admin*." if is_admin(update) else "👤 You are a regular user."
     await update.message.reply_text(
         f"🆔 Your Telegram ID: `{u.id}`\n"
         f"👤 Name: {u.first_name or ''}\n"
@@ -398,21 +408,40 @@ async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
+# ── Settings (αναλυτικό, όπως στις εικόνες)
 def settings_text(u: User) -> str:
     trial = to_aware(u.trial_until)
     lic = to_aware(u.access_until)
+    start_dt = to_aware(u.created_at)
     now = now_utc()
     active = (trial and trial >= now) or (lic and lic >= now)
-    trial_line = f"Trial until: *{trial.isoformat()}*" if trial else "Trial until: *None*"
-    lic_line = f"License until: *{lic.isoformat()}*" if lic else "License until: *None*"
+    blocked = bool(u.is_blocked)
+
     kw_line = ", ".join(k.keyword for k in (u.keywords or [])) or "(none)"
-    return (
-        "🛠 *Your Settings*\n\n"
-        f"• Keywords: {kw_line}\n"
-        f"• {trial_line}\n"
-        f"• {lic_line}\n"
-        f"• Active: {'✅' if active else '❌'}"
-    )
+    countries = (u.countries or "ALL")
+    proposal = u.proposal_template or "(none)"
+
+    lines = [
+        "🛠 *Your Settings*",
+        "",
+        f"• Keywords: {kw_line}",
+        f"• Countries: {countries}",
+        f"• Proposal template: {proposal}",
+        "",
+        f"🟢 *Start date:* {start_dt.strftime('%Y-%m-%d %H:%M:%S UTC') if start_dt else '—'}",
+        f"🕑 *Trial ends:* {trial.strftime('%Y-%m-%d %H:%M:%S UTC') if trial else 'None'}",
+        f"🧾 *License until:* {lic.strftime('%Y-%m-%d %H:%M:%S UTC') if lic else 'None'}",
+        f"✅ *Active:* {'✅' if active else '❌'}",
+        f"⛔ *Blocked:* {'❌' if not blocked else '❗'}" if not blocked else "⛔ *Blocked:* ❗",
+        "",
+        "🧭 *Platforms monitored:*",
+        "• *Global*: [Freelancer.com](https://www.freelancer.com), Fiverr (affiliate links), "
+        "PeoplePerHour (UK), Malt (FR/EU), Workana (ES/EU/LatAm), Upwork",
+        "• *Greece*: [JobFind.gr](https://www.jobfind.gr), [Skywalker.gr](https://www.skywalker.gr), [Kariera.gr](https://www.kariera.gr)",
+        "",
+        "🧩 For extension, contact the admin."
+    ]
+    return "\n".join(lines)
 
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
@@ -421,30 +450,23 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not u:
             await update.message.reply_text("No settings yet. Use /start.")
             return
-        await update.message.reply_text(settings_text(u), parse_mode="Markdown", reply_markup=main_menu_kb())
+        await update.message.reply_text(
+            settings_text(u), parse_mode="Markdown", disable_web_page_preview=True,
+            reply_markup=main_menu_kb()
+        )
     finally:
         db.close()
 
+# ── Saved (ως full cards) – λειτουργεί και από command και από callback
 PAGE_SIZE = int(os.getenv("SAVED_PAGE_SIZE", "5"))
 
-async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    page = 1
-    if context.args:
-        try:
-            page = max(1, int(context.args[0]))
-        except ValueError:
-            page = 1
-
+async def send_saved_cards(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user: User, page: int = 1):
     db = SessionLocal()
     try:
-        u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
-        if not u:
-            await update.message.reply_text("No saved jobs.")
-            return
-        q = db.query(SavedJob).filter_by(user_id=u.id).order_by(SavedJob.created_at.desc())
+        q = db.query(SavedJob).filter_by(user_id=user.id).order_by(SavedJob.created_at.desc())
         total = q.count()
         if total == 0:
-            await update.message.reply_text("No saved jobs yet. Tap ⭐ *Keep* on a job to save it.", parse_mode="Markdown")
+            await context.bot.send_message(chat_id, "No saved jobs yet. Tap ⭐ *Keep* on a job to save it.", parse_mode="Markdown")
             return
 
         max_page = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -452,8 +474,7 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             page = max_page
 
         items = q.offset((page - 1) * PAGE_SIZE).limit(PAGE_SIZE).all()
-
-        await update.message.reply_text(f"💾 Saved jobs — page {page}/{max_page}")
+        await context.bot.send_message(chat_id, f"💾 Saved jobs — page {page}/{max_page}")
 
         for it in items:
             job_id = it.job_id
@@ -461,17 +482,36 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pid = job_id.split("-", 1)[1]
                 data = await fl_fetch_by_id(pid)
                 if not data:
-                    await update.message.reply_text(f"⚠️ Job {job_id} not available anymore.")
+                    await context.bot.send_message(chat_id, f"⚠️ Job {job_id} not available anymore.")
                     continue
                 card = fl_to_card(data, matched=None)
-                await update.message.reply_text(
+                await context.bot.send_message(
+                    chat_id,
                     job_text(card),
                     parse_mode="Markdown",
                     disable_web_page_preview=True,
                     reply_markup=card_markup(card, saved_mode=True),
                 )
             else:
-                await update.message.reply_text(f"Saved: {job_id}")
+                await context.bot.send_message(chat_id, f"Saved: {job_id}")
+    finally:
+        db.close()
+
+async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    page = 1
+    if context.args:
+        try:
+            page = max(1, int(context.args[0]))
+        except ValueError:
+            page = 1
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
+        if not u:
+            await context.bot.send_message(chat_id, "No saved jobs.")
+            return
+        await send_saved_cards(context, chat_id, u, page)
     finally:
         db.close()
 
@@ -485,13 +525,16 @@ ADMIN_HELP = (
     "/revoke <telegram_id> – clear license\n"
 )
 
+def is_admin_only(update: Update) -> bool:
+    return is_admin(update)
+
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not is_admin_only(update):
         return
     await update.message.reply_text(ADMIN_HELP, parse_mode="Markdown")
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not is_admin_only(update):
         return
     db = SessionLocal()
     try:
@@ -514,9 +557,8 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not is_admin_only(update):
         return
-    # /users [page] [size]
     page = 1
     size = 20
     if context.args:
@@ -550,14 +592,18 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not is_admin_only(update):
         return
     if len(context.args) < 2:
         await update.message.reply_text("Usage: /grant <telegram_id> <days>")
         return
     tg_str = context.args[0].strip()
-    days = parse_int(context.args[1])
-    if not days or days <= 0:
+    try:
+        days = int(context.args[1])
+    except Exception:
+        await update.message.reply_text("Days must be a positive integer.")
+        return
+    if days <= 0:
         await update.message.reply_text("Days must be a positive integer.")
         return
 
@@ -574,7 +620,6 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u.access_until = base + timedelta(days=days)
         db.commit()
         await update.message.reply_text(f"License set to {u.access_until.isoformat()} for `{u.telegram_id}`", parse_mode="Markdown")
-        # ενημέρωση χρήστη
         try:
             await tg_app.bot.send_message(chat_id=int(u.telegram_id), text=f"🔑 Your license is active until {u.access_until.isoformat()}.")
         except Exception:
@@ -583,14 +628,18 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def trialextend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not is_admin_only(update):
         return
     if len(context.args) < 2:
         await update.message.reply_text("Usage: /trialextend <telegram_id> <days>")
         return
     tg_str = context.args[0].strip()
-    days = parse_int(context.args[1])
-    if not days or days <= 0:
+    try:
+        days = int(context.args[1])
+    except Exception:
+        await update.message.reply_text("Days must be a positive integer.")
+        return
+    if days <= 0:
         await update.message.reply_text("Days must be a positive integer.")
         return
 
@@ -615,7 +664,7 @@ async def trialextend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not is_admin_only(update):
         return
     if len(context.args) < 1:
         await update.message.reply_text("Usage: /revoke <telegram_id>")
@@ -655,15 +704,26 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
                 if u:
-                    await q.message.reply_text(settings_text(u), parse_mode="Markdown")
+                    await q.message.reply_text(
+                        settings_text(u), parse_mode="Markdown", disable_web_page_preview=True
+                    )
             finally:
                 db.close()
         elif where == "help":
-            await q.message.reply_text(HELP_TEXT, parse_mode="Markdown")
+            await q.message.reply_text(
+                get_help_text(is_admin(update)), parse_mode="Markdown"
+            )
         elif where == "contact":
             await q.message.reply_text("Contact admin: please send your message here; the admin will reach out.")
         elif where == "saved":
-            await saved_cmd(update, context)
+            # Εδώ ήταν το πρόβλημα: ο handler περίμενε update.message.
+            db = SessionLocal()
+            try:
+                u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
+                if u:
+                    await send_saved_cards(context, q.message.chat.id, u, page=1)
+            finally:
+                db.close()
         return
 
     if data.startswith("save:"):
