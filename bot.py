@@ -17,6 +17,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from db import (
@@ -215,22 +217,22 @@ WELCOME_FULL = (
     "Use /help to see all commands."
 )
 
-def get_help_text(is_admin: bool) -> str:
+def get_help_text_html(is_admin: bool) -> str:
     base = (
-        "📘 *How it works*\n"
-        "• Add keywords with `/addkeyword python, lighting design, μελέτη φωτισμού`\n"
-        "• See filters with `/keywords` or `/mysettings`\n"
-        "• Tap ⭐ *Keep* to store a job, 🗑 *Delete* to remove it from chat\n"
-        "• View saved jobs with `/saved` — full cards\n"
+        "<b>📘 How it works</b><br>"
+        "• Add keywords with <code>/addkeyword python, lighting design, μελέτη φωτισμού</code><br>"
+        "• See filters with <code>/keywords</code> or <code>/mysettings</code><br>"
+        "• Tap ⭐ Keep to store a job, 🗑 Delete to remove it from chat<br>"
+        "• View saved jobs with <code>/saved</code> — full cards<br>"
     )
     if is_admin:
         admin = (
-            "\n🔐 *Admin only*\n"
-            "/stats – overall stats\n"
-            "/users [page] [size] – list users\n"
-            "/grant <telegram_id> <days> – extend/set license\n"
-            "/trialextend <telegram_id> <days> – extend trial\n"
-            "/revoke <telegram_id> – clear license\n"
+            "<br><b>🔐 Admin only</b><br>"
+            "<code>/stats</code> – overall stats<br>"
+            "<code>/users [page] [size]</code> – list users<br>"
+            "<code>/grant &lt;telegram_id&gt; &lt;days&gt;</code> – extend/set license<br>"
+            "<code>/trialextend &lt;telegram_id&gt; &lt;days&gt;</code> – extend trial<br>"
+            "<code>/revoke &lt;telegram_id&gt;</code> – clear license<br>"
         )
         return base + admin
     return base
@@ -282,7 +284,11 @@ def build_application() -> Application:
     app_.add_handler(CommandHandler("trialextend", trialextend_cmd))
     app_.add_handler(CommandHandler("revoke", revoke_cmd))
 
+    # callbacks
     app_.add_handler(CallbackQueryHandler(button_cb))
+
+    # contact-flow capture (must be after command handlers)
+    app_.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, inbound_text_handler))
 
     return app_
 
@@ -308,19 +314,19 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        get_help_text(is_admin(update)),
-        parse_mode="Markdown",
+        get_help_text_html(is_admin(update)),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
         reply_markup=main_menu_kb()
     )
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
-    admin_line = "👤 You are *admin*." if is_admin(update) else "👤 You are a regular user."
-    await update.message.reply_text(
-        f"🆔 Your Telegram ID: `{u.id}`\n"
+    admin_line = "👤 You are <b>admin</b>." if is_admin(update) else "👤 You are a regular user."
+    await update.message.reply_html(
+        f"🆔 Your Telegram ID: <code>{u.id}</code>\n"
         f"👤 Name: {u.first_name or ''}\n"
-        f"{admin_line}",
-        parse_mode="Markdown"
+        f"{admin_line}"
     )
 
 def split_keywords(raw: str) -> List[str]:
@@ -408,7 +414,7 @@ async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ── Settings (αναλυτικό, όπως στις εικόνες)
+# ── Settings (αναλυτικό)
 def settings_text(u: User) -> str:
     trial = to_aware(u.trial_until)
     lic = to_aware(u.access_until)
@@ -422,22 +428,23 @@ def settings_text(u: User) -> str:
     proposal = u.proposal_template or "(none)"
 
     lines = [
-        "🛠 *Your Settings*",
+        "🛠 <b>Your Settings</b>",
         "",
         f"• Keywords: {kw_line}",
         f"• Countries: {countries}",
         f"• Proposal template: {proposal}",
         "",
-        f"🟢 *Start date:* {start_dt.strftime('%Y-%m-%d %H:%M:%S UTC') if start_dt else '—'}",
-        f"🕑 *Trial ends:* {trial.strftime('%Y-%m-%d %H:%M:%S UTC') if trial else 'None'}",
-        f"🧾 *License until:* {lic.strftime('%Y-%m-%d %H:%M:%S UTC') if lic else 'None'}",
-        f"✅ *Active:* {'✅' if active else '❌'}",
-        f"⛔ *Blocked:* {'❌' if not blocked else '❗'}" if not blocked else "⛔ *Blocked:* ❗",
+        f"🟢 <b>Start date:</b> {start_dt.strftime('%Y-%m-%d %H:%M:%S UTC') if start_dt else '—'}",
+        f"🕑 <b>Trial ends:</b> {trial.strftime('%Y-%m-%d %H:%M:%S UTC') if trial else 'None'}",
+        f"🧾 <b>License until:</b> {lic.strftime('%Y-%m-%d %H:%M:%S UTC') if lic else 'None'}",
+        f"✅ <b>Active:</b> {'✅' if active else '❌'}",
+        f"⛔ <b>Blocked:</b> {'❗' if blocked else '❌'}",
         "",
-        "🧭 *Platforms monitored:*",
-        "• *Global*: [Freelancer.com](https://www.freelancer.com), Fiverr (affiliate links), "
+        "🧭 <b>Platforms monitored:</b>",
+        "• <b>Global</b>: <a href='https://www.freelancer.com'>Freelancer.com</a>, Fiverr (affiliate links), "
         "PeoplePerHour (UK), Malt (FR/EU), Workana (ES/EU/LatAm), Upwork",
-        "• *Greece*: [JobFind.gr](https://www.jobfind.gr), [Skywalker.gr](https://www.skywalker.gr), [Kariera.gr](https://www.kariera.gr)",
+        "• <b>Greece</b>: <a href='https://www.jobfind.gr'>JobFind.gr</a>, "
+        "<a href='https://www.skywalker.gr'>Skywalker.gr</a>, <a href='https://www.kariera.gr'>Kariera.gr</a>",
         "",
         "🧩 For extension, contact the admin."
     ]
@@ -450,14 +457,15 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not u:
             await update.message.reply_text("No settings yet. Use /start.")
             return
-        await update.message.reply_text(
-            settings_text(u), parse_mode="Markdown", disable_web_page_preview=True,
+        await update.message.reply_html(
+            settings_text(u),
+            disable_web_page_preview=True,
             reply_markup=main_menu_kb()
         )
     finally:
         db.close()
 
-# ── Saved (ως full cards) – λειτουργεί και από command και από callback
+# ── Saved (ως full cards)
 PAGE_SIZE = int(os.getenv("SAVED_PAGE_SIZE", "5"))
 
 async def send_saved_cards(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user: User, page: int = 1):
@@ -466,7 +474,7 @@ async def send_saved_cards(context: ContextTypes.DEFAULT_TYPE, chat_id: int, use
         q = db.query(SavedJob).filter_by(user_id=user.id).order_by(SavedJob.created_at.desc())
         total = q.count()
         if total == 0:
-            await context.bot.send_message(chat_id, "No saved jobs yet. Tap ⭐ *Keep* on a job to save it.", parse_mode="Markdown")
+            await context.bot.send_message(chat_id, "No saved jobs yet. Tap ⭐ Keep on a job to save it.")
             return
 
         max_page = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -517,24 +525,21 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ───────────────────────── Admin Handlers ─────────────────────────
 ADMIN_HELP = (
-    "*Admin commands:*\n"
-    "/stats – overall stats\n"
-    "/users [page] [size] – list users\n"
-    "/grant <telegram_id> <days> – extend/set license\n"
-    "/trialextend <telegram_id> <days> – extend trial\n"
-    "/revoke <telegram_id> – clear license\n"
+    "<b>Admin commands:</b><br>"
+    "<code>/stats</code> – overall stats<br>"
+    "<code>/users [page] [size]</code> – list users<br>"
+    "<code>/grant &lt;telegram_id&gt; &lt;days&gt;</code> – extend/set license<br>"
+    "<code>/trialextend &lt;telegram_id&gt; &lt;days&gt;</code> – extend trial<br>"
+    "<code>/revoke &lt;telegram_id&gt;</code> – clear license<br>"
 )
 
-def is_admin_only(update: Update) -> bool:
-    return is_admin(update)
-
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_only(update):
+    if not is_admin(update):
         return
-    await update.message.reply_text(ADMIN_HELP, parse_mode="Markdown")
+    await update.message.reply_html(ADMIN_HELP)
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_only(update):
+    if not is_admin(update):
         return
     db = SessionLocal()
     try:
@@ -557,7 +562,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_only(update):
+    if not is_admin(update):
         return
     page = 1
     size = 20
@@ -592,7 +597,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_only(update):
+    if not is_admin(update):
         return
     if len(context.args) < 2:
         await update.message.reply_text("Usage: /grant <telegram_id> <days>")
@@ -628,7 +633,7 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def trialextend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_only(update):
+    if not is_admin(update):
         return
     if len(context.args) < 2:
         await update.message.reply_text("Usage: /trialextend <telegram_id> <days>")
@@ -664,7 +669,7 @@ async def trialextend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_only(update):
+    if not is_admin(update):
         return
     if len(context.args) < 1:
         await update.message.reply_text("Usage: /revoke <telegram_id>")
@@ -686,7 +691,27 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ───────────────────────── Callback buttons ─────────────────────────
+# ───────────────────────── Callback buttons & Contact flow ─────────────────────────
+async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catch plain text. If user pressed Contact before, forward to admin."""
+    if context.user_data.get("awaiting_contact"):
+        context.user_data["awaiting_contact"] = False
+        msg = update.message.text
+        # confirm to user
+        await update.message.reply_text("✅ Your message has been sent to the admin. You'll receive a reply here.")
+        # forward to admin (if set)
+        if ADMIN_ID:
+            u = update.effective_user
+            header = f"📩 <b>Contact from user</b>\nID: <code>{u.id}</code>\nName: {u.first_name or ''}\n\n"
+            try:
+                await tg_app.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=header + msg,
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
 async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
@@ -695,28 +720,30 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("open:"):
         where = data.split(":", 1)[1]
         if where == "addkw":
-            await q.message.reply_text(
-                "Add keywords:\n`/addkeyword python, lighting design, μελέτη φωτισμού`",
-                parse_mode="Markdown"
+            await q.message.reply_html(
+                "Add keywords with <code>/addkeyword python, lighting design, μελέτη φωτισμού</code>"
             )
         elif where == "settings":
             db = SessionLocal()
             try:
                 u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
                 if u:
-                    await q.message.reply_text(
-                        settings_text(u), parse_mode="Markdown", disable_web_page_preview=True
+                    await q.message.reply_html(
+                        settings_text(u), disable_web_page_preview=True
                     )
             finally:
                 db.close()
         elif where == "help":
-            await q.message.reply_text(
-                get_help_text(is_admin(update)), parse_mode="Markdown"
+            await q.message.reply_html(
+                get_help_text_html(is_admin(update)),
+                disable_web_page_preview=True
             )
         elif where == "contact":
-            await q.message.reply_text("Contact admin: please send your message here; the admin will reach out.")
+            context.user_data["awaiting_contact"] = True
+            await q.message.reply_text(
+                "✍️ Please type your message for the admin. I’ll forward it right away."
+            )
         elif where == "saved":
-            # Εδώ ήταν το πρόβλημα: ο handler περίμενε update.message.
             db = SessionLocal()
             try:
                 u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
