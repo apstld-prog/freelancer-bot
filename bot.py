@@ -214,7 +214,6 @@ WELCOME_FULL = (
     "• Platforms by country (incl. GR boards)\n\n"
     "Use /help to see all commands."
 )
-
 HELP_TEXT = (
     "📘 *How it works*\n"
     "• Add keywords with `/addkeyword python, lighting design, μελέτη φωτισμού`\n"
@@ -239,6 +238,17 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         ],
     ])
 
+# ───────────────────────── Util ─────────────────────────
+def is_admin(update: Update) -> bool:
+    u = update.effective_user
+    return bool(ADMIN_ID) and u and u.id == ADMIN_ID
+
+def parse_int(s: str) -> Optional[int]:
+    try:
+        return int(s)
+    except Exception:
+        return None
+
 # ───────────────────────── Telegram Application ─────────────────────────
 tg_app: Optional[Application] = None
 
@@ -247,6 +257,7 @@ def build_application() -> Application:
         raise RuntimeError("BOT_TOKEN not set")
     app_ = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # user cmds
     app_.add_handler(CommandHandler("start", start_cmd))
     app_.add_handler(CommandHandler("help", help_cmd))
     app_.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
@@ -256,11 +267,20 @@ def build_application() -> Application:
     app_.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app_.add_handler(CommandHandler("saved", saved_cmd))
     app_.add_handler(CommandHandler("whoami", whoami_cmd))
+
+    # admin cmds
+    app_.add_handler(CommandHandler("admin", admin_cmd))
+    app_.add_handler(CommandHandler("stats", stats_cmd))
+    app_.add_handler(CommandHandler("users", users_cmd))
+    app_.add_handler(CommandHandler("grant", grant_cmd))
+    app_.add_handler(CommandHandler("trialextend", trialextend_cmd))
+    app_.add_handler(CommandHandler("revoke", revoke_cmd))
+
     app_.add_handler(CallbackQueryHandler(button_cb))
 
     return app_
 
-# ───────────────────────── Handlers ─────────────────────────
+# ───────────────────────── User Handlers ─────────────────────────
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         tg_id = update.effective_user.id
@@ -281,7 +301,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Ασφαλές και από /help και από callback (θα το καλούμε μόνο από /help)
     await update.message.reply_text(HELP_TEXT, parse_mode="Markdown", reply_markup=main_menu_kb())
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -294,7 +313,6 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# keywords
 def split_keywords(raw: str) -> List[str]:
     if not raw:
         return []
@@ -380,7 +398,6 @@ async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# settings
 def settings_text(u: User) -> str:
     trial = to_aware(u.trial_until)
     lic = to_aware(u.access_until)
@@ -408,7 +425,6 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# saved (full cards)
 PAGE_SIZE = int(os.getenv("SAVED_PAGE_SIZE", "5"))
 
 async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -459,7 +475,169 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# callbacks
+# ───────────────────────── Admin Handlers ─────────────────────────
+ADMIN_HELP = (
+    "*Admin commands:*\n"
+    "/stats – overall stats\n"
+    "/users [page] [size] – list users\n"
+    "/grant <telegram_id> <days> – extend/set license\n"
+    "/trialextend <telegram_id> <days> – extend trial\n"
+    "/revoke <telegram_id> – clear license\n"
+)
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    await update.message.reply_text(ADMIN_HELP, parse_mode="Markdown")
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    db = SessionLocal()
+    try:
+        users = db.query(User).all()
+        total = len(users)
+        now = now_utc()
+        active = 0
+        with_keywords = 0
+        for u in users:
+            if (to_aware(u.trial_until) and to_aware(u.trial_until) >= now) or \
+               (to_aware(u.access_until) and to_aware(u.access_until) >= now):
+                active += 1
+            if u.keywords:
+                with_keywords += 1
+        await update.message.reply_text(
+            f"*Stats*\n• Users: {total}\n• Active: {active}\n• With keywords: {with_keywords}",
+            parse_mode="Markdown"
+        )
+    finally:
+        db.close()
+
+async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    # /users [page] [size]
+    page = 1
+    size = 20
+    if context.args:
+        if len(context.args) >= 1 and context.args[0].isdigit():
+            page = max(1, int(context.args[0]))
+        if len(context.args) >= 2 and context.args[1].isdigit():
+            size = max(1, min(100, int(context.args[1])))
+
+    db = SessionLocal()
+    try:
+        q = db.query(User).order_by(User.created_at.desc())
+        total = q.count()
+        max_page = max(1, (total + size - 1) // size)
+        if page > max_page:
+            page = max_page
+        users = q.offset((page - 1) * size).limit(size).all()
+
+        now = now_utc()
+        lines = [f"*Users* — page {page}/{max_page} (size {size})"]
+        for u in users:
+            trial = to_aware(u.trial_until)
+            lic = to_aware(u.access_until)
+            active = (trial and trial >= now) or (lic and lic >= now)
+            kw_count = len(u.keywords or [])
+            lines.append(
+                f"`{u.telegram_id}` • kw:{kw_count} • trial:{trial.isoformat() if trial else '-'} • "
+                f"license:{lic.isoformat() if lic else '-'} • {'✅' if active else '❌'}"
+            )
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    finally:
+        db.close()
+
+async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /grant <telegram_id> <days>")
+        return
+    tg_str = context.args[0].strip()
+    days = parse_int(context.args[1])
+    if not days or days <= 0:
+        await update.message.reply_text("Days must be a positive integer.")
+        return
+
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=str(tg_str)).first()
+        if not u:
+            await update.message.reply_text("User not found.")
+            return
+        now = now_utc()
+        base = to_aware(u.access_until) or now
+        if base < now:
+            base = now
+        u.access_until = base + timedelta(days=days)
+        db.commit()
+        await update.message.reply_text(f"License set to {u.access_until.isoformat()} for `{u.telegram_id}`", parse_mode="Markdown")
+        # ενημέρωση χρήστη
+        try:
+            await tg_app.bot.send_message(chat_id=int(u.telegram_id), text=f"🔑 Your license is active until {u.access_until.isoformat()}.")
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+async def trialextend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /trialextend <telegram_id> <days>")
+        return
+    tg_str = context.args[0].strip()
+    days = parse_int(context.args[1])
+    if not days or days <= 0:
+        await update.message.reply_text("Days must be a positive integer.")
+        return
+
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=str(tg_str)).first()
+        if not u:
+            await update.message.reply_text("User not found.")
+            return
+        now = now_utc()
+        base = to_aware(u.trial_until) or now
+        if base < now:
+            base = now
+        u.trial_until = base + timedelta(days=days)
+        db.commit()
+        await update.message.reply_text(f"Trial set to {u.trial_until.isoformat()} for `{u.telegram_id}`", parse_mode="Markdown")
+        try:
+            await tg_app.bot.send_message(chat_id=int(u.telegram_id), text=f"🎁 Your trial is extended until {u.trial_until.isoformat()}.")
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if len(context.args) < 1:
+        await update.message.reply_text("Usage: /revoke <telegram_id>")
+        return
+    tg_str = context.args[0].strip()
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=str(tg_str)).first()
+        if not u:
+            await update.message.reply_text("User not found.")
+            return
+        u.access_until = None
+        db.commit()
+        await update.message.reply_text(f"License revoked for `{u.telegram_id}`", parse_mode="Markdown")
+        try:
+            await tg_app.bot.send_message(chat_id=int(u.telegram_id), text="⛔ Your license has been revoked.")
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+# ───────────────────────── Callback buttons ─────────────────────────
 async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
@@ -481,7 +659,6 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 db.close()
         elif where == "help":
-            # Διορθώθηκε: στέλνουμε άμεσα το help από το callback
             await q.message.reply_text(HELP_TEXT, parse_mode="Markdown")
         elif where == "contact":
             await q.message.reply_text("Contact admin: please send your message here; the admin will reach out.")
