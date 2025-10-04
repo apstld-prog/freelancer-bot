@@ -243,6 +243,7 @@ def get_help_text_plain(is_admin: bool) -> str:
             "/grant <telegram_id> <days> – set license\n"
             "/trialextend <telegram_id> <days> – extend trial\n"
             "/revoke <telegram_id> – clear license\n"
+            "/reply <telegram_id> <message> – reply to user via bot (also emails you a copy)\n"
         )
         return base + admin
     return base
@@ -317,6 +318,7 @@ def build_application() -> Application:
     app_.add_handler(CommandHandler("grant", grant_cmd))
     app_.add_handler(CommandHandler("trialextend", trialextend_cmd))
     app_.add_handler(CommandHandler("revoke", revoke_cmd))
+    app_.add_handler(CommandHandler("reply", reply_cmd))  # ← NEW
 
     # callbacks
     app_.add_handler(CallbackQueryHandler(button_cb))
@@ -347,7 +349,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # plain text to avoid entity issues
     await update.message.reply_text(
         get_help_text_plain(is_admin(update)),
         disable_web_page_preview=True,
@@ -561,6 +562,7 @@ ADMIN_HELP = (
     "/grant <telegram_id> <days> – set license\n"
     "/trialextend <telegram_id> <days> – extend trial\n"
     "/revoke <telegram_id> – clear license\n"
+    "/reply <telegram_id> <message> – reply to user via bot (also emails you a copy)\n"
 )
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -719,6 +721,43 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     finally:
         db.close()
+
+# NEW: /reply admin command
+async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin replies to user: /reply <telegram_id> <message>"""
+    if not is_admin(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /reply <telegram_id> <message>")
+        return
+
+    tg_str = context.args[0].strip()
+    try:
+        target_id = int(tg_str)
+    except ValueError:
+        await update.message.reply_text("First argument must be a numeric Telegram ID.")
+        return
+
+    # Compose message text from the rest args (preserve spaces)
+    full_text = update.message.text
+    # strip the command and id
+    prefix = f"/reply {tg_str}"
+    msg = full_text[len(prefix):].strip()
+    if not msg:
+        await update.message.reply_text("Please provide the reply message text.")
+        return
+
+    # Send to user
+    try:
+        await tg_app.bot.send_message(chat_id=target_id, text=f"💬 *Admin reply:*\n{msg}", parse_mode="Markdown")
+        await update.message.reply_text("Reply sent ✅")
+    except Exception as e:
+        await update.message.reply_text(f"Failed to send reply: {e}")
+
+    # Email a copy to admin inbox
+    subject = "Freelancer Bot — Admin reply sent"
+    body = f"To user: {target_id}\n\n{msg}"
+    send_email(subject, body)
 
 # ───────────────────────── Callback buttons & Contact flow ─────────────────────────
 async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
