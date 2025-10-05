@@ -1,22 +1,16 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
-echo "[start] launching web(server) + worker..."
-
-# Render sets $PORT automatically; default for local dev.
-export PORT="${PORT:-10000}"
 export PYTHONUNBUFFERED=1
 
-# 1) Web server (must bind to $PORT)
-python -m uvicorn server:app --host 0.0.0.0 --port "$PORT" --log-level info &
-SERVER_PID=$!
+echo "==> launching web(server) + worker..."
+# web (FastAPI + PTB webhook)
+uvicorn server:app --host 0.0.0.0 --port 10000 &
+WEB_PID=$!
 
-# 2) Background worker (feeds + notifications)
-python worker.py &
-WORKER_PID=$!
+# worker (scraper loop)
+python -u worker.py &
+W_PID=$!
 
-trap 'echo "[start] terminating children: $SERVER_PID $WORKER_PID"; kill $SERVER_PID $WORKER_PID 2>/dev/null || true' EXIT
-
-# Wait until any child exits; if one dies, exit non-zero to restart
-wait -n $SERVER_PID $WORKER_PID
-exit $?
+wait $WEB_PID
+kill $W_PID || true
