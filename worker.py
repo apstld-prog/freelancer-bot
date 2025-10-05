@@ -27,26 +27,20 @@ log = logging.getLogger("worker")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Search cadence
 INTERVAL_SECS = int(os.getenv("WORKER_INTERVAL_SECS", "300"))
 
-# Matching behavior
 JOB_MATCH_SCOPE = os.getenv("JOB_MATCH_SCOPE", "title_desc")  # title | title_desc
 JOB_MATCH_REQUIRE = os.getenv("JOB_MATCH_REQUIRE", "any")     # any | all
 
-# Cap results per source per cycle (to avoid spam from GR boards)
 MAX_PER_SOURCE = int(os.getenv("MAX_PER_SOURCE", "5"))
 
-# Freelancer affiliate code (optional)
 FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
 
-# HTTP
 HTTP_TIMEOUT = 20.0
 HEADERS_HTML = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) FreelancerAlertsBot/1.0"
 }
 
-# Currency approx conversion to USD
 DEFAULT_USD_RATES = {
     "USD": 1.0, "EUR": 1.07, "GBP": 1.25, "AUD": 0.65, "CAD": 0.73, "CHF": 1.10,
     "SEK": 0.09, "NOK": 0.09, "DKK": 0.14, "PLN": 0.25, "RON": 0.22, "BGN": 0.55,
@@ -84,7 +78,7 @@ def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
 
-# ───────────────────────── Telegram client (minimal) ─────────────────────────
+# ───────────────────────── Telegram client ─────────────────────────
 import asyncio
 from telegram import Bot
 bot: Optional[Bot] = None
@@ -147,23 +141,20 @@ def card_markup(card: Dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def normalize_el(s: str) -> str:
-    """Lowercase + remove accents for Greek-insensitive matching."""
     s = s.lower()
     s = unicodedata.normalize("NFD", s)
-    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = "".join(ch for ch in s if unicodedata.category(ch) == "Mn")
     return s
 
-# Αγγλικά keyword → Ελληνικές ρίζες (substring) για GR boards
 GREEK_SYNONYMS: Dict[str, List[str]] = {
-    "lighting": ["φωτισμ"],             # φωτισμός, φωτισμους, φωτισμού...
-    "luminaire": ["φωτιστικ"],          # φωτιστικό, φωτιστικά
-    "led": ["led", "λεντ"],             # τυχόν γραφή
-    "logo": ["λογοτυπ", "λογκο"],       # λογοτυπο, λογοτυπα
+    "lighting": ["φωτισμ"],
+    "luminaire": ["φωτιστικ"],
+    "led": ["led", "λεντ"],
+    "logo": ["λογοτυπ", "λογκο"],
     "dialux": ["dialux"],
     "relux": ["relux"],
-    "photometric": ["φωτομετρ"],        # φωτομετρικά
+    "photometric": ["φωτομετρ"],
 }
-
 def expand_for_greek(keywords: List[str]) -> List[str]:
     out: List[str] = []
     for k in keywords:
@@ -173,7 +164,7 @@ def expand_for_greek(keywords: List[str]) -> List[str]:
             out.extend(root)
     return out
 
-# ───────────────────────── Freelancer fetch ─────────────────────────
+# ───────────────────────── Freelancer ─────────────────────────
 async def freelancer_search(keyword: str) -> List[Dict]:
     url = (
         "https://www.freelancer.com/api/projects/0.1/projects/active/"
@@ -232,7 +223,7 @@ async def freelancer_search(keyword: str) -> List[Dict]:
     log.info("Freelancer '%s': %d jobs", keyword, len(cards))
     return cards
 
-# ───────────────────────── PeoplePerHour (deep, non-affiliate) ─────────────────────────
+# ───────────────────────── PeoplePerHour (deep) ─────────────────────────
 _PPH_JOB_A = re.compile(r'href="(/job/\d+[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
 _PPH_MONEY = re.compile(r'([€£$])\s?(\d+(?:[.,]\d{1,2})?)', re.IGNORECASE)
 _PPH_PER_HOUR = re.compile(r'per\s*hour|/hr|/hour', re.IGNORECASE)
@@ -309,7 +300,7 @@ async def pph_search(keyword: str) -> List[Dict]:
     log.info("PPH '%s': %d jobs", keyword, len(cards))
     return cards
 
-# ───────────────────────── Kariera (simple HTML) ─────────────────────────
+# ───────────────────────── Kariera ─────────────────────────
 _KAR_A = re.compile(r'href="(/jobs/[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
 
 async def kariera_search(keyword: str) -> List[Dict]:
@@ -354,27 +345,39 @@ async def kariera_search(keyword: str) -> List[Dict]:
     log.info("Kariera '%s': %d jobs", keyword, len(cards))
     return cards[:MAX_PER_SOURCE]
 
-# ───────────────────────── JobFind (simple HTML) ─────────────────────────
+# ───────────────────────── JobFind (robust URL probing) ─────────────────────────
 _JF_A = re.compile(r'href="(/job/[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
 
+async def _jobfind_fetch_html(keyword: str) -> Optional[str]:
+    """Try multiple URL patterns; return HTML of the first 200 OK or None."""
+    q = quote_plus(keyword.strip())
+    candidates = [
+        f"https://www.jobfind.gr/ergasia?keyword={q}",
+        f"https://www.jobfind.gr/ergasia?keywords={q}",
+        f"https://www.jobfind.gr/ergasia/search?keyword={q}",
+        f"https://www.jobfind.gr/ergasia/el/search?keyword={q}",
+    ]
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=HEADERS_HTML) as client:
+        for url in candidates:
+            try:
+                r = await client.get(url)
+                if r.status_code == 200 and r.text:
+                    return r.text
+                else:
+                    log.info("JobFind probe %s → %s", url, r.status_code)
+            except Exception as e:
+                log.info("JobFind probe error %s → %s", url, e)
+    return None
+
 async def jobfind_search(keyword: str) -> List[Dict]:
-    q = keyword.strip()
-    if not q:
+    if not keyword.strip():
         return []
-    # FIX: use ?keyword= instead of ?query=
-    url = f"https://www.jobfind.gr/ergasia?keyword={quote_plus(q)}"
-    cards: List[Dict] = []
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=HEADERS_HTML) as client:
-            r = await client.get(url)
-            if r.status_code != 200:
-                log.warning("JobFind fetch error for '%s': %s", keyword, r)
-                return []
-            html = r.text
-    except Exception as e:
-        log.warning("JobFind fetch error for '%s': %s", keyword, e)
+    html = await _jobfind_fetch_html(keyword)
+    if not html:
+        log.warning("JobFind fetch error for '%s': no working endpoint (404/redirects)", keyword)
         return []
 
+    cards: List[Dict] = []
     seen = set()
     for m in _JF_A.finditer(html):
         href = m.group(1)
@@ -408,7 +411,6 @@ def job_matches(card: Dict, keywords: List[str]) -> bool:
     src = (card.get("source") or "").lower()
     is_gr = src in {"kariera", "jobfind"}
 
-    # Build haystack
     hay_parts = []
     if JOB_MATCH_SCOPE in ("title", "title_desc"):
         hay_parts.append(card.get("title") or "")
@@ -417,7 +419,6 @@ def job_matches(card: Dict, keywords: List[str]) -> bool:
     hay = " ".join(hay_parts)
 
     if is_gr:
-        # Greek-insensitive match using synonyms
         hay_norm = normalize_el(hay)
         expanded = expand_for_greek(keywords)
         tokens = [normalize_el(k) for k in expanded if k.strip()]
@@ -427,7 +428,6 @@ def job_matches(card: Dict, keywords: List[str]) -> bool:
             return all(t in hay_norm for t in tokens)
         return any(t in hay_norm for t in tokens)
     else:
-        # Default English match
         hay_s = hay.lower()
         kws = [k.lower() for k in keywords if k.strip()]
         if not kws:
@@ -484,7 +484,7 @@ async def process_user(db: SessionLocal, u: User) -> int:
         except Exception as e:
             log.exception("Freelancer block error for kw='%s': %s", kw, e)
 
-    # PeoplePerHour (deep, non-affiliate)
+    # PeoplePerHour
     for kw in keywords:
         try:
             pph_cards = await pph_search(kw)
@@ -494,7 +494,7 @@ async def process_user(db: SessionLocal, u: User) -> int:
         except Exception as e:
             log.exception("PPH block error for kw='%s': %s", kw, e)
 
-    # Kariera.gr
+    # Kariera
     for kw in keywords:
         try:
             ka_cards = await kariera_search(kw)
@@ -504,7 +504,7 @@ async def process_user(db: SessionLocal, u: User) -> int:
         except Exception as e:
             log.exception("Kariera block error for kw='%s': %s", kw, e)
 
-    # JobFind.gr
+    # JobFind (robust)
     for kw in keywords:
         try:
             jf_cards = await jobfind_search(kw)
@@ -521,12 +521,11 @@ async def process_user(db: SessionLocal, u: User) -> int:
             filtered.append(c)
     filtered = dedup_cards(filtered)
 
-    # Avoid re-sending already sent jobs
     already = {s.job_id for s in (u.sent_jobs or [])}
     to_send = [c for c in filtered if c.get("id") not in already]
 
     sent = 0
-    for card in to_send:
+    for card in to_send[: max(1, MAX_PER_SOURCE * 4)]:  # soft global cap
         try:
             await send_job(int(u.telegram_id), card, matched=card.get("matched"))
             db.add(JobSent(user_id=u.id, job_id=card["id"], created_at=now_utc()))
