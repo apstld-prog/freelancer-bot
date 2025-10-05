@@ -3,8 +3,9 @@ import os
 import re
 import json
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote_plus  # <-- for URL quoting
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -14,7 +15,6 @@ from db import (
     SessionLocal,
     ensure_schema,
     User,
-    Keyword,
     JobSent,
 )
 
@@ -42,7 +42,7 @@ HEADERS_HTML = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) FreelancerAlertsBot/1.0"
 }
 
-# Currency approx conversion to USD (same defaults με bot.py)
+# Currency approx conversion to USD
 DEFAULT_USD_RATES = {
     "USD": 1.0, "EUR": 1.07, "GBP": 1.25, "AUD": 0.65, "CAD": 0.73, "CHF": 1.10,
     "SEK": 0.09, "NOK": 0.09, "DKK": 0.14, "PLN": 0.25, "RON": 0.22, "BGN": 0.55,
@@ -112,7 +112,6 @@ def fmt_usd_line(min_usd: float, max_usd: float) -> str:
     return f"~ ${min_usd:.0f}–${max_usd:.0f} USD"
 
 def job_text(card: Dict) -> str:
-    # card keys: id, source, title, type, budget_local, budget_usd, bids, posted, description, matched
     lines = [f"*{card.get('title','Untitled')}*",
              "",
              f"👤 Source: *{card.get('source','')}*"]
@@ -145,10 +144,9 @@ def card_markup(card: Dict) -> InlineKeyboardMarkup:
 
 # ───────────────────────── Freelancer fetch ─────────────────────────
 async def freelancer_search(keyword: str) -> List[Dict]:
-    """Fetch projects from Freelancer public API by keyword."""
     url = (
         "https://www.freelancer.com/api/projects/0.1/projects/active/"
-        f"?query={httpx.QueryParams({'query': keyword})['query']}"
+        f"?query={quote_plus(keyword)}"
         "&limit=30&compact=true&user_details=true&job_details=true&full_description=true"
     )
     try:
@@ -200,6 +198,7 @@ async def freelancer_search(keyword: str) -> List[Dict]:
             "proposal_url": url_prop,
             "original_url": url_prop,
         })
+    log.info("Freelancer '%s': %d jobs", keyword, len(cards))
     return cards
 
 # ───────────────────────── PeoplePerHour fetch (simple, non-affiliate) ─────────────────────────
@@ -213,7 +212,7 @@ async def pph_search(keyword: str) -> List[Dict]:
     q = keyword.strip()
     if not q:
         return []
-    url = f"https://www.peopleperhour.com/freelance-jobs?q={httpx.utils.quote(q)}"
+    url = f"https://www.peopleperhour.com/freelance-jobs?q={quote_plus(q)}"  # <-- fixed
     cards: List[Dict] = []
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=HEADERS_HTML) as client:
@@ -226,13 +225,10 @@ async def pph_search(keyword: str) -> List[Dict]:
         log.warning("PPH fetch error for '%s': %s", keyword, e)
         return []
 
-    # Very lightweight parsing: find /job/<id> anchors and their text
-    # We dedupe by job id
     seen_ids = set()
     for m in _PPH_JOB_RE.finditer(html):
         href = m.group(1)  # /job/123456-title...
         title = re.sub(r"\s+", " ", m.group(2)).strip()
-        # Extract numeric id
         jid_m = re.search(r"/job/(\d+)", href)
         if not jid_m:
             continue
@@ -251,17 +247,15 @@ async def pph_search(keyword: str) -> List[Dict]:
             "budget_usd": None,
             "bids": None,
             "posted": "recent",
-            "description": "",  # we don't scrape description in this lightweight mode
-            "proposal_url": full_url,  # no affiliate for now
+            "description": "",
+            "proposal_url": full_url,
             "original_url": full_url,
         })
 
+    log.info("PPH '%s': %d jobs", keyword, len(cards))
     return cards
 
 # ───────────────────────── Match & Dedup ─────────────────────────
-def norm(s: str) -> str:
-    return (s or "").lower()
-
 def job_matches(card: Dict, keywords: List[str]) -> bool:
     if not keywords:
         return True
@@ -272,7 +266,6 @@ def job_matches(card: Dict, keywords: List[str]) -> bool:
         hay.append(card.get("description") or "")
     hay_s = " ".join(hay).lower()
 
-    # require ANY or ALL keyword presence
     kws = [k.lower() for k in keywords if k.strip()]
     if not kws:
         return True
@@ -292,7 +285,6 @@ def dedup_cards(cards: List[Dict]) -> List[Dict]:
 
 # ───────────────────────── Send helpers ─────────────────────────
 async def send_job(chat_id: int, card: Dict, matched: Optional[List[str]] = None) -> None:
-    """Send one job card to the chat with buttons."""
     txt = job_text({**card, "matched": matched or []})
     kb = card_markup(card)
     tg = await get_bot()
@@ -306,8 +298,6 @@ async def send_job(chat_id: int, card: Dict, matched: Optional[List[str]] = None
 
 # ───────────────────────── Main loop per user ─────────────────────────
 async def process_user(db: SessionLocal, u: User) -> int:
-    """Fetch & send jobs for one user. Returns number sent."""
-    # access check
     now = now_utc()
     trial = to_aware(u.trial_until)
     lic = to_aware(u.access_until)
@@ -316,26 +306,30 @@ async def process_user(db: SessionLocal, u: User) -> int:
         return 0
 
     keywords = [k.keyword for k in (u.keywords or [])]
-    # allow empty keywords? if empty, skip to avoid spam
     if not keywords:
         return 0
 
     all_cards: List[Dict] = []
 
-    # Fetch from Freelancer
+    # Freelancer
     for kw in keywords:
-        fl_cards = await freelancer_search(kw)
-        # add matched tokens
-        for c in fl_cards:
-            c["matched"] = [kw]
-        all_cards.extend(fl_cards)
+        try:
+            fl_cards = await freelancer_search(kw)
+            for c in fl_cards:
+                c["matched"] = [kw]
+            all_cards.extend(fl_cards)
+        except Exception as e:
+            log.exception("Freelancer block error for kw='%s': %s", kw, e)
 
-    # Fetch from PeoplePerHour (simple, non-affiliate)
+    # PeoplePerHour (non-affiliate)
     for kw in keywords:
-        pph_cards = await pph_search(kw)
-        for c in pph_cards:
-            c["matched"] = [kw]
-        all_cards.extend(pph_cards)
+        try:
+            pph_cards = await pph_search(kw)
+            for c in pph_cards:
+                c["matched"] = [kw]
+            all_cards.extend(pph_cards)
+        except Exception as e:
+            log.exception("PPH block error for kw='%s': %s", kw, e)
 
     # Filter & dedup
     filtered: List[Dict] = []
@@ -352,7 +346,6 @@ async def process_user(db: SessionLocal, u: User) -> int:
     for card in to_send:
         try:
             await send_job(int(u.telegram_id), card, matched=card.get("matched"))
-            # track sent
             db.add(JobSent(user_id=u.id, job_id=card["id"], created_at=now_utc()))
             db.commit()
             log.info("Sent job %s to %s", card["id"], u.telegram_id)
