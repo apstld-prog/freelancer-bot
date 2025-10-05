@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote_plus  # <-- for URL quoting
+from urllib.parse import quote_plus, urljoin
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -201,18 +201,25 @@ async def freelancer_search(keyword: str) -> List[Dict]:
     log.info("Freelancer '%s': %d jobs", keyword, len(cards))
     return cards
 
-# ───────────────────────── PeoplePerHour fetch (simple, non-affiliate) ─────────────────────────
-_PPH_JOB_RE = re.compile(r'href="(/job/\d+[^"]*)"[^>]*>([^<][^<]+)</a>', re.IGNORECASE)
+# ───────────────────────── PeoplePerHour fetch (deep, non-affiliate) ─────────────────────────
+# Basic job blocks
+_PPH_JOB_A = re.compile(r'href="(/job/\d+[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
+# Try to capture price around the anchor (e.g., £20, €150, $30 per hour)
+_PPH_MONEY = re.compile(r'([€£$])\s?(\d+(?:[.,]\d{1,2})?)', re.IGNORECASE)
+_PPH_PER_HOUR = re.compile(r'per\s*hour|/hr|/hour', re.IGNORECASE)
+
+def _money_to_code(sym: str) -> str:
+    return {"€": "EUR", "£": "GBP", "$": "USD"}.get(sym, "USD")
 
 async def pph_search(keyword: str) -> List[Dict]:
     """
     Scrape PeoplePerHour search results for jobs (no affiliate).
-    Builds Original/Proposal as the canonical PPH job link.
+    Extracts title, link, and heuristic budget (hourly/fixed) if present.
     """
     q = keyword.strip()
     if not q:
         return []
-    url = f"https://www.peopleperhour.com/freelance-jobs?q={quote_plus(q)}"  # <-- fixed
+    url = f"https://www.peopleperhour.com/freelance-jobs?q={quote_plus(q)}"
     cards: List[Dict] = []
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=HEADERS_HTML) as client:
@@ -226,7 +233,7 @@ async def pph_search(keyword: str) -> List[Dict]:
         return []
 
     seen_ids = set()
-    for m in _PPH_JOB_RE.finditer(html):
+    for m in _PPH_JOB_A.finditer(html):
         href = m.group(1)  # /job/123456-title...
         title = re.sub(r"\s+", " ", m.group(2)).strip()
         jid_m = re.search(r"/job/(\d+)", href)
@@ -236,15 +243,38 @@ async def pph_search(keyword: str) -> List[Dict]:
         if jid in seen_ids:
             continue
         seen_ids.add(jid)
-        full_url = "https://www.peopleperhour.com" + href
+        full_url = urljoin("https://www.peopleperhour.com", href)
+
+        # Look around the anchor for money
+        start = max(0, m.start() - 300)
+        end = min(len(html), m.end() + 300)
+        context = html[start:end]
+
+        minb = maxb = 0.0
+        code = "USD"
+        ptype = None
+        usd_line = None
+        local_line = "—"
+
+        money = _PPH_MONEY.search(context)
+        if money:
+            sym, amt = money.group(1), money.group(2)
+            amt_val = float(amt.replace(",", "."))
+            code = _money_to_code(sym)
+            minb = maxb = amt_val
+            ptype = "Hourly" if _PPH_PER_HOUR.search(context) else "Fixed"
+            local_line = fmt_local_budget(minb, maxb, code)
+            usd_pair = to_usd(minb, maxb, code)
+            if usd_pair:
+                usd_line = fmt_usd_line(*usd_pair)
 
         cards.append({
             "id": f"pph-{jid}",
             "source": "PeoplePerHour",
             "title": title or "Untitled",
-            "type": None,
-            "budget_local": "—",
-            "budget_usd": None,
+            "type": ptype,
+            "budget_local": local_line,
+            "budget_usd": usd_line,
             "bids": None,
             "posted": "recent",
             "description": "",
@@ -253,6 +283,103 @@ async def pph_search(keyword: str) -> List[Dict]:
         })
 
     log.info("PPH '%s': %d jobs", keyword, len(cards))
+    return cards
+
+# ───────────────────────── Kariera.gr (simple HTML) ─────────────────────────
+_KAR_A = re.compile(r'href="(/jobs/[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
+
+async def kariera_search(keyword: str) -> List[Dict]:
+    """
+    Lightweight search on Kariera.gr. Extracts title + link.
+    """
+    q = keyword.strip()
+    if not q:
+        return []
+    url = f"https://www.kariera.gr/jobs?keyword={quote_plus(q)}"
+    cards: List[Dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=HEADERS_HTML) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                log.warning("Kariera fetch error for '%s': %s", keyword, r)
+                return []
+            html = r.text
+    except Exception as e:
+        log.warning("Kariera fetch error for '%s': %s", keyword, e)
+        return []
+
+    seen = set()
+    for m in _KAR_A.finditer(html):
+        href = m.group(1)
+        title = re.sub(r"\s+", " ", m.group(2)).strip()
+        jid = re.sub(r"[^a-zA-Z0-9]+", "-", href).strip("-")
+        if jid in seen:
+            continue
+        seen.add(jid)
+        full = urljoin("https://www.kariera.gr", href)
+        cards.append({
+            "id": f"kariera-{jid}",
+            "source": "Kariera",
+            "title": title or "Untitled",
+            "type": None,
+            "budget_local": "—",
+            "budget_usd": None,
+            "bids": None,
+            "posted": "recent",
+            "description": "",
+            "proposal_url": full,
+            "original_url": full,
+        })
+    log.info("Kariera '%s': %d jobs", keyword, len(cards))
+    return cards
+
+# ───────────────────────── JobFind.gr (simple HTML) ─────────────────────────
+# JobFind job links typically /job/<slug> ή /job/<id>/<slug>
+_JF_A = re.compile(r'href="(/job/[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
+
+async def jobfind_search(keyword: str) -> List[Dict]:
+    """
+    Lightweight search on JobFind.gr. Extracts title + link.
+    """
+    q = keyword.strip()
+    if not q:
+        return []
+    url = f"https://www.jobfind.gr/ergasia?query={quote_plus(q)}"
+    cards: List[Dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=HEADERS_HTML) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                log.warning("JobFind fetch error for '%s': %s", keyword, r)
+                return []
+            html = r.text
+    except Exception as e:
+        log.warning("JobFind fetch error for '%s': %s", keyword, e)
+        return []
+
+    seen = set()
+    for m in _JF_A.finditer(html):
+        href = m.group(1)
+        title = re.sub(r"\s+", " ", m.group(2)).strip()
+        jid = re.sub(r"[^a-zA-Z0-9]+", "-", href).strip("-")
+        if jid in seen:
+            continue
+        seen.add(jid)
+        full = urljoin("https://www.jobfind.gr", href)
+        cards.append({
+            "id": f"jobfind-{jid}",
+            "source": "JobFind",
+            "title": title or "Untitled",
+            "type": None,
+            "budget_local": "—",
+            "budget_usd": None,
+            "bids": None,
+            "posted": "recent",
+            "description": "",
+            "proposal_url": full,
+            "original_url": full,
+        })
+    log.info("JobFind '%s': %d jobs", keyword, len(cards))
     return cards
 
 # ───────────────────────── Match & Dedup ─────────────────────────
@@ -321,7 +448,7 @@ async def process_user(db: SessionLocal, u: User) -> int:
         except Exception as e:
             log.exception("Freelancer block error for kw='%s': %s", kw, e)
 
-    # PeoplePerHour (non-affiliate)
+    # PeoplePerHour (deep, non-affiliate)
     for kw in keywords:
         try:
             pph_cards = await pph_search(kw)
@@ -330,6 +457,26 @@ async def process_user(db: SessionLocal, u: User) -> int:
             all_cards.extend(pph_cards)
         except Exception as e:
             log.exception("PPH block error for kw='%s': %s", kw, e)
+
+    # Kariera.gr
+    for kw in keywords:
+        try:
+            ka_cards = await kariera_search(kw)
+            for c in ka_cards:
+                c["matched"] = [kw]
+            all_cards.extend(ka_cards)
+        except Exception as e:
+            log.exception("Kariera block error for kw='%s': %s", kw, e)
+
+    # JobFind.gr
+    for kw in keywords:
+        try:
+            jf_cards = await jobfind_search(kw)
+            for c in jf_cards:
+                c["matched"] = [kw]
+            all_cards.extend(jf_cards)
+        except Exception as e:
+            log.exception("JobFind block error for kw='%s': %s", kw, e)
 
     # Filter & dedup
     filtered: List[Dict] = []
