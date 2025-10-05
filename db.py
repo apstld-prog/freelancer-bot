@@ -9,15 +9,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Logging
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("db")
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # DB URL normalize
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 DB_URL = os.getenv("DATABASE_URL") or "sqlite:///freelancer.db"
 if DB_URL.startswith("postgres://"):
     DB_URL = DB_URL.replace("postgres://", "postgresql+psycopg2://", 1)
@@ -28,10 +28,10 @@ engine = create_engine(DB_URL, pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-def now_utc() -> datetime:
+# -----------------------------------------------------------------------------
+def now_utc():
     return datetime.now(timezone.utc)
 
 @contextmanager
@@ -46,13 +46,13 @@ def get_session():
     finally:
         db.close()
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Models
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 class User(Base):
     __tablename__ = "user"
     id = Column(Integer, primary_key=True)
-    telegram_id = Column(String(32), nullable=False, unique=True)  # keep as text
+    telegram_id = Column(String(32), nullable=False, unique=True)   # store as text for safety
     started_at = Column(DateTime(timezone=True), nullable=True)
     trial_until = Column(DateTime(timezone=True), nullable=True)
     access_until = Column(DateTime(timezone=True), nullable=True)
@@ -93,23 +93,23 @@ class Job(Base):
     __tablename__ = "job"
     id = Column(Integer, primary_key=True)
 
-    source = Column(String(64), nullable=False)            # freelancer, pph, kariera, etc.
-    source_id = Column(String(128), nullable=True)         # remote id/hash
+    source = Column(String(64), nullable=False)              # freelancer, pph, kariera, etc.
+    source_id = Column(String(128), nullable=True)           # remote id/hash
 
     title = Column(String(512), nullable=False)
     description = Column(Text, nullable=True)
 
-    url = Column(Text, nullable=False)                     # canonical job url
-    proposal_url = Column(Text, nullable=True)             # affiliate-wrapped
-    original_url = Column(Text, nullable=True)             # original
+    url = Column(Text, nullable=False)                       # canonical job url
+    proposal_url = Column(Text, nullable=True)               # affiliate-wrapped
+    original_url = Column(Text, nullable=True)               # original
 
     budget_min = Column(Float, nullable=True)
     budget_max = Column(Float, nullable=True)
-    budget_currency = Column(String(16), nullable=True)    # USD, EUR, etc.
-    job_type = Column(String(32), nullable=True)           # fixed/hourly
+    budget_currency = Column(String(16), nullable=True)      # USD, EUR, etc.
+    job_type = Column(String(32), nullable=True)             # fixed/hourly
     bids_count = Column(Integer, nullable=True)
 
-    matched_keyword = Column(String(256), nullable=True)   # last matched kw for display
+    matched_keyword = Column(String(256), nullable=True)     # last matched kw for display
     posted_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), nullable=False, default=now_utc)
@@ -127,15 +127,11 @@ class SavedJob(Base):
     user = relationship("User", back_populates="saved_jobs")
 
 class JobSent(Base):
-    """
-    Anti-duplication log: what job was already sent to which user (for X time).
-    """
     __tablename__ = "job_sent"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
     job_id = Column(Integer, ForeignKey("job.id", ondelete="CASCADE"), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=now_utc)
-
     __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_job_sent_user_job"),)
 
 class ContactThread(Base):
@@ -145,9 +141,9 @@ class ContactThread(Base):
     is_open = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=now_utc)
 
-# ---------------------------------------------------------------------------
-# Schema ensure / light migration
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Light migrations (idempotent)
+# -----------------------------------------------------------------------------
 def _pg_column_exists(conn, table: str, column: str) -> bool:
     row = conn.execute(
         text(
@@ -158,59 +154,28 @@ def _pg_column_exists(conn, table: str, column: str) -> bool:
     ).fetchone()
     return bool(row)
 
-def _safe_alter_columns(conn):
-    dialect = conn.engine.dialect.name
+def _safe_alter_user(conn):
+    # User columns that might be missing on older schemas
+    def add_col(col_sql: str):
+        conn.execute(text(col_sql))
 
-    if dialect == "postgresql":
-        # Add missing columns on "user"
+    if conn.engine.dialect.name == "postgresql":
         if not _pg_column_exists(conn, "user", "started_at"):
-            conn.execute(text('ALTER TABLE "user" ADD COLUMN started_at TIMESTAMPTZ'))
+            add_col('ALTER TABLE "user" ADD COLUMN started_at TIMESTAMPTZ')
         if not _pg_column_exists(conn, "user", "name"):
-            conn.execute(text('ALTER TABLE "user" ADD COLUMN name VARCHAR(128)'))
+            add_col('ALTER TABLE "user" ADD COLUMN name VARCHAR(128)')
         if not _pg_column_exists(conn, "user", "username"):
-            conn.execute(text('ALTER TABLE "user" ADD COLUMN username VARCHAR(64)'))
+            add_col('ALTER TABLE "user" ADD COLUMN username VARCHAR(64)')
         if not _pg_column_exists(conn, "user", "countries"):
-            conn.execute(text('ALTER TABLE "user" ADD COLUMN countries VARCHAR(256) DEFAULT \'ALL\''))
+            add_col('ALTER TABLE "user" ADD COLUMN countries VARCHAR(256) DEFAULT \'ALL\'')
         if not _pg_column_exists(conn, "user", "proposal_template"):
-            conn.execute(text('ALTER TABLE "user" ADD COLUMN proposal_template TEXT'))
+            add_col('ALTER TABLE "user" ADD COLUMN proposal_template TEXT')
         if not _pg_column_exists(conn, "user", "created_at"):
-            conn.execute(text('ALTER TABLE "user" ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()'))
+            add_col('ALTER TABLE "user" ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()')
         if not _pg_column_exists(conn, "user", "updated_at"):
-            conn.execute(text('ALTER TABLE "user" ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()'))
-
-        # Ensure aux tables exist (CREATE IF NOT EXISTS)
-        conn.execute(text(
-            'CREATE TABLE IF NOT EXISTS saved_job ('
-            '  id SERIAL PRIMARY KEY,'
-            '  user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,'
-            '  job_id INTEGER NOT NULL REFERENCES job(id) ON DELETE CASCADE,'
-            '  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()'
-            ')'
-        ))
-        conn.execute(text(
-            'CREATE TABLE IF NOT EXISTS job_sent ('
-            '  id SERIAL PRIMARY KEY,'
-            '  user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,'
-            '  job_id INTEGER NOT NULL REFERENCES job(id) ON DELETE CASCADE,'
-            '  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),'
-            '  CONSTRAINT uq_job_sent_user_job UNIQUE (user_id, job_id)'
-            ')'
-        ))
-        conn.execute(text(
-            'CREATE TABLE IF NOT EXISTS contact_thread ('
-            '  id SERIAL PRIMARY KEY,'
-            '  user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,'
-            '  is_open BOOLEAN NOT NULL DEFAULT TRUE,'
-            '  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()'
-            ')'
-        ))
-
+            add_col('ALTER TABLE "user" ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()')
     else:
-        # SQLite-compatible fallbacks
-        def norm(sql: str) -> str:
-            return (sql.replace("TIMESTAMPTZ", "TIMESTAMP")
-                       .replace("NOW()", "(datetime('now'))")
-                       .replace("SERIAL", "INTEGER"))
+        # SQLite - tolerant (add if not exists not fully supported for all cases)
         stmts = [
             'ALTER TABLE "user" ADD COLUMN started_at TIMESTAMP',
             'ALTER TABLE "user" ADD COLUMN name VARCHAR(128)',
@@ -219,43 +184,85 @@ def _safe_alter_columns(conn):
             'ALTER TABLE "user" ADD COLUMN proposal_template TEXT',
             'ALTER TABLE "user" ADD COLUMN created_at TIMESTAMP DEFAULT (datetime(\'now\'))',
             'ALTER TABLE "user" ADD COLUMN updated_at TIMESTAMP DEFAULT (datetime(\'now\'))',
-            'CREATE TABLE IF NOT EXISTS saved_job ('
-            '  id INTEGER PRIMARY KEY,'
-            '  user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,'
-            '  job_id INTEGER NOT NULL REFERENCES job(id) ON DELETE CASCADE,'
-            '  created_at TIMESTAMP NOT NULL DEFAULT (datetime(\'now\'))'
-            ')',
-            'CREATE TABLE IF NOT EXISTS job_sent ('
-            '  id INTEGER PRIMARY KEY,'
-            '  user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,'
-            '  job_id INTEGER NOT NULL REFERENCES job(id) ON DELETE CASCADE,'
-            '  created_at TIMESTAMP NOT NULL DEFAULT (datetime(\'now\')),'
-            '  CONSTRAINT uq_job_sent_user_job UNIQUE (user_id, job_id)'
-            ')',
-            'CREATE TABLE IF NOT EXISTS contact_thread ('
-            '  id INTEGER PRIMARY KEY,'
-            '  user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,'
-            '  is_open BOOLEAN NOT NULL DEFAULT 1,'
-            '  created_at TIMESTAMP NOT NULL DEFAULT (datetime(\'now\'))'
-            ')',
         ]
         for s in stmts:
             try:
-                conn.execute(text(norm(s)))
+                conn.execute(text(s))
             except Exception:
                 pass
 
+def _safe_alter_job(conn):
+    # Job columns that might be missing
+    def add_col(col_sql: str):
+        conn.execute(text(col_sql))
+
+    pg = conn.engine.dialect.name == "postgresql"
+    if pg:
+        if not _pg_column_exists(conn, "job", "source_id"):
+            add_col('ALTER TABLE job ADD COLUMN source_id VARCHAR(128)')
+        if not _pg_column_exists(conn, "job", "proposal_url"):
+            add_col('ALTER TABLE job ADD COLUMN proposal_url TEXT')
+        if not _pg_column_exists(conn, "job", "original_url"):
+            add_col('ALTER TABLE job ADD COLUMN original_url TEXT')
+        if not _pg_column_exists(conn, "job", "budget_min"):
+            add_col('ALTER TABLE job ADD COLUMN budget_min DOUBLE PRECISION')
+        if not _pg_column_exists(conn, "job", "budget_max"):
+            add_col('ALTER TABLE job ADD COLUMN budget_max DOUBLE PRECISION')
+        if not _pg_column_exists(conn, "job", "budget_currency"):
+            add_col('ALTER TABLE job ADD COLUMN budget_currency VARCHAR(16)')
+        if not _pg_column_exists(conn, "job", "job_type"):
+            add_col('ALTER TABLE job ADD COLUMN job_type VARCHAR(32)')
+        if not _pg_column_exists(conn, "job", "bids_count"):
+            add_col('ALTER TABLE job ADD COLUMN bids_count INTEGER')
+        if not _pg_column_exists(conn, "job", "matched_keyword"):
+            add_col('ALTER TABLE job ADD COLUMN matched_keyword VARCHAR(256)')
+        if not _pg_column_exists(conn, "job", "posted_at"):
+            add_col('ALTER TABLE job ADD COLUMN posted_at TIMESTAMPTZ')
+        if not _pg_column_exists(conn, "job", "created_at"):
+            add_col('ALTER TABLE job ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()')
+        if not _pg_column_exists(conn, "job", "updated_at"):
+            add_col('ALTER TABLE job ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()')
+
+        # Unique index for (source, source_id)
+        conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_sid ON job(source, source_id)'))
+    else:
+        # SQLite fallbacks
+        stmts = [
+            'ALTER TABLE job ADD COLUMN source_id VARCHAR(128)',
+            'ALTER TABLE job ADD COLUMN proposal_url TEXT',
+            'ALTER TABLE job ADD COLUMN original_url TEXT',
+            'ALTER TABLE job ADD COLUMN budget_min FLOAT',
+            'ALTER TABLE job ADD COLUMN budget_max FLOAT',
+            'ALTER TABLE job ADD COLUMN budget_currency VARCHAR(16)',
+            'ALTER TABLE job ADD COLUMN job_type VARCHAR(32)',
+            'ALTER TABLE job ADD COLUMN bids_count INTEGER',
+            'ALTER TABLE job ADD COLUMN matched_keyword VARCHAR(256)',
+            'ALTER TABLE job ADD COLUMN posted_at TIMESTAMP',
+            'ALTER TABLE job ADD COLUMN created_at TIMESTAMP DEFAULT (datetime(\'now\'))',
+            'ALTER TABLE job ADD COLUMN updated_at TIMESTAMP DEFAULT (datetime(\'now\'))',
+        ]
+        for s in stmts:
+            try:
+                conn.execute(text(s))
+            except Exception:
+                pass
+        try:
+            conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_sid ON job(source, source_id)'))
+        except Exception:
+            pass
+
 def init_db():
-    # 1) Create base tables
+    # 1) Create base tables by metadata
     Base.metadata.create_all(bind=engine)
-    # 2) Apply idempotent alters/creates
+    # 2) Add missing columns / indexes idempotently
     with engine.begin() as conn:
-        _safe_alter_columns(conn)
+        _safe_alter_user(conn)
+        _safe_alter_job(conn)
     log.info("DB schema ensured.")
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Admin bootstrap
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def ensure_admin(session, admin_telegram_id: str | None):
     if not admin_telegram_id:
         return
