@@ -3,6 +3,7 @@ import os
 import re
 import json
 import logging
+import unicodedata
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, urljoin
@@ -32,6 +33,9 @@ INTERVAL_SECS = int(os.getenv("WORKER_INTERVAL_SECS", "300"))
 # Matching behavior
 JOB_MATCH_SCOPE = os.getenv("JOB_MATCH_SCOPE", "title_desc")  # title | title_desc
 JOB_MATCH_REQUIRE = os.getenv("JOB_MATCH_REQUIRE", "any")     # any | all
+
+# Cap results per source per cycle (to avoid spam from GR boards)
+MAX_PER_SOURCE = int(os.getenv("MAX_PER_SOURCE", "5"))
 
 # Freelancer affiliate code (optional)
 FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
@@ -91,7 +95,7 @@ async def get_bot() -> Bot:
         bot = Bot(BOT_TOKEN)
     return bot
 
-# ───────────────────────── Formatting helpers ─────────────────────────
+# ───────────────────────── Helpers ─────────────────────────
 def fmt_local_budget(minb: float, maxb: float, code: Optional[str]) -> str:
     if not minb and not maxb:
         return "—"
@@ -141,6 +145,33 @@ def card_markup(card: Dict) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🗑 Delete", callback_data=f"dismiss:{card['id']}"),
     ]]
     return InlineKeyboardMarkup(rows)
+
+def normalize_el(s: str) -> str:
+    """Lowercase + remove accents for Greek-insensitive matching."""
+    s = s.lower()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    return s
+
+# Αγγλικά keyword → Ελληνικές ρίζες (substring) για GR boards
+GREEK_SYNONYMS: Dict[str, List[str]] = {
+    "lighting": ["φωτισμ"],             # φωτισμός, φωτισμους, φωτισμού...
+    "luminaire": ["φωτιστικ"],          # φωτιστικό, φωτιστικά
+    "led": ["led", "λεντ"],             # τυχόν γραφή
+    "logo": ["λογοτυπ", "λογκο"],       # λογοτυπο, λογοτυπα
+    "dialux": ["dialux"],
+    "relux": ["relux"],
+    "photometric": ["φωτομετρ"],        # φωτομετρικά
+}
+
+def expand_for_greek(keywords: List[str]) -> List[str]:
+    out: List[str] = []
+    for k in keywords:
+        out.append(k)
+        root = GREEK_SYNONYMS.get(k.lower())
+        if root:
+            out.extend(root)
+    return out
 
 # ───────────────────────── Freelancer fetch ─────────────────────────
 async def freelancer_search(keyword: str) -> List[Dict]:
@@ -201,10 +232,8 @@ async def freelancer_search(keyword: str) -> List[Dict]:
     log.info("Freelancer '%s': %d jobs", keyword, len(cards))
     return cards
 
-# ───────────────────────── PeoplePerHour fetch (deep, non-affiliate) ─────────────────────────
-# Basic job blocks
+# ───────────────────────── PeoplePerHour (deep, non-affiliate) ─────────────────────────
 _PPH_JOB_A = re.compile(r'href="(/job/\d+[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
-# Try to capture price around the anchor (e.g., £20, €150, $30 per hour)
 _PPH_MONEY = re.compile(r'([€£$])\s?(\d+(?:[.,]\d{1,2})?)', re.IGNORECASE)
 _PPH_PER_HOUR = re.compile(r'per\s*hour|/hr|/hour', re.IGNORECASE)
 
@@ -212,10 +241,6 @@ def _money_to_code(sym: str) -> str:
     return {"€": "EUR", "£": "GBP", "$": "USD"}.get(sym, "USD")
 
 async def pph_search(keyword: str) -> List[Dict]:
-    """
-    Scrape PeoplePerHour search results for jobs (no affiliate).
-    Extracts title, link, and heuristic budget (hourly/fixed) if present.
-    """
     q = keyword.strip()
     if not q:
         return []
@@ -234,7 +259,7 @@ async def pph_search(keyword: str) -> List[Dict]:
 
     seen_ids = set()
     for m in _PPH_JOB_A.finditer(html):
-        href = m.group(1)  # /job/123456-title...
+        href = m.group(1)
         title = re.sub(r"\s+", " ", m.group(2)).strip()
         jid_m = re.search(r"/job/(\d+)", href)
         if not jid_m:
@@ -245,7 +270,6 @@ async def pph_search(keyword: str) -> List[Dict]:
         seen_ids.add(jid)
         full_url = urljoin("https://www.peopleperhour.com", href)
 
-        # Look around the anchor for money
         start = max(0, m.start() - 300)
         end = min(len(html), m.end() + 300)
         context = html[start:end]
@@ -285,13 +309,10 @@ async def pph_search(keyword: str) -> List[Dict]:
     log.info("PPH '%s': %d jobs", keyword, len(cards))
     return cards
 
-# ───────────────────────── Kariera.gr (simple HTML) ─────────────────────────
+# ───────────────────────── Kariera (simple HTML) ─────────────────────────
 _KAR_A = re.compile(r'href="(/jobs/[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
 
 async def kariera_search(keyword: str) -> List[Dict]:
-    """
-    Lightweight search on Kariera.gr. Extracts title + link.
-    """
     q = keyword.strip()
     if not q:
         return []
@@ -331,20 +352,17 @@ async def kariera_search(keyword: str) -> List[Dict]:
             "original_url": full,
         })
     log.info("Kariera '%s': %d jobs", keyword, len(cards))
-    return cards
+    return cards[:MAX_PER_SOURCE]
 
-# ───────────────────────── JobFind.gr (simple HTML) ─────────────────────────
-# JobFind job links typically /job/<slug> ή /job/<id>/<slug>
+# ───────────────────────── JobFind (simple HTML) ─────────────────────────
 _JF_A = re.compile(r'href="(/job/[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
 
 async def jobfind_search(keyword: str) -> List[Dict]:
-    """
-    Lightweight search on JobFind.gr. Extracts title + link.
-    """
     q = keyword.strip()
     if not q:
         return []
-    url = f"https://www.jobfind.gr/ergasia?query={quote_plus(q)}"
+    # FIX: use ?keyword= instead of ?query=
+    url = f"https://www.jobfind.gr/ergasia?keyword={quote_plus(q)}"
     cards: List[Dict] = []
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=HEADERS_HTML) as client:
@@ -380,25 +398,43 @@ async def jobfind_search(keyword: str) -> List[Dict]:
             "original_url": full,
         })
     log.info("JobFind '%s': %d jobs", keyword, len(cards))
-    return cards
+    return cards[:MAX_PER_SOURCE]
 
 # ───────────────────────── Match & Dedup ─────────────────────────
 def job_matches(card: Dict, keywords: List[str]) -> bool:
     if not keywords:
         return True
-    hay = []
-    if JOB_MATCH_SCOPE in ("title", "title_desc"):
-        hay.append(card.get("title") or "")
-    if JOB_MATCH_SCOPE == "title_desc":
-        hay.append(card.get("description") or "")
-    hay_s = " ".join(hay).lower()
 
-    kws = [k.lower() for k in keywords if k.strip()]
-    if not kws:
-        return True
-    if JOB_MATCH_REQUIRE == "all":
-        return all(k in hay_s for k in kws)
-    return any(k in hay_s for k in kws)
+    src = (card.get("source") or "").lower()
+    is_gr = src in {"kariera", "jobfind"}
+
+    # Build haystack
+    hay_parts = []
+    if JOB_MATCH_SCOPE in ("title", "title_desc"):
+        hay_parts.append(card.get("title") or "")
+    if JOB_MATCH_SCOPE == "title_desc":
+        hay_parts.append(card.get("description") or "")
+    hay = " ".join(hay_parts)
+
+    if is_gr:
+        # Greek-insensitive match using synonyms
+        hay_norm = normalize_el(hay)
+        expanded = expand_for_greek(keywords)
+        tokens = [normalize_el(k) for k in expanded if k.strip()]
+        if not tokens:
+            return True
+        if JOB_MATCH_REQUIRE == "all":
+            return all(t in hay_norm for t in tokens)
+        return any(t in hay_norm for t in tokens)
+    else:
+        # Default English match
+        hay_s = hay.lower()
+        kws = [k.lower() for k in keywords if k.strip()]
+        if not kws:
+            return True
+        if JOB_MATCH_REQUIRE == "all":
+            return all(k in hay_s for k in kws)
+        return any(k in hay_s for k in kws)
 
 def dedup_cards(cards: List[Dict]) -> List[Dict]:
     out: List[Dict] = []
@@ -508,8 +544,8 @@ async def worker_loop():
     db = SessionLocal()
     try:
         log.info(
-            "Worker loop every %ss (JOB_MATCH_SCOPE=%s, JOB_MATCH_REQUIRE=%s)",
-            INTERVAL_SECS, JOB_MATCH_SCOPE, JOB_MATCH_REQUIRE
+            "Worker loop every %ss (JOB_MATCH_SCOPE=%s, JOB_MATCH_REQUIRE=%s, MAX_PER_SOURCE=%s)",
+            INTERVAL_SECS, JOB_MATCH_SCOPE, JOB_MATCH_REQUIRE, MAX_PER_SOURCE
         )
     finally:
         db.close()
