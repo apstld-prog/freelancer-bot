@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
 
 from bot import build_application
-from db import init_db, ensure_admin
+from db import init_db, get_session, ensure_admin
 
 log = logging.getLogger("server")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -12,11 +12,16 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
 ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID", "")
 
+# DB bootstrap
 init_db()
-ensure_admin(__import__("db").db.get_session(), ADMIN_ID)  # lazy get_session import
+try:
+    with get_session() as s:
+        ensure_admin(s, ADMIN_ID)
+except Exception as e:
+    log.warning("ensure_admin skipped: %s", e)
 
 app = FastAPI()
-tg_app = build_application()  # PTB Application already initialized for webhook mode
+tg_app = build_application()
 
 @app.get("/")
 async def root():
@@ -25,8 +30,9 @@ async def root():
 @app.post(f"/webhook/{WEBHOOK_SECRET}")
 async def webhook(request: Request):
     try:
-        body = await request.body()
-        await tg_app.update_queue.put(body)  # PTB HTTP webhook: we pass raw JSON to queue
+        update_json = await request.json()
+        # PTB expects Update object; we pass raw dict via process_update
+        await tg_app.update_queue.put(update_json)
         return PlainTextResponse("ok")
     except Exception as e:
         log.exception("webhook error: %s", e)

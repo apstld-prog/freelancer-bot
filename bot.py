@@ -4,7 +4,7 @@ from datetime import timedelta
 from typing import List, Tuple
 
 from telegram import (
-    Update, InlineKeyboardMarkup, InlineKeyboardButton, MessageEntity
+    Update, InlineKeyboardMarkup, InlineKeyboardButton
 )
 from telegram.ext import (
     Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler,
@@ -23,8 +23,8 @@ log = logging.getLogger("bot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID", "")
-AFFILIATE_FREELANCER_REF = os.getenv("AFFILIATE_FREELANCER_REF", "")  # e.g. apstld
-AFFILIATE_FIVERR_BTA = os.getenv("AFFILIATE_FIVERR_BTA", "")          # e.g. 1146042
+AFFILIATE_FREELANCER_REF = os.getenv("AFFILIATE_FREELANCER_REF", "")
+AFFILIATE_FIVERR_BTA = os.getenv("AFFILIATE_FIVERR_BTA", "")
 
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
 
@@ -65,9 +65,7 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
         ]
     ]
     if is_admin:
-        rows.append([
-            InlineKeyboardButton("👑 Admin", callback_data="mm:admin")
-        ])
+        rows.append([InlineKeyboardButton("👑 Admin", callback_data="mm:admin")])
     return InlineKeyboardMarkup(rows)
 
 def welcome_text() -> str:
@@ -155,7 +153,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("feedsstatus", feedsstatus_cmd))
 
     app.add_handler(CallbackQueryHandler(button_cb))
-    # contact flow (user writes free text after pressing Contact)
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), contact_flow_message))
 
     log.info("PTB Application initialized (webhook mode expected).")
@@ -169,7 +166,6 @@ def is_admin(update: Update) -> bool:
     return ADMIN_ID and str(update.effective_user.id) == str(ADMIN_ID)
 
 def parse_keywords_arg(text: str) -> List[str]:
-    # split by commas/spaces, keep Greek letters too
     raw = text.strip()
     for ch in ["\n", ";", "|"]:
         raw = raw.replace(ch, ",")
@@ -178,14 +174,11 @@ def parse_keywords_arg(text: str) -> List[str]:
     for p in parts:
         if not p:
             continue
-        # split remaining spaces
         if " " in p and "," not in p:
             kws.extend([x for x in p.split(" ") if x])
         else:
             kws.append(p)
-    # dedup, normalize lower
-    out = []
-    seen = set()
+    out, seen = [], set()
     for k in kws:
         kk = k.strip().lower()
         if kk and kk not in seen:
@@ -207,7 +200,6 @@ async def ensure_user(ctx: ContextTypes.DEFAULT_TYPE, tg_id: str, name: str, use
             )
             db.add(u); db.commit()
         else:
-            # keep fresh name/username
             changed = False
             if name and u.name != name:
                 u.name = name; changed = True
@@ -220,14 +212,12 @@ async def ensure_user(ctx: ContextTypes.DEFAULT_TYPE, tg_id: str, name: str, use
         db.close()
 
 def affiliate_wrap(source: str, url: str) -> Tuple[str, str]:
-    # returns (proposal_url, original_url)
     if source == "freelancer" and AFFILIATE_FREELANCER_REF:
         if "referrer=" not in url and "ref=" not in url:
             sep = "&" if "?" in url else "?"
             url_aff = f"{url}{sep}referrer={AFFILIATE_FREELANCER_REF}"
             return url_aff, url_aff
     if source == "fiverr" and AFFILIATE_FIVERR_BTA:
-        # example fiverr marketplace affiliate
         return url, url
     return url, url
 
@@ -236,11 +226,10 @@ def affiliate_wrap(source: str, url: str) -> Tuple[str, str]:
 # ----------------------------------------------------------------------------
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = await ensure_user(context, str(update.effective_user.id), update.effective_user.full_name, update.effective_user.username)
+    _ = await ensure_user(context, str(update.effective_user.id), update.effective_user.full_name, update.effective_user.username)
     await update.effective_chat.send_message(
         welcome_text(), reply_markup=main_menu_kb(is_admin(update)), parse_mode="Markdown"
     )
-    # show features block right away
     await update.effective_chat.send_message(FEATURES_TEXT, parse_mode="Markdown")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,7 +267,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not db.query(Keyword).filter(Keyword.user_id==u.id, Keyword.keyword==k).one_or_none():
                 db.add(Keyword(user_id=u.id, keyword=k)); added += 1
         db.commit()
-        lst = ", ".join(sorted([x.keyword for x in u.keywords] + kws)) if added else ", ".join(sorted([x.keyword for x in u.keywords]))
+        lst = ", ".join(sorted([k.keyword for k in u.keywords]))
         await update.effective_chat.send_message(f"Added {added} keywords.\nYour keywords: {lst}")
     finally:
         db.close()
@@ -350,7 +339,6 @@ async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_chat.send_message(txt, parse_mode="Markdown")
 
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # fake job card using your existing components from worker side → keep it simple here
     await update.effective_chat.send_message(
         "🧪 [TEST] Example job card\n\n"
         "*Source:* Freelancer\n*Type:* Fixed\n*Budget:* 100–300 USD\n*~ $100.00–$300.00 USD\n*Bids:* 12\n*Posted:* 0s ago\n\n"
@@ -480,7 +468,6 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = int(data.split(":")[2])
         await show_saved_jobs(update, context, page)
     elif data == "mm:contact":
-        # open contact thread
         db = get_session()
         try:
             u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
@@ -512,7 +499,6 @@ async def show_saved_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         if not rows:
             await update.effective_chat.send_message("No saved jobs yet.")
             return
-        # show as list with open/delete buttons per item
         for sj in rows:
             job = db.query(Job).filter(Job.id==sj.job_id).one_or_none()
             if not job: continue
@@ -534,19 +520,16 @@ async def show_job_card(update: Update, context: ContextTypes.DEFAULT_TYPE, job_
             [InlineKeyboardButton("📦 Proposal", url=prop),
              InlineKeyboardButton("🔗 Original", url=orig)]
         ])
-        # brief card
         btxt = ""
         if job.budget_min or job.budget_max:
             cur = job.budget_currency or ""
-            rng = f"{job.budget_min or ''}–{job.budget_max or ''} {cur}".strip("– ")
+            rng = f"{job.budget_min or ''}–{job.budget_max or ''} {cur}".strip("– ").strip()
             btxt = f"\n💲 Budget: {rng}"
         await update.effective_chat.send_message(f"*{job.title}*\nSource: {job.source}{btxt}\n\n{(job.description or '')[:400]}…", parse_mode="Markdown", reply_markup=kb)
     finally:
         db.close()
 
-# message from user in contact flow
 async def contact_flow_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # forward to admin with reply/decline buttons
     db = get_session()
     try:
         u = await ensure_user(context, str(update.effective_user.id), update.effective_user.full_name, update.effective_user.username)
@@ -560,14 +543,3 @@ async def contact_flow_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.effective_chat.send_message("✅ Sent to the admin. You’ll receive a reply here.")
     finally:
         db.close()
-
-# admin taps reply/decline
-@CommandHandler
-async def _noop(): pass
-
-async def admin_buttons_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pass  # not used; handled in button_cb
-
-# ----------------------------------------------------------------------------
-# END bot.py
-# ----------------------------------------------------------------------------
