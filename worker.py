@@ -112,69 +112,34 @@ def fmt_usd_line(min_usd: float, max_usd: float) -> str:
     return f"~ ${min_usd:.0f}–${max_usd:.0f} USD"
 
 def normalize_el(s: str) -> str:
-    """lowercase + remove accents correctly for Greek-insensitive matching."""
     s = s.lower()
     s = unicodedata.normalize("NFD", s)
     s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
     return s
 
-# 🇬🇧→🇬🇷 simple dictionary expansion (ONLY new addition you asked)
-EN_GR_TRANSLATIONS: Dict[str, List[str]] = {
-    "lighting": ["φωτισμός", "φωτιστικ", "φως"],
+# Αγγλικά keyword → Ελληνικές ρίζες για GR boards
+GREEK_SYNONYMS: Dict[str, List[str]] = {
+    "lighting": ["φωτισμ"],
     "luminaire": ["φωτιστικ", "φωτιστικο", "φωτιστικων"],
     "led": ["led", "λεντ", "φωτιστικα led"],
-    "logo": ["λογοτυπ", "λογκο", "brand"],
-    "design": ["σχεδ", "μελετ", "σχεδιασμ"],
-    "light": ["φως", "φωτισμ"],
-    "photometric": ["φωτομετρ", "φωτοτεχν", "φωτοτεχνικ"],
+    "logo": ["λογοτυπ", "λογκο"],
     "dialux": ["dialux", "ντιαλαξ"],
     "relux": ["relux", "ριλαξ"],
+    "photometric": ["φωτομετρ", "φωτοτεχν", "φωτοτεχνικ"],
+    "design": ["σχεδ", "μελετ", "σχεδιασμ"],
     "engineer": ["μηχανικ", "σχεδιαστ"],
     "project": ["εργο", "προτζεκτ", "μελετ"],
 }
 
-def expand_en_to_gr(keywords: List[str]) -> List[str]:
-    """Return original keywords + greek expansions for english entries."""
-    out: List[str] = []
-    for kw in keywords:
-        out.append(kw)
-        adds = EN_GR_TRANSLATIONS.get(kw.lower())
-        if adds:
-            out.extend(adds)
-    # de-dup while preserving order
-    seen = set()
-    uniq: List[str] = []
-    for k in out:
-        if k not in seen:
-            uniq.append(k)
-            seen.add(k)
-    return uniq
-
-# Αγγλικά keyword → Ελληνικές ρίζες (substring) για GR boards
-GREEK_SYNONYMS: Dict[str, List[str]] = {
-    "lighting": ["φωτισμ"],
-    "luminaire": ["φωτιστικ"],
-    "led": ["led", "λεντ"],
-    "logo": ["λογοτυπ", "λογκο"],
-    "dialux": ["dialux"],
-    "relux": ["relux"],
-    "photometric": ["φωτομετρ"],
-}
-def expand_for_greek(keywords: List[str]) -> List[str]:
-    out: List[str] = []
-    for k in keywords:
-        out.append(k)
-        root = GREEK_SYNONYMS.get(k.lower())
-        if root:
-            out.extend(root)
-    return out
+def greek_expansions_for(english_kw: str) -> List[str]:
+    return GREEK_SYNONYMS.get(english_kw.lower(), [])
 
 def title_matches(title: str, keywords: List[str], greek_mode: bool) -> bool:
     if not keywords:
         return True
     if greek_mode:
         hay = normalize_el(title or "")
-        tokens = [normalize_el(t) for t in expand_for_greek(keywords) if t.strip()]
+        tokens = [normalize_el(t) for t in keywords if t.strip()]
     else:
         hay = (title or "").lower()
         tokens = [t.lower() for t in keywords if t.strip()]
@@ -275,7 +240,7 @@ async def freelancer_search(keyword: str) -> List[Dict]:
     log.info("Freelancer '%s': %d jobs", keyword, len(cards))
     return cards
 
-# ───────────────────────── PeoplePerHour (deep) ─────────────────────────
+# ───────────────────────── PeoplePerHour ─────────────────────────
 _PPH_JOB_A = re.compile(r'href="(/job/\d+[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
 _PPH_DATA_ID = re.compile(r'data-job-id="(\d+)"[^>]*>.*?<a[^>]+href="(/job/\d+[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE | re.DOTALL)
 _PPH_MONEY = re.compile(r'([€£$])\s?(\d+(?:[.,]\d{1,2})?)', re.IGNORECASE)
@@ -363,18 +328,14 @@ async def pph_search(keyword: str) -> List[Dict]:
         context = html[start:end]
         add_pph_card(jid, href, title, context)
 
-    if cards:
-        # PPH είναι αγγλικό περιεχόμενο — απλό title match στο ίδιο keyword
-        cards = [c for c in cards if title_matches(c["title"], [q], greek_mode=False)]
-
     log.info("PPH '%s': %d jobs", keyword, len(cards))
     return cards
 
 # ───────────────────────── Kariera ─────────────────────────
 _KAR_A = re.compile(r'href="(/jobs/[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
 
-async def kariera_search(keyword: str, all_keywords: Optional[List[str]] = None) -> List[Dict]:
-    q = keyword.strip()
+async def kariera_search(keyword_el: str, greek_all_keywords: List[str]) -> List[Dict]:
+    q = keyword_el.strip()
     if not q:
         return []
     url = f"https://www.kariera.gr/jobs?keyword={quote_plus(q)}"
@@ -383,19 +344,18 @@ async def kariera_search(keyword: str, all_keywords: Optional[List[str]] = None)
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=HEADERS_HTML) as client:
             r = await client.get(url)
             if r.status_code != 200:
-                log.warning("Kariera fetch error for '%s': %s", keyword, r)
+                log.warning("Kariera fetch error for '%s': %s", keyword_el, r)
                 return []
             html = r.text
     except Exception as e:
-        log.warning("Kariera fetch error for '%s': %s", keyword, e)
+        log.warning("Kariera fetch error for '%s': %s", keyword_el, e)
         return []
 
     seen = set()
-    greek_keywords = all_keywords or [q]
     for m in _KAR_A.finditer(html):
         href = m.group(1)
         title = re.sub(r"\s+", " ", m.group(2)).strip()
-        if not title_matches(title, greek_keywords, greek_mode=True):
+        if not title_matches(title, greek_all_keywords, greek_mode=True):
             continue
         jid = re.sub(r"[^a-zA-Z0-9]+", "-", href).strip("-")
         if jid in seen:
@@ -415,14 +375,14 @@ async def kariera_search(keyword: str, all_keywords: Optional[List[str]] = None)
             "proposal_url": full,
             "original_url": full,
         })
-    log.info("Kariera '%s': %d jobs (post-filtered)", keyword, len(cards))
+    log.info("Kariera '%s': %d jobs (post-filtered)", keyword_el, len(cards))
     return cards[:MAX_PER_SOURCE]
 
-# ───────────────────────── JobFind (robust URL probing) ─────────────────────────
+# ───────────────────────── JobFind ─────────────────────────
 _JF_A = re.compile(r'href="(/job/[^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
 
-async def _jobfind_fetch_html(keyword: str) -> Optional[str]:
-    q = quote_plus(keyword.strip())
+async def _jobfind_fetch_html(keyword_el: str) -> Optional[str]:
+    q = quote_plus(keyword_el.strip())
     candidates = [
         f"https://www.jobfind.gr/ergasia?keyword={q}",
         f"https://www.jobfind.gr/ergasia?keywords={q}",
@@ -441,21 +401,20 @@ async def _jobfind_fetch_html(keyword: str) -> Optional[str]:
                 log.info("JobFind probe error %s → %s", url, e)
     return None
 
-async def jobfind_search(keyword: str, all_keywords: Optional[List[str]] = None) -> List[Dict]:
-    if not keyword.strip():
+async def jobfind_search(keyword_el: str, greek_all_keywords: List[str]) -> List[Dict]:
+    if not keyword_el.strip():
         return []
-    html = await _jobfind_fetch_html(keyword)
+    html = await _jobfind_fetch_html(keyword_el)
     if not html:
-        log.warning("JobFind fetch error for '%s': no working endpoint (404/redirects)", keyword)
+        log.warning("JobFind fetch error for '%s': no working endpoint (404/redirects)", keyword_el)
         return []
 
     cards: List[Dict] = []
     seen = set()
-    greek_keywords = all_keywords or [keyword]
     for m in _JF_A.finditer(html):
         href = m.group(1)
         title = re.sub(r"\s+", " ", m.group(2)).strip()
-        if not title_matches(title, greek_keywords, greek_mode=True):
+        if not title_matches(title, greek_all_keywords, greek_mode=True):
             continue
         jid = re.sub(r"[^a-zA-Z0-9]+", "-", href).strip("-")
         if jid in seen:
@@ -475,7 +434,7 @@ async def jobfind_search(keyword: str, all_keywords: Optional[List[str]] = None)
             "proposal_url": full,
             "original_url": full,
         })
-    log.info("JobFind '%s': %d jobs (post-filtered)", keyword, len(cards))
+    log.info("JobFind '%s': %d jobs (post-filtered)", keyword_el, len(cards))
     return cards[:MAX_PER_SOURCE]
 
 # ───────────────────────── Match & dedup ─────────────────────────
@@ -495,7 +454,7 @@ def job_matches(card: Dict, keywords: List[str]) -> bool:
 
     if is_gr:
         hay_norm = normalize_el(hay)
-        tokens = [normalize_el(k) for k in expand_for_greek(keywords) if k.strip()]
+        tokens = [normalize_el(k) for k in keywords if k.strip()]
         if not tokens:
             return True
         if JOB_MATCH_REQUIRE == "all":
@@ -547,60 +506,69 @@ async def process_user(db: SessionLocal, u: User) -> int:
     if not active or u.is_blocked:
         return 0
 
-    # 1) Start with user's saved keywords
     base_keywords = [k.keyword for k in (u.keywords or [])]
     if not base_keywords:
         return 0
 
-    # 2) NEW: expand EN→GR so that Greek boards are searched too
-    keywords = expand_en_to_gr(base_keywords)
-
     all_cards: List[Dict] = []
 
-    # Freelancer
-    for kw in keywords:
+    # 1) Αγγλικές πλατφόρμες → ψάχνουμε ΜΟΝΟ με αγγλικά και δείχνουμε αγγλικό matched
+    for kw_en in base_keywords:
         try:
-            for c in await freelancer_search(kw):
-                all_cards.append(job_card_with_match(c, kw))
+            for c in await freelancer_search(kw_en):
+                all_cards.append(job_card_with_match(c, kw_en))
         except Exception as e:
-            log.exception("Freelancer block error for kw='%s': %s", kw, e)
+            log.exception("Freelancer block error for kw='%s': %s", kw_en, e)
 
-    # PeoplePerHour
     if ENABLE_PPH:
-        for kw in keywords:
+        for kw_en in base_keywords:
             try:
-                for c in await pph_search(kw):
-                    all_cards.append(job_card_with_match(c, kw))
+                for c in await pph_search(kw_en):
+                    all_cards.append(job_card_with_match(c, kw_en))
             except Exception as e:
-                log.exception("PPH block error for kw='%s': %s", kw, e)
+                log.exception("PPH block error for kw='%s': %s", kw_en, e)
 
-    # Kariera (Greek pre-filter by all user keywords)
+    # 2) Ελληνικές πλατφόρμες → για κάθε αγγλικό, ψάχνουμε με ελληνικές ρίζες
     if ENABLE_KARIERA:
-        for kw in keywords:
-            try:
-                for c in await kariera_search(kw, all_keywords=keywords):
-                    all_cards.append(job_card_with_match(c, kw))
-            except Exception as e:
-                log.exception("Kariera block error for kw='%s': %s", kw, e)
+        for kw_en in base_keywords:
+            greek_keys = greek_expansions_for(kw_en)
+            for gkw in greek_keys:
+                try:
+                    for c in await kariera_search(gkw, greek_keys):
+                        all_cards.append(job_card_with_match(c, gkw))  # δείχνει ελληνικό matched
+                except Exception as e:
+                    log.exception("Kariera block error for gkw='%s': %s", gkw, e)
 
-    # JobFind (Greek pre-filter + robust probing)
     if ENABLE_JOBFIND:
-        for kw in keywords:
-            try:
-                for c in await jobfind_search(kw, all_keywords=keywords):
-                    all_cards.append(job_card_with_match(c, kw))
-            except Exception as e:
-                log.exception("JobFind block error for kw='%s': %s", kw, e)
+        for kw_en in base_keywords:
+            greek_keys = greek_expansions_for(kw_en)
+            for gkw in greek_keys:
+                try:
+                    for c in await jobfind_search(gkw, greek_keys):
+                        all_cards.append(job_card_with_match(c, gkw))  # ελληνικό matched
+                except Exception as e:
+                    log.exception("JobFind block error for gkw='%s': %s", gkw, e)
 
     # Filter & dedup
-    filtered: List[Dict] = [c for c in all_cards if job_matches(c, base_keywords)]
+    filtered: List[Dict] = []
+    for c in all_cards:
+        src = (c.get("source") or "").lower()
+        if src in {"kariera", "jobfind"}:
+            keys_for_match = greek_expansions_for(c["matched"][0]) if c.get("matched") else base_keywords
+            if not job_matches(c, keys_for_match,):
+                continue
+        else:
+            if not job_matches(c, base_keywords):
+                continue
+        filtered.append(c)
+
     filtered = dedup_cards(filtered)
 
     already = {s.job_id for s in (u.sent_jobs or [])}
     to_send = [c for c in filtered if c.get("id") not in already]
 
     sent = 0
-    for card in to_send[: max(1, MAX_PER_SOURCE * 4)]:  # soft global cap
+    for card in to_send[: max(1, MAX_PER_SOURCE * 4)]:
         try:
             await send_job(int(u.telegram_id), card, matched=card.get("matched"))
             db.add(JobSent(user_id=u.id, job_id=card["id"], created_at=now_utc()))
