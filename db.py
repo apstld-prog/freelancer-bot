@@ -95,7 +95,7 @@ class Job(Base):
 
     source = Column(String(64), nullable=False)              # freelancer, pph, kariera, etc.
     source_id = Column(String(128), nullable=True)           # remote id/hash (νέο)
-    external_id = Column(String(128), nullable=True)         # παλιό/legacy id αν υπήρχε
+    external_id = Column(String(128), nullable=True)         # legacy id
 
     title = Column(String(512), nullable=False)
     description = Column(Text, nullable=True)
@@ -155,6 +155,16 @@ def _pg_column_exists(conn, table: str, column: str) -> bool:
     ).fetchone()
     return bool(row)
 
+def _pg_col_type(conn, table: str, column: str) -> str | None:
+    row = conn.execute(
+        text(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name=:t AND column_name=:c"
+        ),
+        {"t": table, "c": column},
+    ).fetchone()
+    return row[0] if row else None
+
 def _safe_alter_user(conn):
     if conn.engine.dialect.name == "postgresql":
         def add(colsql: str): conn.execute(text(colsql))
@@ -191,13 +201,11 @@ def _safe_alter_job(conn):
     def add(colsql: str): conn.execute(text(colsql))
 
     if pg:
-        # Add missing columns
         if not _pg_column_exists(conn, "job", "source_id"):
             add('ALTER TABLE job ADD COLUMN source_id VARCHAR(128)')
         if not _pg_column_exists(conn, "job", "external_id"):
             add('ALTER TABLE job ADD COLUMN external_id VARCHAR(128)')
         else:
-            # Make external_id nullable if it was NOT NULL (legacy)
             conn.execute(text("ALTER TABLE job ALTER COLUMN external_id DROP NOT NULL"))
         if not _pg_column_exists(conn, "job", "proposal_url"):
             add('ALTER TABLE job ADD COLUMN proposal_url TEXT')
@@ -222,10 +230,10 @@ def _safe_alter_job(conn):
         if not _pg_column_exists(conn, "job", "updated_at"):
             add('ALTER TABLE job ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()')
 
-        # Backfill external_id from source_id (legacy compat)
+        # Backfill external_id from source_id
         conn.execute(text("UPDATE job SET external_id = source_id WHERE external_id IS NULL AND source_id IS NOT NULL"))
 
-        # Helpful unique index for (source, source_id)
+        # Unique index
         conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_sid ON job(source, source_id)'))
     else:
         stmts = [
@@ -246,7 +254,6 @@ def _safe_alter_job(conn):
         for s in stmts:
             try: conn.execute(text(s))
             except Exception: pass
-        # Backfill external_id
         try:
             conn.execute(text("UPDATE job SET external_id = source_id WHERE external_id IS NULL AND source_id IS NOT NULL"))
         except Exception:
@@ -256,6 +263,26 @@ def _safe_alter_job(conn):
         except Exception:
             pass
 
+def _safe_alter_link_tables(conn):
+    """Normalize types for job_sent.* and saved_job.* to INTEGER in Postgres."""
+    if conn.engine.dialect.name != "postgresql":
+        return
+
+    def ensure_integer(table: str, column: str):
+        if not _pg_column_exists(conn, table, column):
+            return
+        dt = _pg_col_type(conn, table, column)  # e.g. 'character varying', 'integer'
+        if dt and dt != "integer":
+            # Cast to integer if possible
+            conn.execute(text(f'ALTER TABLE {table} ALTER COLUMN {column} TYPE INTEGER USING {column}::integer'))
+
+    # job_sent normalization
+    ensure_integer("job_sent", "user_id")
+    ensure_integer("job_sent", "job_id")
+    # saved_job normalization
+    ensure_integer("saved_job", "user_id")
+    ensure_integer("saved_job", "job_id")
+
 def init_db():
     # 1) Create base tables by metadata
     Base.metadata.create_all(bind=engine)
@@ -263,6 +290,7 @@ def init_db():
     with engine.begin() as conn:
         _safe_alter_user(conn)
         _safe_alter_job(conn)
+        _safe_alter_link_tables(conn)
     log.info("DB schema ensured.")
 
 # -----------------------------------------------------------------------------
