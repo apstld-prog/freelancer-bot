@@ -165,23 +165,29 @@ def _pg_col_type(conn, table: str, column: str) -> str | None:
     ).fetchone()
     return row[0] if row else None
 
+def _safe_exec(conn, sql: str, desc: str):
+    try:
+        conn.execute(text(sql))
+        log.info("migrate ok: %s", desc)
+    except Exception as e:
+        log.debug("migrate skip: %s (%s)", desc, e.__class__.__name__)
+
 def _safe_alter_user(conn):
     if conn.engine.dialect.name == "postgresql":
-        def add(colsql: str): conn.execute(text(colsql))
         if not _pg_column_exists(conn, "user", "started_at"):
-            add('ALTER TABLE "user" ADD COLUMN started_at TIMESTAMPTZ')
+            _safe_exec(conn, 'ALTER TABLE "user" ADD COLUMN started_at TIMESTAMPTZ', "user.started_at")
         if not _pg_column_exists(conn, "user", "name"):
-            add('ALTER TABLE "user" ADD COLUMN name VARCHAR(128)')
+            _safe_exec(conn, 'ALTER TABLE "user" ADD COLUMN name VARCHAR(128)', "user.name")
         if not _pg_column_exists(conn, "user", "username"):
-            add('ALTER TABLE "user" ADD COLUMN username VARCHAR(64)')
+            _safe_exec(conn, 'ALTER TABLE "user" ADD COLUMN username VARCHAR(64)', "user.username")
         if not _pg_column_exists(conn, "user", "countries"):
-            add('ALTER TABLE "user" ADD COLUMN countries VARCHAR(256) DEFAULT \'ALL\'')
+            _safe_exec(conn, 'ALTER TABLE "user" ADD COLUMN countries VARCHAR(256) DEFAULT \'ALL\'', "user.countries")
         if not _pg_column_exists(conn, "user", "proposal_template"):
-            add('ALTER TABLE "user" ADD COLUMN proposal_template TEXT')
+            _safe_exec(conn, 'ALTER TABLE "user" ADD COLUMN proposal_template TEXT', "user.proposal_template")
         if not _pg_column_exists(conn, "user", "created_at"):
-            add('ALTER TABLE "user" ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()')
+            _safe_exec(conn, 'ALTER TABLE "user" ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()', "user.created_at")
         if not _pg_column_exists(conn, "user", "updated_at"):
-            add('ALTER TABLE "user" ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()')
+            _safe_exec(conn, 'ALTER TABLE "user" ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()', "user.updated_at")
     else:
         stmts = [
             'ALTER TABLE "user" ADD COLUMN started_at TIMESTAMP',
@@ -193,48 +199,47 @@ def _safe_alter_user(conn):
             'ALTER TABLE "user" ADD COLUMN updated_at TIMESTAMP DEFAULT (datetime(\'now\'))',
         ]
         for s in stmts:
-            try: conn.execute(text(s))
-            except Exception: pass
+            _safe_exec(conn, s, s)
 
 def _safe_alter_job(conn):
     pg = conn.engine.dialect.name == "postgresql"
-    def add(colsql: str): conn.execute(text(colsql))
 
     if pg:
         if not _pg_column_exists(conn, "job", "source_id"):
-            add('ALTER TABLE job ADD COLUMN source_id VARCHAR(128)')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN source_id VARCHAR(128)', "job.source_id")
         if not _pg_column_exists(conn, "job", "external_id"):
-            add('ALTER TABLE job ADD COLUMN external_id VARCHAR(128)')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN external_id VARCHAR(128)', "job.external_id")
         else:
-            conn.execute(text("ALTER TABLE job ALTER COLUMN external_id DROP NOT NULL"))
+            _safe_exec(conn, "ALTER TABLE job ALTER COLUMN external_id DROP NOT NULL", "job.external_id drop not null")
         if not _pg_column_exists(conn, "job", "proposal_url"):
-            add('ALTER TABLE job ADD COLUMN proposal_url TEXT')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN proposal_url TEXT', "job.proposal_url")
         if not _pg_column_exists(conn, "job", "original_url"):
-            add('ALTER TABLE job ADD COLUMN original_url TEXT')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN original_url TEXT', "job.original_url")
         if not _pg_column_exists(conn, "job", "budget_min"):
-            add('ALTER TABLE job ADD COLUMN budget_min DOUBLE PRECISION')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN budget_min DOUBLE PRECISION', "job.budget_min")
         if not _pg_column_exists(conn, "job", "budget_max"):
-            add('ALTER TABLE job ADD COLUMN budget_max DOUBLE PRECISION')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN budget_max DOUBLE PRECISION', "job.budget_max")
         if not _pg_column_exists(conn, "job", "budget_currency"):
-            add('ALTER TABLE job ADD COLUMN budget_currency VARCHAR(16)')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN budget_currency VARCHAR(16)', "job.budget_currency")
         if not _pg_column_exists(conn, "job", "job_type"):
-            add('ALTER TABLE job ADD COLUMN job_type VARCHAR(32)')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN job_type VARCHAR(32)', "job.job_type")
         if not _pg_column_exists(conn, "job", "bids_count"):
-            add('ALTER TABLE job ADD COLUMN bids_count INTEGER')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN bids_count INTEGER', "job.bids_count")
         if not _pg_column_exists(conn, "job", "matched_keyword"):
-            add('ALTER TABLE job ADD COLUMN matched_keyword VARCHAR(256)')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN matched_keyword VARCHAR(256)', "job.matched_keyword")
         if not _pg_column_exists(conn, "job", "posted_at"):
-            add('ALTER TABLE job ADD COLUMN posted_at TIMESTAMPTZ')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN posted_at TIMESTAMPTZ', "job.posted_at")
         if not _pg_column_exists(conn, "job", "created_at"):
-            add('ALTER TABLE job ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()', "job.created_at")
         if not _pg_column_exists(conn, "job", "updated_at"):
-            add('ALTER TABLE job ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()')
+            _safe_exec(conn, 'ALTER TABLE job ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()', "job.updated_at")
 
         # Backfill external_id from source_id
-        conn.execute(text("UPDATE job SET external_id = source_id WHERE external_id IS NULL AND source_id IS NOT NULL"))
+        _safe_exec(conn, "UPDATE job SET external_id = source_id WHERE external_id IS NULL AND source_id IS NOT NULL", "job.external_id backfill")
 
         # Unique index
-        conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_sid ON job(source, source_id)'))
+        _safe_exec(conn, 'CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_sid ON job(source, source_id)', "job uq(source,source_id)")
+
     else:
         stmts = [
             'ALTER TABLE job ADD COLUMN source_id VARCHAR(128)',
@@ -252,34 +257,30 @@ def _safe_alter_job(conn):
             'ALTER TABLE job ADD COLUMN updated_at TIMESTAMP DEFAULT (datetime(\'now\'))',
         ]
         for s in stmts:
-            try: conn.execute(text(s))
-            except Exception: pass
-        try:
-            conn.execute(text("UPDATE job SET external_id = source_id WHERE external_id IS NULL AND source_id IS NOT NULL"))
-        except Exception:
-            pass
-        try:
-            conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_sid ON job(source, source_id)'))
-        except Exception:
-            pass
+            _safe_exec(conn, s, s)
+        _safe_exec(conn, "UPDATE job SET external_id = source_id WHERE external_id IS NULL AND source_id IS NOT NULL", "job.external_id backfill")
+        _safe_exec(conn, 'CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_sid ON job(source, source_id)', "job uq(source,source_id)")
 
 def _safe_alter_link_tables(conn):
-    """Normalize types for job_sent.* and saved_job.* to INTEGER in Postgres."""
+    """Normalize types for job_sent.* and saved_job.* to INTEGER in Postgres, with safe casting."""
     if conn.engine.dialect.name != "postgresql":
         return
 
     def ensure_integer(table: str, column: str):
         if not _pg_column_exists(conn, table, column):
             return
-        dt = _pg_col_type(conn, table, column)  # e.g. 'character varying', 'integer'
+        dt = _pg_col_type(conn, table, column)  # e.g. 'character varying', 'text', 'integer'
         if dt and dt != "integer":
-            # Cast to integer if possible
-            conn.execute(text(f'ALTER TABLE {table} ALTER COLUMN {column} TYPE INTEGER USING {column}::integer'))
+            # Καθαρισμός μη-αριθμητικών χαρακτήρων πριν το cast
+            sql = (
+                f"ALTER TABLE {table} "
+                f"ALTER COLUMN {column} TYPE INTEGER "
+                f"USING NULLIF(regexp_replace({column}, '[^0-9]', '', 'g'), '')::integer"
+            )
+            _safe_exec(conn, sql, f"{table}.{column} -> INTEGER")
 
-    # job_sent normalization
     ensure_integer("job_sent", "user_id")
     ensure_integer("job_sent", "job_id")
-    # saved_job normalization
     ensure_integer("saved_job", "user_id")
     ensure_integer("saved_job", "job_id")
 
