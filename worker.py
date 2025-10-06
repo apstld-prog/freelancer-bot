@@ -56,7 +56,7 @@ def aff_wrap(source: str, url: str) -> str:
     return url
 
 # ---------------------------------------------------------------------------
-# Fetchers (συντομευμένα placeholders – κράτα τα δικά σου αν τα έχεις ήδη)
+# Fetchers (simplified)
 # ---------------------------------------------------------------------------
 async def freelancer_search(q: str) -> List[Dict[str, Any]]:
     params = {
@@ -100,13 +100,13 @@ async def freelancer_search(q: str) -> List[Dict[str, Any]]:
     return jobs
 
 async def pph_search(q: str) -> List[Dict[str, Any]]:
-    # Απλό HTML listing parser-less: θα δώσει λίγη κάλυψη· οι πραγματικές αγγελίες θέλουν parsing
-    url = f"https://www.peopleperhour.com/freelance-jobs?q={httpx.utils.quote(q) if hasattr(httpx, 'utils') else httpx.QueryParams({'q': q})['q']}"
+    qp = httpx.QueryParams({"q": q})
+    url = f"https://www.peopleperhour.com/freelance-jobs?{qp}"
     r = await _http.get(url, follow_redirects=True)
     if r.status_code != 200:
         log.info("PPH '%s': %s", q, r.status_code)
         return []
-    # Αν δεν κάνεις parsing, γύρνα άδειο για να μη σπαμάρει
+    # Δεν κάνουμε parse για να αποφύγουμε άσχετες ειδοποιήσεις προς το παρόν
     return []
 
 async def kariera_search(q: str) -> List[Dict[str, Any]]:
@@ -114,7 +114,7 @@ async def kariera_search(q: str) -> List[Dict[str, Any]]:
     r = await _http.get(url, follow_redirects=True)
     if r.status_code != 200:
         return []
-    # Χωρίς parsing → επέστρεψε κενό για να μην έρχονται άσχετα
+    # Χωρίς parser -> επιστροφή κενών έως να φτιαχτεί στοχευμένο parsing
     return []
 
 # ---------------------------------------------------------------------------
@@ -127,9 +127,7 @@ def matches(job: Dict[str, Any], kws: List[str]) -> Optional[str]:
 
     if JOB_MATCH_REQUIRE == "all":
         ok = all(k in text for k in kws)
-        if ok:
-            return ",".join(kws)
-        return None
+        return ",".join(kws) if ok else None
     else:
         for k in kws:
             if k in text:
@@ -162,9 +160,9 @@ async def process_user(db_session, u: User) -> int:
             all_jobs += await pph_search(kw)
         if ENABLE_KARIERA:
             all_jobs += await kariera_search(kw)
-        # ENABLE_JOBFIND αφήνεται off μέχρι να σταθεροποιηθεί endpoint
+        # ENABLE_JOBFIND off μέχρι να σταθεροποιηθεί endpoint
 
-    # Αποθήκευση/αφαίρεση διπλών με βάση (source, source_id)
+    # de-dup by (source, source_id)
     seen = set()
     unique_jobs = []
     for j in all_jobs:
@@ -174,30 +172,41 @@ async def process_user(db_session, u: User) -> int:
         seen.add(key)
         unique_jobs.append(j)
 
-    # Match per user
     for j in unique_jobs:
         mk = matches(j, kws)
         if not mk:
             continue
 
-        # upsert στην Job
+        # upsert Job
         job_row = db_session.query(Job).filter(
             Job.source == j["source"], Job.source_id == j.get("source_id")
         ).one_or_none()
         if not job_row:
             job_row = Job(
-                source=j["source"], source_id=j.get("source_id"),
-                title=j["title"], description=j.get("description"),
-                url=j["url"], proposal_url=None, original_url=j["url"],
-                budget_min=j.get("budget_min"), budget_max=j.get("budget_max"),
-                budget_currency=j.get("budget_currency"), job_type=j.get("job_type"),
-                bids_count=j.get("bids_count"), matched_keyword=mk, posted_at=now_utc()
+                source=j["source"],
+                source_id=j.get("source_id"),
+                external_id=j.get("source_id"),  # <— συμβατότητα με legacy NOT NULL
+                title=j["title"],
+                description=j.get("description"),
+                url=j["url"],
+                proposal_url=None,
+                original_url=j["url"],
+                budget_min=j.get("budget_min"),
+                budget_max=j.get("budget_max"),
+                budget_currency=j.get("budget_currency"),
+                job_type=j.get("job_type"),
+                bids_count=j.get("bids_count"),
+                matched_keyword=mk,
+                posted_at=now_utc(),
             )
             db_session.add(job_row)
             db_session.flush()
         else:
             job_row.matched_keyword = mk
             job_row.updated_at = now_utc()
+            # ensure external_id backfilled
+            if not job_row.external_id and job_row.source_id:
+                job_row.external_id = job_row.source_id
             db_session.flush()
 
         # anti-duplication per user
@@ -213,7 +222,7 @@ async def process_user(db_session, u: User) -> int:
         job_row.proposal_url = prop
         job_row.original_url = orig
 
-        # build message
+        # message
         budget_line = ""
         bmin = j.get("budget_min"); bmax = j.get("budget_max"); cur = j.get("budget_currency") or ""
         if bmin or bmax:

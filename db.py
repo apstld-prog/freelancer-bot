@@ -94,7 +94,8 @@ class Job(Base):
     id = Column(Integer, primary_key=True)
 
     source = Column(String(64), nullable=False)              # freelancer, pph, kariera, etc.
-    source_id = Column(String(128), nullable=True)           # remote id/hash
+    source_id = Column(String(128), nullable=True)           # remote id/hash (νέο)
+    external_id = Column(String(128), nullable=True)         # παλιό/legacy id αν υπήρχε
 
     title = Column(String(512), nullable=False)
     description = Column(Text, nullable=True)
@@ -155,27 +156,23 @@ def _pg_column_exists(conn, table: str, column: str) -> bool:
     return bool(row)
 
 def _safe_alter_user(conn):
-    # User columns that might be missing on older schemas
-    def add_col(col_sql: str):
-        conn.execute(text(col_sql))
-
     if conn.engine.dialect.name == "postgresql":
+        def add(colsql: str): conn.execute(text(colsql))
         if not _pg_column_exists(conn, "user", "started_at"):
-            add_col('ALTER TABLE "user" ADD COLUMN started_at TIMESTAMPTZ')
+            add('ALTER TABLE "user" ADD COLUMN started_at TIMESTAMPTZ')
         if not _pg_column_exists(conn, "user", "name"):
-            add_col('ALTER TABLE "user" ADD COLUMN name VARCHAR(128)')
+            add('ALTER TABLE "user" ADD COLUMN name VARCHAR(128)')
         if not _pg_column_exists(conn, "user", "username"):
-            add_col('ALTER TABLE "user" ADD COLUMN username VARCHAR(64)')
+            add('ALTER TABLE "user" ADD COLUMN username VARCHAR(64)')
         if not _pg_column_exists(conn, "user", "countries"):
-            add_col('ALTER TABLE "user" ADD COLUMN countries VARCHAR(256) DEFAULT \'ALL\'')
+            add('ALTER TABLE "user" ADD COLUMN countries VARCHAR(256) DEFAULT \'ALL\'')
         if not _pg_column_exists(conn, "user", "proposal_template"):
-            add_col('ALTER TABLE "user" ADD COLUMN proposal_template TEXT')
+            add('ALTER TABLE "user" ADD COLUMN proposal_template TEXT')
         if not _pg_column_exists(conn, "user", "created_at"):
-            add_col('ALTER TABLE "user" ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()')
+            add('ALTER TABLE "user" ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()')
         if not _pg_column_exists(conn, "user", "updated_at"):
-            add_col('ALTER TABLE "user" ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()')
+            add('ALTER TABLE "user" ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()')
     else:
-        # SQLite - tolerant (add if not exists not fully supported for all cases)
         stmts = [
             'ALTER TABLE "user" ADD COLUMN started_at TIMESTAMP',
             'ALTER TABLE "user" ADD COLUMN name VARCHAR(128)',
@@ -186,49 +183,54 @@ def _safe_alter_user(conn):
             'ALTER TABLE "user" ADD COLUMN updated_at TIMESTAMP DEFAULT (datetime(\'now\'))',
         ]
         for s in stmts:
-            try:
-                conn.execute(text(s))
-            except Exception:
-                pass
+            try: conn.execute(text(s))
+            except Exception: pass
 
 def _safe_alter_job(conn):
-    # Job columns that might be missing
-    def add_col(col_sql: str):
-        conn.execute(text(col_sql))
-
     pg = conn.engine.dialect.name == "postgresql"
-    if pg:
-        if not _pg_column_exists(conn, "job", "source_id"):
-            add_col('ALTER TABLE job ADD COLUMN source_id VARCHAR(128)')
-        if not _pg_column_exists(conn, "job", "proposal_url"):
-            add_col('ALTER TABLE job ADD COLUMN proposal_url TEXT')
-        if not _pg_column_exists(conn, "job", "original_url"):
-            add_col('ALTER TABLE job ADD COLUMN original_url TEXT')
-        if not _pg_column_exists(conn, "job", "budget_min"):
-            add_col('ALTER TABLE job ADD COLUMN budget_min DOUBLE PRECISION')
-        if not _pg_column_exists(conn, "job", "budget_max"):
-            add_col('ALTER TABLE job ADD COLUMN budget_max DOUBLE PRECISION')
-        if not _pg_column_exists(conn, "job", "budget_currency"):
-            add_col('ALTER TABLE job ADD COLUMN budget_currency VARCHAR(16)')
-        if not _pg_column_exists(conn, "job", "job_type"):
-            add_col('ALTER TABLE job ADD COLUMN job_type VARCHAR(32)')
-        if not _pg_column_exists(conn, "job", "bids_count"):
-            add_col('ALTER TABLE job ADD COLUMN bids_count INTEGER')
-        if not _pg_column_exists(conn, "job", "matched_keyword"):
-            add_col('ALTER TABLE job ADD COLUMN matched_keyword VARCHAR(256)')
-        if not _pg_column_exists(conn, "job", "posted_at"):
-            add_col('ALTER TABLE job ADD COLUMN posted_at TIMESTAMPTZ')
-        if not _pg_column_exists(conn, "job", "created_at"):
-            add_col('ALTER TABLE job ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()')
-        if not _pg_column_exists(conn, "job", "updated_at"):
-            add_col('ALTER TABLE job ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()')
+    def add(colsql: str): conn.execute(text(colsql))
 
-        # Unique index for (source, source_id)
+    if pg:
+        # Add missing columns
+        if not _pg_column_exists(conn, "job", "source_id"):
+            add('ALTER TABLE job ADD COLUMN source_id VARCHAR(128)')
+        if not _pg_column_exists(conn, "job", "external_id"):
+            add('ALTER TABLE job ADD COLUMN external_id VARCHAR(128)')
+        else:
+            # Make external_id nullable if it was NOT NULL (legacy)
+            conn.execute(text("ALTER TABLE job ALTER COLUMN external_id DROP NOT NULL"))
+        if not _pg_column_exists(conn, "job", "proposal_url"):
+            add('ALTER TABLE job ADD COLUMN proposal_url TEXT')
+        if not _pg_column_exists(conn, "job", "original_url"):
+            add('ALTER TABLE job ADD COLUMN original_url TEXT')
+        if not _pg_column_exists(conn, "job", "budget_min"):
+            add('ALTER TABLE job ADD COLUMN budget_min DOUBLE PRECISION')
+        if not _pg_column_exists(conn, "job", "budget_max"):
+            add('ALTER TABLE job ADD COLUMN budget_max DOUBLE PRECISION')
+        if not _pg_column_exists(conn, "job", "budget_currency"):
+            add('ALTER TABLE job ADD COLUMN budget_currency VARCHAR(16)')
+        if not _pg_column_exists(conn, "job", "job_type"):
+            add('ALTER TABLE job ADD COLUMN job_type VARCHAR(32)')
+        if not _pg_column_exists(conn, "job", "bids_count"):
+            add('ALTER TABLE job ADD COLUMN bids_count INTEGER')
+        if not _pg_column_exists(conn, "job", "matched_keyword"):
+            add('ALTER TABLE job ADD COLUMN matched_keyword VARCHAR(256)')
+        if not _pg_column_exists(conn, "job", "posted_at"):
+            add('ALTER TABLE job ADD COLUMN posted_at TIMESTAMPTZ')
+        if not _pg_column_exists(conn, "job", "created_at"):
+            add('ALTER TABLE job ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()')
+        if not _pg_column_exists(conn, "job", "updated_at"):
+            add('ALTER TABLE job ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()')
+
+        # Backfill external_id from source_id (legacy compat)
+        conn.execute(text("UPDATE job SET external_id = source_id WHERE external_id IS NULL AND source_id IS NOT NULL"))
+
+        # Helpful unique index for (source, source_id)
         conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_sid ON job(source, source_id)'))
     else:
-        # SQLite fallbacks
         stmts = [
             'ALTER TABLE job ADD COLUMN source_id VARCHAR(128)',
+            'ALTER TABLE job ADD COLUMN external_id VARCHAR(128)',
             'ALTER TABLE job ADD COLUMN proposal_url TEXT',
             'ALTER TABLE job ADD COLUMN original_url TEXT',
             'ALTER TABLE job ADD COLUMN budget_min FLOAT',
@@ -242,10 +244,13 @@ def _safe_alter_job(conn):
             'ALTER TABLE job ADD COLUMN updated_at TIMESTAMP DEFAULT (datetime(\'now\'))',
         ]
         for s in stmts:
-            try:
-                conn.execute(text(s))
-            except Exception:
-                pass
+            try: conn.execute(text(s))
+            except Exception: pass
+        # Backfill external_id
+        try:
+            conn.execute(text("UPDATE job SET external_id = source_id WHERE external_id IS NULL AND source_id IS NOT NULL"))
+        except Exception:
+            pass
         try:
             conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_sid ON job(source, source_id)'))
         except Exception:
