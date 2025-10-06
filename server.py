@@ -1,60 +1,63 @@
+# server.py
+from __future__ import annotations
 import os
 import logging
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import PlainTextResponse
-from bot import build_application  # δεν αλλάζεις τίποτα άλλο στον bot
 from telegram import Update
+from telegram.ext import Application
+from bot import build_application
+from admin_feedsstatus import register_feedsstatus
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("server")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
+PRIMARY_URL = (
+    os.getenv("PRIMARY_URL")
+    or os.getenv("RENDER_EXTERNAL_URL")
+    or os.getenv("PUBLIC_URL")
+)
 
 app = FastAPI()
-tg_app = build_application()  # Application(...)
+tg_app: Application = build_application()
+
+# 👉 Προσθέτει τη νέα admin εντολή
+register_feedsstatus(tg_app)
 
 @app.on_event("startup")
-async def startup() -> None:
-    # Πολύ ΣΗΜΑΝΤΙΚΟ για webhook mode
+async def _startup():
     await tg_app.initialize()
     await tg_app.start()
-
-    # Δηλώνουμε ρητά allowed_updates ώστε να έρχονται και /start (message)
-    url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL")
-    if not url:
-        url = os.getenv("PRIMARY_URL") or os.getenv("RAILWAY_PUBLIC_DOMAIN") or ""
-    if not url:
-        log.warning("No external URL env set; using Render SERVICE URL if available.")
-    webhook_url = f"{url}/webhook/{WEBHOOK_SECRET}".replace("//webhook", "/webhook")
-
-    await tg_app.bot.delete_webhook(drop_pending_updates=True)
-    await tg_app.bot.set_webhook(
-        url=webhook_url,
-        secret_token=WEBHOOK_SECRET,
-        allowed_updates=[
-            "message",
-            "edited_message",
-            "callback_query",
-            "chat_member",
-            "my_chat_member"
-        ],
-    )
-    log.info("Webhook set to %s", webhook_url)
+    if PRIMARY_URL and BOT_TOKEN:
+        wh_url = f"{PRIMARY_URL.rstrip('/')}/webhook/{WEBHOOK_SECRET}"
+        try:
+            await tg_app.bot.delete_webhook()
+            await tg_app.bot.set_webhook(url=wh_url, allowed_updates=Update.ALL_TYPES)
+            log.info(f"Webhook set to {wh_url}")
+        except Exception as e:
+            log.warning(f"Failed to set webhook: {e}")
 
 @app.on_event("shutdown")
-async def shutdown() -> None:
-    await tg_app.stop()
-    await tg_app.shutdown()
+async def _shutdown():
+    try:
+        await tg_app.stop()
+        await tg_app.shutdown()
+    except Exception as e:
+        log.warning(f"Shutdown issue: {e}")
 
-@app.get("/", response_class=PlainTextResponse)
+@app.get("/")
 async def root():
-    return "OK"
+    return {"ok": True, "service": "freelancer-bot", "webhook": bool(PRIMARY_URL)}
 
 @app.post(f"/webhook/{WEBHOOK_SECRET}")
-async def telegram_webhook(request: Request):
-    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="invalid secret")
-    data = await request.json()
+async def webhook(request: Request):
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=500, detail="BOT_TOKEN not configured")
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON")
     update = Update.de_json(data, tg_app.bot)
     await tg_app.process_update(update)
-    return PlainTextResponse("OK")
+    return {"ok": True}
