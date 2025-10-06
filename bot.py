@@ -212,8 +212,7 @@ def parse_keywords_arg(text: str) -> List[str]:
     return out[:50]
 
 async def ensure_user(ctx: ContextTypes.DEFAULT_TYPE, tg_id: str, name: str, username: str) -> User:
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(tg_id)).one_or_none()
         if not u:
             u = User(
@@ -233,8 +232,6 @@ async def ensure_user(ctx: ContextTypes.DEFAULT_TYPE, tg_id: str, name: str, use
             if changed:
                 db.commit()
         return u
-    finally:
-        db.close()
 
 def affiliate_wrap(source: str, url: str) -> Tuple[str, str]:
     # Keep both Proposal/Original affiliate-wrapped when possible
@@ -264,12 +261,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_chat.send_message(text, parse_mode="HTML")
 
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
         await update.effective_chat.send_message(settings_text(u), parse_mode="HTML")
-    finally:
-        db.close()
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -286,8 +280,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message("Usage: /addkeyword <kw1, kw2, ...>")
         return
     kws = parse_keywords_arg(" ".join(context.args))
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
         added = 0
         for k in kws:
@@ -298,16 +291,13 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = db.query(User).filter(User.id == u.id).one()
         lst = ", ".join(sorted([k.keyword for k in u.keywords])) or "(none)"
         await update.effective_chat.send_message(f"Added {added} keywords.\nYour keywords: {esc(lst)}", parse_mode="HTML")
-    finally:
-        db.close()
 
 async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.effective_chat.send_message("Usage: /delkeyword <kw>")
         return
     kw = " ".join(context.args).strip().lower()
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
         row = db.query(Keyword).filter(Keyword.user_id == u.id, Keyword.keyword == kw).one_or_none()
         if row:
@@ -315,49 +305,35 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_chat.send_message(f"Removed keyword: {esc(kw)}", parse_mode="HTML")
         else:
             await update.effective_chat.send_message("Not found.")
-    finally:
-        db.close()
 
 async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
         for r in list(u.keywords):
             db.delete(r)
         db.commit()
         await update.effective_chat.send_message("All keywords cleared.")
-    finally:
-        db.close()
 
 async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
         lst = ", ".join(sorted([k.keyword for k in u.keywords])) or "(none)"
         await update.effective_chat.send_message(f"Your keywords: {esc(lst)}", parse_mode="HTML")
-    finally:
-        db.close()
 
 async def setcountry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = " ".join(context.args) if context.args else "ALL"
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
         u.countries = val or "ALL"; db.commit()
         await update.effective_chat.send_message(f"Countries set to: {esc(u.countries)}", parse_mode="HTML")
-    finally:
-        db.close()
 
 async def setproposal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.effective_message.text.partition(" ")[2]
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
         u.proposal_template = text.strip() if text else None
         db.commit()
         await update.effective_chat.send_message("Proposal template saved.")
-    finally:
-        db.close()
 
 async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cc = (context.args[0].upper() if context.args else "ALL")
@@ -387,8 +363,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
-    db = get_session()
-    try:
+    with get_session() as db:
         users = db.query(User).order_by(User.created_at.desc()).limit(200).all()
         lines = []
         for u in users:
@@ -396,8 +371,6 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• <code>{u.telegram_id}</code> {esc(u.name or '')} @{esc(u.username or '')}  active={'yes' if u.is_active() else 'no'}"
             )
         await update.effective_chat.send_message("👥 <b>Users</b>\n" + "\n".join(lines), parse_mode="HTML")
-    finally:
-        db.close()
 
 async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
@@ -406,8 +379,7 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     tg_id = context.args[0]
     days = int(context.args[1])
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(tg_id)).one_or_none()
         if not u:
             await update.effective_chat.send_message("User not found.")
@@ -418,40 +390,32 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message(
             f"Granted until {u.access_until.isoformat(sep=' ', timespec='seconds')} UTC"
         )
-    finally:
-        db.close()
 
 async def block_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
     if not context.args:
         await update.effective_chat.send_message("Usage: /block <telegram_id>")
         return
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(context.args[0])).one_or_none()
         if not u:
             await update.effective_chat.send_message("User not found.")
             return
         u.is_blocked = True; db.commit()
         await update.effective_chat.send_message("Blocked.")
-    finally:
-        db.close()
 
 async def unblock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
     if not context.args:
         await update.effective_chat.send_message("Usage: /unblock <telegram_id>")
         return
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(context.args[0])).one_or_none()
         if not u:
             await update.effective_chat.send_message("User not found.")
             return
         u.is_blocked = False; db.commit()
         await update.effective_chat.send_message("Unblocked.")
-    finally:
-        db.close()
 
 async def feedsstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
@@ -470,19 +434,16 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         await update.effective_chat.send_message("Usage: /broadcast <text>")
         return
-    db = get_session()
-    try:
+    with get_session() as db:
         users = db.query(User).all()
-        sent = 0
-        for u in users:
-            try:
-                await context.bot.send_message(chat_id=int(u.telegram_id), text=msg)
-                sent += 1
-            except Exception:
-                pass
-        await update.effective_chat.send_message(f"Broadcast sent to {sent} users.")
-    finally:
-        db.close()
+    sent = 0
+    for u in users:
+        try:
+            await context.bot.send_message(chat_id=int(u.telegram_id), text=msg)
+            sent += 1
+        except Exception:
+            pass
+    await update.effective_chat.send_message(f"Broadcast sent to {sent} users.")
 
 # ----------------------------------------------------------------------------
 # SMTP mail (optional)
@@ -520,12 +481,9 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "mm:settings":
-        db = get_session()
-        try:
+        with get_session() as db:
             u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
             await q.message.reply_text(settings_text(u), parse_mode="HTML")
-        finally:
-            db.close()
         return
 
     if data == "mm:help":
@@ -539,13 +497,10 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "mm:contact":
-        db = get_session()
-        try:
+        with get_session() as db:
             u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
             th = ContactThread(user_id=u.id, is_open=True)
             db.add(th); db.commit()
-        finally:
-            db.close()
         await q.message.reply_text("✍️ Please type your message for the admin. I'll forward it right away.")
         return
 
@@ -567,8 +522,7 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("saved:del:"):
         job_key = data.split(":")[2]
-        db = get_session()
-        try:
+        with get_session() as db:
             u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
             # try int, else fallback to string (DB type differences safe-guard)
             try:
@@ -579,15 +533,12 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if row:
                 db.delete(row); db.commit()
                 await q.message.reply_text("Deleted from saved.")
-        finally:
-            db.close()
         return
 
     # Keep/Delete on job cards (from worker)
     if data.startswith("keep:"):
         job_key = data.split(":", 1)[1]
-        db = get_session()
-        try:
+        with get_session() as db:
             u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
             # persist saved
             try:
@@ -602,8 +553,6 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.message.reply_text("⭐ Saved.")
             else:
                 await q.message.reply_text("Not found.")
-        finally:
-            db.close()
         return
 
     if data.startswith("del:"):
@@ -636,12 +585,12 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 async def show_saved_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
-    db = get_session()
-    try:
+    with get_session() as db:
         u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one()
-        rows = db.query(SavedJob).filter(SavedJob.user_id == u.id) \
-                                 .order_by(SavedJob.created_at.desc()) \
-                                 .limit(20).all()
+        rows = (db.query(SavedJob)
+                  .filter(SavedJob.user_id == u.id)
+                  .order_by(SavedJob.created_at.desc())
+                  .limit(20).all())
         if not rows:
             await update.effective_chat.send_message("No saved jobs yet.")
             return
@@ -656,12 +605,9 @@ async def show_saved_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
             await update.effective_chat.send_message(
                 f"• {esc(job.source)} — {esc(job.title)}", reply_markup=kb, parse_mode="HTML"
             )
-    finally:
-        db.close()
 
 async def show_job_card(update: Update, context: ContextTypes.DEFAULT_TYPE, job_key):
-    db = get_session()
-    try:
+    with get_session() as db:
         try:
             jid = int(job_key)
             job = db.query(Job).filter(Job.id == jid).one()
@@ -689,8 +635,6 @@ async def show_job_card(update: Update, context: ContextTypes.DEFAULT_TYPE, job_
             f"<b>{esc(job.title)}</b>\nSource: {esc(job.source)}{btxt}\n\n{esc(desc_short)}",
             parse_mode="HTML", reply_markup=kb
         )
-    finally:
-        db.close()
 
 # ----------------------------------------------------------------------------
 # Text Router: contact flow + admin reply mode
@@ -713,8 +657,7 @@ async def text_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # Otherwise, treat as user contact message
-    db = get_session()
-    try:
+    with get_session() as db:
         u = await ensure_user(context, str(update.effective_user.id), update.effective_user.full_name, update.effective_user.username)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("↩️ Reply", callback_data=f"admreply:{u.telegram_id}"),
@@ -727,13 +670,11 @@ async def text_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"• Username: @{esc(u.username or '(none)')}\n\n"
             f"{esc(update.effective_message.text)}"
         )
-        if ADMIN_ID:
-            await context.bot.send_message(chat_id=int(ADMIN_ID), text=txt, parse_mode="HTML", reply_markup=kb)
-        await update.effective_chat.send_message("✅ Sent to the admin. You’ll receive a reply here.")
-        # email copy to admin mailbox
-        send_mail_copy(subject=f"Message from user {u.telegram_id}", body=update.effective_message.text)
-    finally:
-        db.close()
+    if ADMIN_ID:
+        await context.bot.send_message(chat_id=int(ADMIN_ID), text=txt, parse_mode="HTML", reply_markup=kb)
+    await update.effective_chat.send_message("✅ Sent to the admin. You’ll receive a reply here.")
+    # email copy to admin mailbox
+    send_mail_copy(subject=f"Message from user {u.telegram_id}", body=update.effective_message.text)
 
 # ----------------------------------------------------------------------------
 # Entrypoint for local run
