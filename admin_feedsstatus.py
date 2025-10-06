@@ -17,34 +17,41 @@ def _is_admin(tg_user_id: Optional[int]) -> bool:
     except Exception:
         return False
 
-async def _feedsstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_admin(update.effective_user.id if update.effective_user else None):
-        return
-
+def _format_stats() -> str:
     s: Dict[str, Any] = read_stats()
     feeds: Dict[str, Any] = s.get("feeds", {})
     if not feeds:
-        await update.effective_chat.send_message(
-            "No feed snapshot yet. Worker may be starting up."
-        )
-        return
+        # Fallback μήνυμα αν δεν έχει γραφτεί ακόμα snapshot
+        lines = [
+            "🩺 *Feeds health*",
+            "_No snapshot yet — worker may be starting up._",
+        ]
+        return "\n".join(lines)
 
     lines = []
     lines.append("🩺 *Feeds health (last cycle)*")
     cs = s.get("cycle_seconds")
-    if cs:
-        lines.append(f"_cycle duration_: `{cs}s`")
+    sent = s.get("sent_this_cycle", 0)
+    meta = []
+    if cs:   meta.append(f"⏱ `{cs}s`")
+    meta.append(f"📨 sent: `{sent}`")
+    lines.append(" ".join(meta))
     lines.append("")
 
     for name, data in sorted(feeds.items()):
         cnt = data.get("count") or 0
         err = data.get("error")
         if err:
-            lines.append(f"• `{name}` → {cnt} ⚠️ `{err}`")
+            lines.append(f"• `{name}` → {cnt}  ⚠️ `{err}`")
         else:
-            lines.append(f"• `{name}` → {cnt} ✅")
+            lines.append(f"• `{name}` → {cnt}  ✅")
 
-    await update.effective_chat.send_message("\n".join(lines), parse_mode="Markdown")
+    return "\n".join(lines)
+
+async def _feedsstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    await update.effective_chat.send_message(_format_stats(), parse_mode="Markdown")
 
 def register_feedsstatus(app: Application) -> None:
     app.add_handler(CommandHandler("feedsstatus", _feedsstatus_cmd))
