@@ -1,12 +1,13 @@
 # bot.py
 # -----------------------------------------
 # Telegram bot for Freelancer Alerts
-# - Sync SQLAlchemy sessions (SessionLocal), no async get_session
+# - Sync SQLAlchemy sessions (SessionLocal)
 # - Preserves previous menu layout (Keywords | Saved Jobs | Settings | Help | Contact)
 # - 10-day trial on /start
 # - Admin-only commands appear only to ADMIN_TG_ID in /help
 # - /feedsstatus reads stats from feeds_stats.json if present
 # - Contact routes user messages to admin with Reply / Decline
+# - Accepts both /start command and plain-text "Start"
 # -----------------------------------------
 
 import os
@@ -65,7 +66,6 @@ def is_admin(user_id: str | int) -> bool:
         return False
 
 def safe_markdown(text: str) -> str:
-    # minimal escaping for MarkdownV2 / Markdown
     if not text:
         return ""
     return (
@@ -77,7 +77,6 @@ def safe_markdown(text: str) -> str:
 
 # --------- UI Layout ----------
 def main_menu_kb() -> ReplyKeyboardMarkup:
-    # One central panel, two columns, like your earlier layout
     rows = [
         [KeyboardButton("Keywords"), KeyboardButton("Saved Jobs")],
         [KeyboardButton("Settings"), KeyboardButton("Help")],
@@ -125,6 +124,7 @@ def help_text(is_admin_view: bool) -> str:
         "",
         "Commands:",
         "• /start – show the main menu and (if new) start a 10-day trial.",
+        "• /menu – show the main menu.",
         "• /help – show this help.",
         "• /selftest – send a sample message to verify delivery.",
     ]
@@ -144,7 +144,6 @@ def saved_jobs_message(user_id: int | str) -> tuple[str, InlineKeyboardMarkup | 
         u = db.query(User).filter(User.telegram_id == str(user_id)).one_or_none()
         if not u:
             return "No saved jobs.", None
-        # fetch recent saved jobs (last 10)
         sj = (
             db.query(SavedJob)
               .filter(SavedJob.user_id == u.id)
@@ -155,7 +154,6 @@ def saved_jobs_message(user_id: int | str) -> tuple[str, InlineKeyboardMarkup | 
         if not sj:
             return "No saved jobs yet.", None
 
-        # Build one text block; for full-window feel, send as one message
         parts = ["*Saved Jobs*"]
         for r in sj:
             j = db.query(Job).filter(Job.id == r.job_id).one_or_none()
@@ -176,7 +174,6 @@ def saved_jobs_message(user_id: int | str) -> tuple[str, InlineKeyboardMarkup | 
                 f"[Proposal]({j.proposal_url or j.url})",
             ]
         text = "\n".join(parts)
-        # simple inline kb: back to menu
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("Back to Menu", callback_data="nav:menu")]
         ])
@@ -239,7 +236,6 @@ async def admin_sends_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --------- Commands ----------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u_tg = update.effective_user
-    # ensure user in DB + trial
     db = db_open()
     try:
         u = db.query(User).filter(User.telegram_id == str(u_tg.id)).one_or_none()
@@ -257,7 +253,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.commit()
             db.refresh(u)
         else:
-            # Fill started_at if missing; keep previous trial
             changed = False
             if not getattr(u, "started_at", None):
                 u.started_at = now_utc(); changed = True
@@ -276,7 +271,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "_This bot monitors multiple freelance/job platforms for your keywords and sends you matching listings in real time. "
         "Use the buttons below to manage keywords, view saved jobs, check your status, or contact the admin._"
     )
-    await update.message.reply_text(intro, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_kb())
+    if update.message:
+        await update.message.reply_text(intro, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_kb())
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(intro, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_kb())
+
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Main menu:", reply_markup=main_menu_kb())
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_view = is_admin(update.effective_user.id)
@@ -327,7 +328,6 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def feedsstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    # Read stats file if worker published it
     path = os.getenv("FEEDS_STATS_PATH", "feeds_stats.json")
     if not os.path.exists(path):
         await update.message.reply_text("No cycle stats yet.")
@@ -347,10 +347,14 @@ async def feedsstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Failed to read stats: {e}")
 
-# --------- Keywords flow (comma-separated, supports Greek) ----------
+# --------- Keywords flow ----------
 async def on_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Route based on button text
     txt = (update.message.text or "").strip()
+
+    # ← ΝΕΟ: Αν στείλει Start σαν απλό μήνυμα, τρέχουμε start_cmd
+    if txt.lower() in ("start", "/start"):
+        await start_cmd(update, context)
+        return
 
     if txt.lower() == "keywords":
         await update.message.reply_text(
@@ -367,11 +371,9 @@ async def on_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not u:
                 await update.message.reply_text("Please tap /start first.")
                 return
-            # parse comma-separated
             raw = txt
             parts = [p.strip() for p in raw.split(",")]
             parts = [p for p in parts if p]
-            # de-dup
             seen = set()
             final = []
             for p in parts:
@@ -380,7 +382,6 @@ async def on_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     seen.add(key)
                     final.append(p)
 
-            # clear + reinsert
             db.query(Keyword).filter(Keyword.user_id == u.id).delete()
             for k in final:
                 db.add(Keyword(user_id=u.id, keyword=k, created_at=now_utc()))
@@ -417,19 +418,16 @@ async def on_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if context.user_data.pop("await_contact", False):
-        # route this message to admin
         await route_user_message_to_admin(update, context)
         return
 
-    # If admin is in reply mode
     if is_admin(update.effective_user.id) and context.user_data.get("reply_target"):
         await admin_sends_reply(update, context)
         return
 
-    # default: ignore unknown text
     await update.message.reply_text("Use the main buttons or /help.", reply_markup=main_menu_kb())
 
-# --------- Callbacks (navigation & admin reply) ----------
+# --------- Callbacks ----------
 async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
@@ -439,7 +437,6 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Main menu:", reply_markup=main_menu_kb())
         return
 
-    # admin reply/decline
     if data.startswith("admin_reply:") or data.startswith("admin_decline:"):
         await handle_admin_reply_click(update, context)
         return
@@ -461,6 +458,9 @@ app = FastAPI()
 async def tg_webhook(request: Request):
     try:
         data = await request.json()
+        # μικρό log για να βλέπεις traffic
+        kind = data.get("message", {}).get("text") or data.get("callback_query", {}).get("data") or "update"
+        print(f"[webhook] incoming: {kind}")
         update = Update.de_json(data, application.bot)
         await application.process_update(update)
     except Exception as e:
@@ -480,6 +480,7 @@ def build_application():
 
     # Commands
     appb.add_handler(CommandHandler("start", start_cmd))
+    appb.add_handler(CommandHandler("menu", menu_cmd))
     appb.add_handler(CommandHandler("help", help_cmd))
     appb.add_handler(CommandHandler("selftest", selftest_cmd))
     appb.add_handler(CommandHandler("admin", admin_cmd))
@@ -489,7 +490,7 @@ def build_application():
     # Callbacks
     appb.add_handler(CallbackQueryHandler(button_cb))
 
-    # Text router (buttons + flows)
+    # Text router (buttons + flows, και "Start" ως plain text)
     appb.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_router))
 
     # Errors
@@ -508,7 +509,4 @@ async def on_startup():
         print(f"Webhook set to {WEBHOOK_URL}/webhook/{WEBHOOK_SECRET}")
 
 if __name__ == "__main__":
-    # PTB startup tasks
-    application.run_webhook = on_startup  # keep ref to avoid lint warnings
-    # Start the ASGI app
     uvicorn.run("bot:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
