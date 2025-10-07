@@ -1,104 +1,198 @@
 # bot.py
-# -------------------------------------------------
-# Freelancer Alert Bot (stable /start + /selftest)
-# - Δεν αλλάζει το υπάρχον στήσιμο των κουμπιών.
-# - Δουλεύει με sync SQLAlchemy SessionLocal.
-# - Πιο καθαρά logs στο webhook, για να φαίνεται τι φτάνει.
-# - Αν σταλεί "Start" ως απλό text => τρέχει start_cmd.
-# - Περιμένει: BOT_TOKEN, WEBHOOK_URL, WEBHOOK_SECRET, ADMIN_TG_ID
-# -------------------------------------------------
-
 import os
 import json
-import traceback
-from datetime import timedelta
+import logging
+import smtplib
+from email.mime.text import MIMEText
+from datetime import datetime, timedelta, timezone
+from typing import Optional, List, Dict, Tuple
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+import httpx
 import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 
-from telegram import (
-    Update,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-)
-from telegram.constants import ParseMode
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 
-# ----- DB (sync) -----
 from db import (
+    ensure_schema,
     SessionLocal,
-    now_utc,
     User,
     Keyword,
-    Job,
-    SavedJob,
     JobSent,
+    SavedJob,
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+# ───────────────────────── Logging ─────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [bot] %(levelname)s: %(message)s")
+log = logging.getLogger("bot")
+
+# ───────────────────────── Env ─────────────────────────
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
-ADMIN_TG_ID = os.getenv("ADMIN_TG_ID")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
+FREELANCER_REF_CODE = os.getenv("FREELANCER_REF_CODE", "").strip()
 
-# ------------- utils -------------
-def db_open():
-    return SessionLocal()
+# Email (SMTP)
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "77chrisap@gmail.com").strip()
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASS = os.getenv("SMTP_PASS", "").strip()
+SMTP_TLS = (os.getenv("SMTP_TLS", "true").lower() != "false")
 
-def is_admin(uid) -> bool:
-    return ADMIN_TG_ID and str(uid) == str(ADMIN_TG_ID)
+# ───────────────────────── FastAPI ─────────────────────────
+app = FastAPI()
 
-def md(text: str) -> str:
-    if not text:
-        return ""
-    return (
-        text.replace("_", "\\_")
-        .replace("*", "\\*")
-        .replace("[", "\\[")
-        .replace("`", "\\`")
+# ───────────────────────── Time helpers ─────────────────────────
+UTC = timezone.utc
+def now_utc() -> datetime:
+    return datetime.now(UTC)
+
+def to_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+# ───────────────────────── DB ensure ─────────────────────────
+ensure_schema()
+
+# ───────────────────────── Currency helpers ─────────────────────────
+DEFAULT_USD_RATES = {
+    "USD": 1.0, "EUR": 1.07, "GBP": 1.25, "AUD": 0.65, "CAD": 0.73, "CHF": 1.10,
+    "SEK": 0.09, "NOK": 0.09, "DKK": 0.14, "PLN": 0.25, "RON": 0.22, "BGN": 0.55,
+    "TRY": 0.03, "MXN": 0.055, "BRL": 0.19, "INR": 0.012,
+}
+def load_usd_rates() -> Dict[str, float]:
+    raw = os.getenv("FX_USD_RATES", "").strip()
+    if not raw:
+        return DEFAULT_USD_RATES
+    try:
+        data = json.loads(raw)
+        safe = {k.upper(): float(v) for k, v in data.items()}
+        safe["USD"] = 1.0
+        return {**DEFAULT_USD_RATES, **safe}
+    except Exception:
+        return DEFAULT_USD_RATES
+USD_RATES = load_usd_rates()
+
+CURRENCY_SYMBOLS = {
+    "USD": "$", "EUR": "€", "GBP": "£",
+    "AUD": "A$", "CAD": "C$", "CHF": "CHF",
+    "SEK": "SEK", "NOK": "NOK", "DKK": "DKK",
+    "PLN": "zł", "RON": "lei", "BGN": "лв",
+    "TRY": "₺", "MXN": "MX$", "BRL": "R$", "INR": "₹",
+}
+def fmt_local_budget(minb: float, maxb: float, code: Optional[str]) -> str:
+    s = CURRENCY_SYMBOLS.get((code or "").upper(), "")
+    if minb or maxb:
+        if s:
+            return f"{minb:.0f}–{maxb:.0f} {s}"
+        return f"{minb:.0f}–{maxb:.0f} {(code or '').upper()}"
+    return "—"
+def to_usd(minb: float, maxb: float, code: Optional[str]) -> Optional[Tuple[float, float]]:
+    c = (code or "USD").upper()
+    rate = USD_RATES.get(c)
+    if not rate:
+        return None
+    return minb * rate, maxb * rate
+def fmt_usd_line(min_usd: float, max_usd: float) -> str:
+    return f"~ ${min_usd:.0f}–${max_usd:.0f} USD"
+
+# ───────────────────────── Freelancer helpers ─────────────────────────
+HTTP_TIMEOUT = 20.0
+
+async def fl_fetch_by_id(pid: str) -> Optional[Dict]:
+    url = (
+        "https://www.freelancer.com/api/projects/0.1/projects/"
+        f"{pid}/?full_description=true&job_details=true&compact=true"
     )
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers={"Accept": "application/json"}) as client:
+        r = await client.get(url)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+    return (data or {}).get("result") or None
 
-# ------------- UI -------------
-def main_menu_kb() -> ReplyKeyboardMarkup:
-    rows = [
-        [KeyboardButton("Keywords"), KeyboardButton("Saved Jobs")],
-        [KeyboardButton("Settings"), KeyboardButton("Help")],
-        [KeyboardButton("Contact")],
-    ]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+def fl_to_card(p: Dict, matched: Optional[List[str]] = None) -> Dict:
+    pid = str(p.get("id"))
+    title = p.get("title") or "Untitled"
+    type_ = "Fixed" if p.get("type") == "fixed" else ("Hourly" if p.get("type") == "hourly" else "Unknown")
 
-def help_text(show_admin: bool) -> str:
-    base = [
-        "*Help*",
-        "• Use the main buttons:",
-        "  - *Keywords*, *Saved Jobs*, *Settings*, *Contact*.",
+    budget = p.get("budget") or {}
+    minb = float(budget.get("minimum") or 0)
+    maxb = float(budget.get("maximum") or 0)
+    cur = budget.get("currency") or {}
+    code = (cur.get("code") or "USD").upper() if isinstance(cur, dict) else "USD"
+
+    bids = p.get("bid_stats", {}).get("bid_count", 0)
+    time_submitted = p.get("time_submitted")
+    posted = "now"
+    if isinstance(time_submitted, (int, float)):
+        age_sec = max(0, int(now_utc().timestamp() - time_submitted))
+        posted = (
+            f"{age_sec}s ago" if age_sec < 60 else
+            f"{age_sec//60}m ago" if age_sec < 3600 else
+            f"{age_sec//3600}h ago" if age_sec < 86400 else
+            f"{age_sec//86400}d ago"
+        )
+
+    base_url = f"https://www.freelancer.com/projects/{pid}"
+    sep = "&" if "?" in base_url else "?"
+    url = f"{base_url}{sep}f={FREELANCER_REF_CODE}" if FREELANCER_REF_CODE else base_url
+
+    desc = (p.get("description") or "").strip().replace("\r", " ").replace("\n", " ")
+    if len(desc) > 220:
+        desc = desc[:217] + "…"
+
+    local_line = fmt_local_budget(minb, maxb, code)
+    usd_pair = to_usd(minb, maxb, code)
+    usd_line = fmt_usd_line(*usd_pair) if usd_pair else None
+
+    return {
+        "id": f"freelancer-{pid}",
+        "source": "Freelancer",
+        "title": title,
+        "type": type_,
+        "budget_local": local_line,
+        "budget_usd": usd_line,
+        "bids": bids,
+        "posted": posted,
+        "description": desc,
+        "proposal_url": url,
+        "original_url": url,
+        "matched": matched or [],
+    }
+
+def job_text(card: Dict) -> str:
+    lines = [
+        f"*{card['title']}*",
         "",
-        "Commands:",
-        "• /start – show menu (+ start 10-day trial for new users)",
-        "• /menu – show menu",
-        "• /selftest – quick test",
-        "• /help – this",
+        f"👤 Source: *{card['source']}*",
+        f"🧾 Type: *{card['type']}*",
+        f"💰 Budget: *{card['budget_local']}*",
     ]
-<<<<<<< HEAD
-    if show_admin:
-        base += [
-            "",
-            "*Admin*",
-            "• /admin – list users",
-            "• /grant <telegram_id> <days>",
-            "• /feedsstatus – last worker stats",
-        ]
-    return "\n".join(base)
-=======
+    if card.get("budget_usd"):
+        lines.append(f"💵 {card['budget_usd']}")
+    lines += [
+        f"📨 Bids: *{card['bids']}*",
+        f"🕒 Posted: *{card['posted']}*",
+        "",
+        card.get("description") or "",
+    ]
     if card.get("matched"):
         lines += ["", f"_Matched:_ {', '.join(card['matched'])}"]
     return "\n".join(lines)
@@ -410,389 +504,585 @@ async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("All keywords cleared.")
     finally:
         db.close()
->>>>>>> ce3fc6e (Auto commit Tue-10-07 15-23)
 
 def settings_text(u: User) -> str:
+    trial = to_aware(u.trial_until)
+    lic = to_aware(u.access_until)
+    start_dt = to_aware(u.created_at)
     now = now_utc()
-    def fmt(dt): return dt.strftime("%Y-%m-%d %H:%M UTC") if dt else "—"
-    active = ((u.trial_until and u.trial_until >= now) or (u.access_until and u.access_until >= now))
-    keys = ", ".join(k.keyword for k in (u.keywords or [])) if u.keywords else "(none)"
+    active = (trial and trial >= now) or (lic and lic >= now)
+    blocked = bool(u.is_blocked)
+
+    kw_line = ", ".join(k.keyword for k in (u.keywords or [])) or "(none)"
+    countries = (u.countries or "ALL")
+    proposal = u.proposal_template or "(none)"
+
     lines = [
-        "🛠 *Your Settings*",
-        f"• Keywords: {md(keys)}",
-        "• Countries: ALL",
-        "• Proposal template: (none)",
+        "🛠 Your Settings",
         "",
-        f"🟢 Start date: {fmt(getattr(u,'started_at', None))}",
-        f"⏳ Trial ends: {fmt(u.trial_until)}",
-        f"🪪 License until: {fmt(u.access_until)}",
+        f"• Keywords: {kw_line}",
+        f"• Countries: {countries}",
+        f"• Proposal template: {proposal}",
+        "",
+        f"🟢 Start date: {start_dt.strftime('%Y-%m-%d %H:%M:%S UTC') if start_dt else '—'}",
+        f"🕑 Trial ends: {trial.strftime('%Y-%m-%d %H:%M:%S UTC') if trial else 'None'}",
+        f"🧾 License until: {lic.strftime('%Y-%m-%d %H:%M:%S UTC') if lic else 'None'}",
         f"✅ Active: {'✅' if active else '❌'}",
-        f"⛔ Blocked: {'❌' if not u.is_blocked else '✅'}",
+        f"⛔ Blocked: {'❗' if blocked else '❌'}",
         "",
-        "🗂 *Platforms monitored:*",
-        "• Global: Freelancer.com (affiliate links), PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap",
-        "  (* referral/curated platforms)",
+        "🧭 Platforms monitored:",
+        "• Global: Freelancer.com, Fiverr (affiliate links), PeoplePerHour (UK), Malt (FR/EU), Workana (ES/EU/LatAm), Upwork",
         "• Greece: JobFind.gr, Skywalker.gr, Kariera.gr",
         "",
-        "🆘 For extension, contact the admin.",
+        "🧩 For extension, contact the admin."
     ]
     return "\n".join(lines)
 
-# -------- Contact (user -> admin, reply) --------
-def admin_reply_kb(sender_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Reply", callback_data=f"admin_reply:{sender_id}"),
-          InlineKeyboardButton("Decline", callback_data=f"admin_decline:{sender_id}")]]
-    )
-
-async def route_user_message_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not ADMIN_TG_ID:
-        await update.message.reply_text("Admin not configured.")
-        return
-    u = update.effective_user
-    header = f"✉️ *User Message*\nFrom: `{u.full_name or ''}` (@{u.username or '—'})\nTG ID: `{u.id}`\n\n"
-    await context.bot.send_message(
-        chat_id=int(ADMIN_TG_ID),
-        text=header + md(update.message.text or ""),
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=admin_reply_kb(str(u.id)),
-    )
-    await update.message.reply_text("✅ Sent to admin. You’ll get the reply here.")
-
-async def handle_admin_reply_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    if not is_admin(update.effective_user.id):
-        return
-    data = q.data or ""
-    if data.startswith("admin_reply:"):
-        target = data.split(":", 1)[1]
-        context.user_data["reply_target"] = target
-        await q.message.reply_text(f"Type your reply to `{target}` and send.", parse_mode=ParseMode.MARKDOWN)
-    elif data.startswith("admin_decline:"):
-        target = data.split(":", 1)[1]
-        try:
-            await context.bot.send_message(int(target), "❌ Admin declined to respond.")
-        except Exception:
-            pass
-        await q.message.reply_text(f"Declined (user {target} notified).")
-
-async def admin_sends_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    target = context.user_data.get("reply_target")
-    if not target:
-        return
+async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
     try:
-        await context.bot.send_message(int(target), f"🟢 *Admin reply:*\n{md(update.message.text or '')}", parse_mode=ParseMode.MARKDOWN)
-        await update.message.reply_text("✅ Delivered.")
-    except Exception as e:
-        await update.message.reply_text(f"Failed to deliver: {e}")
-
-# ------------- commands -------------
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u_tg = update.effective_user
-    # ensure user in DB
-    db = db_open()
-    try:
-        u = db.query(User).filter(User.telegram_id == str(u_tg.id)).one_or_none()
+        u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
         if not u:
-            u = User(
-                telegram_id=str(u_tg.id),
-                name=u_tg.full_name or "",
-                username=u_tg.username or "",
-                started_at=now_utc(),
-                trial_until=now_utc() + timedelta(days=10),
-                created_at=now_utc(),
-                updated_at=now_utc(),
-            )
-            db.add(u)
-            db.commit()
-            db.refresh(u)
-        else:
-            changed = False
-            if not getattr(u, "started_at", None):
-                u.started_at = now_utc(); changed = True
-            if u.name != (u_tg.full_name or ""):
-                u.name = u_tg.full_name or ""; changed = True
-            if u.username != (u_tg.username or ""):
-                u.username = u_tg.username or ""; changed = True
-            if changed:
-                u.updated_at = now_utc()
-                db.commit()
+            await update.message.reply_text("No settings yet. Use /start.")
+            return
+        await update.message.reply_text(
+            settings_text(u),
+            disable_web_page_preview=True,
+            reply_markup=main_menu_kb()
+        )
     finally:
         db.close()
 
-    welcome = (
-        "👋 *Hello!* This bot is online and ready.\n\n"
-        "Use /selftest to check status."
-    )
-    if update.message:
-        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_kb())
-    elif update.callback_query:
-        await update.callback_query.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_kb())
+# Saved jobs — full cards
+PAGE_SIZE = int(os.getenv("SAVED_PAGE_SIZE", "5"))
 
-async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Main menu:", reply_markup=main_menu_kb())
+async def send_saved_cards(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user: User, page: int = 1):
+    db = SessionLocal()
+    try:
+        q = db.query(SavedJob).filter_by(user_id=user.id).order_by(SavedJob.created_at.desc())
+        total = q.count()
+        if total == 0:
+            await context.bot.send_message(chat_id, "No saved jobs yet. Tap ⭐ Keep on a job to save it.")
+            return
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(help_text(is_admin(update.effective_user.id)), parse_mode=ParseMode.MARKDOWN)
+        max_page = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        if page > max_page:
+            page = max_page
 
-async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Bot is active and responding normally!", reply_markup=main_menu_kb())
+        items = q.offset((page - 1) * PAGE_SIZE).limit(PAGE_SIZE).all()
+        await context.bot.send_message(chat_id, f"💾 Saved jobs — page {page}/{max_page}")
+
+        for it in items:
+            job_id = it.job_id
+            if job_id.startswith("freelancer-"):
+                pid = job_id.split("-", 1)[1]
+                data = await fl_fetch_by_id(pid)
+                if not data:
+                    await context.bot.send_message(chat_id, f"⚠️ Job {job_id} not available anymore.")
+                    continue
+                card = fl_to_card(data, matched=None)
+                await context.bot.send_message(
+                    chat_id,
+                    job_text(card),
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                    reply_markup=card_markup(card, saved_mode=True),
+                )
+            else:
+                await context.bot.send_message(chat_id, f"Saved: {job_id}")
+    finally:
+        db.close()
+
+async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    page = 1
+    if context.args:
+        try:
+            page = max(1, int(context.args[0]))
+        except ValueError:
+            page = 1
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
+        if not u:
+            await context.bot.send_message(chat_id, "No saved jobs.")
+            return
+        await send_saved_cards(context, chat_id, u, page)
+    finally:
+        db.close()
+
+# ───────────────────────── Admin Handlers ─────────────────────────
+ADMIN_HELP = (
+    "Admin commands:\n"
+    "/stats – overall stats\n"
+    "/users [page] [size] – list users\n"
+    "/grant <telegram_id> <days> – set license\n"
+    "/trialextend <telegram_id> <days> – extend trial\n"
+    "/revoke <telegram_id> – clear license\n"
+    "/reply <telegram_id> <message> – reply to user via bot (also emails you a copy)\n"
+    "/admintest – send test DM+email to the admin\n"
+)
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not is_admin(update):
         return
-    db = db_open()
+    await update.message.reply_text(ADMIN_HELP)
+
+async def admintest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
     try:
-        users = db.query(User).order_by(User.created_at.desc()).limit(30).all()
-        lines = ["*Users (latest 30)*"]
+        await context.bot.send_message(chat_id=ADMIN_ID, text="✅ Admin DM test — if you see this, DM works.")
+        send_email("Freelancer Bot — Admin DM test", "This is a test message to confirm DM+email path.")
+        await update.message.reply_text("Sent test DM and email to admin.")
+    except Exception as e:
+        log.exception("Admin test failed: %s", e)
+        await update.message.reply_text(f"Admin test failed: {e}")
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    db = SessionLocal()
+    try:
+        users = db.query(User).all()
+        total = len(users)
+        now = now_utc()
+        active = 0
+        with_keywords = 0
         for u in users:
-            lines.append(f"• `{u.telegram_id}` @{u.username or '—'}")
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+            if (to_aware(u.trial_until) and to_aware(u.trial_until) >= now) or \
+               (to_aware(u.access_until) and to_aware(u.access_until) >= now):
+                active += 1
+            if u.keywords:
+                with_keywords += 1
+        await update.message.reply_text(
+            f"Stats\n• Users: {total}\n• Active: {active}\n• With keywords: {with_keywords}"
+        )
+    finally:
+        db.close()
+
+async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    page = 1
+    size = 20
+    if context.args:
+        if len(context.args) >= 1 and context.args[0].isdigit():
+            page = max(1, int(context.args[0]))
+        if len(context.args) >= 2 and context.args[1].isdigit():
+            size = max(1, min(100, int(context.args[1])))
+
+    db = SessionLocal()
+    try:
+        q = db.query(User).order_by(User.created_at.desc())
+        total = q.count()
+        max_page = max(1, (total + size - 1) // size)
+        if page > max_page:
+            page = max_page
+        users = q.offset((page - 1) * size).limit(size).all()
+
+        now = now_utc()
+        lines = [f"Users — page {page}/{max_page} (size {size})"]
+        for u in users:
+            trial = to_aware(u.trial_until)
+            lic = to_aware(u.access_until)
+            active = (trial and trial >= now) or (lic and lic >= now)
+            kw_count = len(u.keywords or [])
+            lines.append(
+                f"{u.telegram_id} • kw:{kw_count} • trial:{trial.isoformat() if trial else '-'} • "
+                f"license:{lic.isoformat() if lic else '-'} • {'✅' if active else '❌'}"
+            )
+        await update.message.reply_text("\n".join(lines))
     finally:
         db.close()
 
 async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not is_admin(update):
         return
-    args = context.args or []
-    if len(args) != 2:
+    if len(context.args) < 2:
         await update.message.reply_text("Usage: /grant <telegram_id> <days>")
         return
-    tgt, days = args[0], int(args[1])
-    db = db_open()
+    tg_str = context.args[0].strip()
     try:
-        u = db.query(User).filter(User.telegram_id == str(tgt)).one_or_none()
+        days = int(context.args[1])
+    except Exception:
+        await update.message.reply_text("Days must be a positive integer.")
+        return
+    if days <= 0:
+        await update.message.reply_text("Days must be a positive integer.")
+        return
+
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=str(tg_str)).first()
         if not u:
             await update.message.reply_text("User not found.")
             return
-        base = u.access_until if (u.access_until and u.access_until > now_utc()) else now_utc()
+        now = now_utc()
+        base = to_aware(u.access_until) or now
+        if base < now:
+            base = now
         u.access_until = base + timedelta(days=days)
-        u.updated_at = now_utc()
         db.commit()
-        await update.message.reply_text(f"Granted until {u.access_until.strftime('%Y-%m-%d %H:%M UTC')}")
+        await update.message.reply_text(f"License set to {u.access_until.isoformat()} for {u.telegram_id}")
         try:
-            await context.bot.send_message(int(tgt), f"✅ Your access has been extended until {u.access_until.strftime('%Y-%m-%d %H:%M UTC')}.")
-        except Exception:
-            pass
+            await context.bot.send_message(chat_id=int(u.telegram_id), text=f"🔑 Your license is active until {u.access_until.isoformat()}.", reply_markup=user_reply_kb())
+        except Exception as e:
+            log.exception("Notify user failed: %s", e)
     finally:
         db.close()
 
-async def feedsstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Admin only.")
+async def trialextend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
         return
-    path = os.getenv("FEEDS_STATS_PATH", "feeds_stats.json")
-    if not os.path.exists(path):
-        await update.message.reply_text("No cycle stats yet.")
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /trialextend <telegram_id> <days>")
         return
+    tg_str = context.args[0].strip()
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        sent = data.get("sent_this_cycle", 0)
-        dur = data.get("cycle_seconds", 0.0)
-        feeds = data.get("feeds_counts", {})
-        lines = [f"*Feeds:*  sent=`{sent}`  in `{dur:.1f}s`", ""]
-        for k, v in feeds.items():
-            lines.append(f"{k}={v.get('count',0)}" + (f"  ⚠️ {v.get('error')}" if v.get("error") else ""))
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        days = int(context.args[1])
+    except Exception:
+        await update.message.reply_text("Days must be a positive integer.")
+        return
+    if days <= 0:
+        await update.message.reply_text("Days must be a positive integer.")
+        return
+
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=str(tg_str)).first()
+        if not u:
+            await update.message.reply_text("User not found.")
+            return
+        now = now_utc()
+        base = to_aware(u.trial_until) or now
+        if base < now:
+            base = now
+        u.trial_until = base + timedelta(days=days)
+        db.commit()
+        await update.message.reply_text(f"Trial set to {u.trial_until.isoformat()} for {u.telegram_id}")
+        try:
+            await context.bot.send_message(chat_id=int(u.telegram_id), text=f"🎁 Your trial is extended until {u.trial_until.isoformat()}.", reply_markup=user_reply_kb())
+        except Exception as e:
+            log.exception("Notify user failed: %s", e)
+    finally:
+        db.close()
+
+async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if len(context.args) < 1:
+        await update.message.reply_text("Usage: /revoke <telegram_id>")
+        return
+    tg_str = context.args[0].strip()
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=str(tg_str)).first()
+        if not u:
+            await update.message.reply_text("User not found.")
+            return
+        u.access_until = None
+        db.commit()
+        await update.message.reply_text(f"License revoked for {u.telegram_id}")
+        try:
+            await context.bot.send_message(chat_id=int(u.telegram_id), text="⛔ Your license has been revoked.", reply_markup=user_reply_kb())
+        except Exception as e:
+            log.exception("Notify user failed: %s", e)
+    finally:
+        db.close()
+
+async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /reply <telegram_id> <message>")
+        return
+
+    tg_str = context.args[0].strip()
+    try:
+        target_id = int(tg_str)
+    except ValueError:
+        await update.message.reply_text("First argument must be a numeric Telegram ID.")
+        return
+
+    full_text = update.message.text
+    prefix = f"/reply {tg_str}"
+    msg = full_text[len(prefix):].strip()
+    if not msg:
+        await update.message.reply_text("Please provide the reply message text.")
+        return
+
+    try:
+        await context.bot.send_message(chat_id=target_id, text=f"💬 *Admin reply:*\n{msg}", parse_mode="Markdown", reply_markup=user_reply_kb())
+        await update.message.reply_text("Reply sent ✅")
     except Exception as e:
-        await update.message.reply_text(f"Failed to read stats: {e}")
+        log.exception("Reply send failed: %s", e)
+        await update.message.reply_text(f"Failed to send reply: {e}")
 
-# ------------- text router (buttons + Start as text) -------------
-async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (update.message.text or "").strip()
+    subject = "Freelancer Bot — Admin reply sent"
+    body = f"To user: {target_id}\n\n{msg}"
+    send_email(subject, body)
 
-    # Αν στείλει "Start" σαν απλό text, τρέξε start
-    if txt.lower() in ("start", "/start"):
-        await start_cmd(update, context)
+# ───────────────────────── Callback buttons & Messaging flows ─────────────────────────
+async def inbound_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1) Admin quick-reply flow
+    if is_admin(update) and context.user_data.get("admin_reply_to"):
+        target_id = context.user_data.pop("admin_reply_to")
+        msg = update.message.text
+        # Send to user with reply/decline buttons
+        try:
+            await context.bot.send_message(chat_id=target_id, text=f"💬 *Admin reply:*\n{msg}", parse_mode="Markdown", reply_markup=user_reply_kb())
+            await update.message.reply_text("Reply sent ✅")
+        except Exception as e:
+            log.exception("Admin quick-reply failed: %s", e)
+            await update.message.reply_text(f"Failed to send reply: {e}")
+        # Email copy
+        send_email("Freelancer Bot — Admin reply sent", f"To user: {target_id}\n\n{msg}")
         return
 
-    if is_admin(update.effective_user.id) and context.user_data.get("reply_target"):
-        await admin_sends_reply(update, context)
-        return
+    # 2) User reply-to-admin flow
+    if context.user_data.get("user_reply_to_admin"):
+        context.user_data["user_reply_to_admin"] = False
+        msg = update.message.text
 
-    low = txt.lower()
-    if low == "keywords":
-        await update.message.reply_text(
-            "Send keywords separated by commas (supports English & Greek).",
-            parse_mode=ParseMode.MARKDOWN
+        # Confirm to user
+        await update.message.reply_text("✅ Your reply has been sent to the admin. You'll receive a response here.")
+
+        # Forward to admin (with buttons so you can keep replying)
+        u = update.effective_user
+        uname = f"@{u.username}" if u.username else "(no username)"
+        header = (
+            "Reply from user\n"
+            f"ID: {u.id}\n"
+            f"Name: {u.first_name or ''}\n"
+            f"Username: {uname}\n\n"
         )
-        context.user_data["await_keywords"] = True
+        try:
+            if ADMIN_ID:
+                await context.bot.send_message(chat_id=ADMIN_ID, text=header + msg, reply_markup=admin_reply_kb(u.id))
+        except Exception as e:
+            log.exception("Forward user reply failed: %s", e)
+
+        # Email copy
+        send_email("Freelancer Bot — User reply", header + msg)
         return
 
-    if context.user_data.pop("await_keywords", False):
-        db = db_open()
+    # 3) User contact flow
+    if context.user_data.get("awaiting_contact"):
+        context.user_data["awaiting_contact"] = False
+        msg = update.message.text
+
+        await update.message.reply_text("✅ Your message has been sent to the admin. You'll receive a reply here.")
+
+        db = SessionLocal()
         try:
-            u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one_or_none()
-            if not u:
-                await update.message.reply_text("Please tap /start first.")
-                return
-            parts = [p.strip() for p in txt.split(",") if p.strip()]
-            uniq = []
-            seen = set()
-            for p in parts:
-                k = p.lower()
-                if k not in seen:
-                    seen.add(k)
-                    uniq.append(p)
-            db.query(Keyword).filter(Keyword.user_id == u.id).delete()
-            for k in uniq:
-                db.add(Keyword(user_id=u.id, keyword=k, created_at=now_utc()))
-            db.commit()
-            await update.message.reply_text(f"✅ Saved {len(uniq)} keywords.", reply_markup=main_menu_kb())
+            urec = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
+            user_keywords = ", ".join(k.keyword for k in (urec.keywords or [])) if urec else "(none)"
         finally:
             db.close()
-        return
 
-    if low == "saved jobs":
-        db = db_open()
+        u = update.effective_user
+        uname = f"@{u.username}" if u.username else "(no username)"
+        header = (
+            "Contact from user\n"
+            f"ID: {u.id}\n"
+            f"Name: {u.first_name or ''}\n"
+            f"Username: {uname}\n"
+            f"Keywords: {user_keywords}\n\n"
+        )
+
+        # To admin with Reply/Decline buttons
         try:
-            u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one_or_none()
-            if not u:
-                await update.message.reply_text("Please tap /start first.")
-                return
-            rows = (
-                db.query(SavedJob).filter(SavedJob.user_id == u.id)
-                .order_by(SavedJob.created_at.desc()).limit(10).all()
-            )
-            if not rows:
-                await update.message.reply_text("No saved jobs yet.")
-                return
-            parts = ["*Saved Jobs*"]
-            for r in rows:
-                j = db.query(Job).filter(Job.id == r.job_id).one_or_none()
-                if not j:
-                    continue
-                budget = ""
-                if j.budget_min is not None and j.budget_max is not None and j.budget_currency:
-                    budget = f"{int(j.budget_min)}–{int(j.budget_max)} {j.budget_currency}"
-                title = md(j.title or "")
-                parts += [
-                    f"\n*{title}*",
-                    f"{md((j.description or '')[:400])}…",
-                    f"Budget: `{budget or '—'}`",
-                    f"Matched: `{j.matched_keyword or '—'}`",
-                    f"[Original]({j.original_url or j.url})",
-                    f"[Proposal]({j.proposal_url or j.url})",
-                ]
-            await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
-        finally:
-            db.close()
+            if ADMIN_ID:
+                kb = admin_reply_kb(u.id)
+                await context.bot.send_message(chat_id=ADMIN_ID, text=header + msg, reply_markup=kb)
+            else:
+                log.warning("ADMIN_ID not set; cannot DM admin.")
+        except Exception as e:
+            log.exception("Failed to forward to admin: %s", e)
+
+        # Email copy
+        subject = "Freelancer Bot — New Contact message"
+        body = header + msg
+        send_email(subject, body)
         return
 
-    if low == "settings":
-        db = db_open()
-        try:
-            u = db.query(User).filter(User.telegram_id == str(update.effective_user.id)).one_or_none()
-            if not u:
-                await update.message.reply_text("Please tap /start first.")
-                return
-            await update.message.reply_text(settings_text(u), parse_mode=ParseMode.MARKDOWN)
-        finally:
-            db.close()
-        return
+    # (fallback: ignore plain text)
+    return
 
-    if low == "help":
-        await help_cmd(update, context)
-        return
-
-    if low == "contact":
-        await update.message.reply_text("✍️ Please type your message for the admin. I'll forward it right away.")
-        context.user_data["await_contact"] = True
-        return
-
-    if context.user_data.pop("await_contact", False):
-        await route_user_message_to_admin(update, context)
-        return
-
-    await update.message.reply_text("Use the main buttons or /help.", reply_markup=main_menu_kb())
-
-# ------------- callbacks -------------
 async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
     await q.answer()
-    if data == "nav:menu":
-        await q.message.reply_text("Main menu:", reply_markup=main_menu_kb())
-        return
-    if data.startswith("admin_reply:") or data.startswith("admin_decline:"):
-        await handle_admin_reply_click(update, context)
+
+    # Admin quick actions (from forwarded Contact/User reply)
+    if data.startswith("adminreply:") and is_admin(update):
+        try:
+            target_id = int(data.split(":", 1)[1])
+            context.user_data["admin_reply_to"] = target_id
+            await q.message.reply_text(f"Type your reply to user {target_id}. Your next message will be sent to them.")
+        except Exception as e:
+            log.exception("adminreply parse error: %s", e)
         return
 
-# ------------- error handler -------------
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    tb = "".join(traceback.format_exception(None, context.error, context.error.__traceback__))
-    print(f"[PTB ERROR]\n{tb}")
-    if ADMIN_TG_ID:
+    if data.startswith("admindecline:") and is_admin(update):
         try:
-            await context.bot.send_message(int(ADMIN_TG_ID), f"⚠️ Bot error:\n{tb[:3500]}")
+            target_id = int(data.split(":", 1)[1])
+            text = ("Hello! The admin has reviewed your message and cannot proceed at this time.\n"
+                    "Thank you for reaching out.")
+            try:
+                await context.bot.send_message(chat_id=target_id, text=text, reply_markup=user_reply_kb())
+            except Exception as e:
+                log.exception("Decline send failed: %s", e)
+            send_email("Freelancer Bot — Admin decline sent", f"To user: {target_id}\n\n{text}")
+            await q.message.reply_text("Decline sent ✅")
+        except Exception as e:
+            log.exception("admindecline parse error: %s", e)
+        return
+
+    # User actions under admin-sent messages
+    if data == "userreply":
+        # Put the user in reply-to-admin mode
+        context.user_data["user_reply_to_admin"] = True
+        await q.message.reply_text("✍️ Please type your reply to the admin. It will be forwarded immediately.")
+        return
+
+    if data == "userdecline":
+        # Politely close the thread for the user
+        await q.message.reply_text("Thanks! If you need anything else, you can press 📞 Contact from the main menu.")
+        # Optionally notify admin
+        try:
+            if ADMIN_ID:
+                u = update.effective_user
+                await context.bot.send_message(chat_id=ADMIN_ID, text=f"User {u.id} declined further replies.")
         except Exception:
             pass
+        return
 
-# ------------- FastAPI webhook -------------
-app = FastAPI()
+    # Regular opens from main menu
+    if data.startswith("open:"):
+        where = data.split(":", 1)[1]
+        if where == "addkw":
+            await q.message.reply_text(
+                "Add keywords with: /addkeyword python, lighting design, μελέτη φωτισμού"
+            )
+        elif where == "settings":
+            db = SessionLocal()
+            try:
+                u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
+                if u:
+                    await q.message.reply_text(
+                        settings_text(u), disable_web_page_preview=True
+                    )
+            finally:
+                db.close()
+        elif where == "help":
+            await q.message.reply_text(
+                get_help_text_plain(is_admin(update)),
+                disable_web_page_preview=True
+            )
+        elif where == "contact":
+            context.user_data["awaiting_contact"] = True
+            await q.message.reply_text(
+                "✍️ Please type your message for the admin. I’ll forward it right away."
+            )
+        elif where == "saved":
+            db = SessionLocal()
+            try:
+                u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
+                if u:
+                    await send_saved_cards(context, q.message.chat.id, u, page=1)
+            finally:
+                db.close()
+        return
+
+    # Save / Unsave / Dismiss for job cards
+    if data.startswith("save:"):
+        job_id = data.split(":", 1)[1]
+        db = SessionLocal()
+        try:
+            u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
+            if not u:
+                return
+            exists = db.query(SavedJob).filter_by(user_id=u.id, job_id=job_id).first()
+            if exists is None:
+                db.add(SavedJob(user_id=u.id, job_id=job_id))
+                db.commit()
+            await q.answer("Saved ✅", show_alert=False)
+        finally:
+            db.close()
+        return
+
+    if data.startswith("unsave:"):
+        job_id = data.split(":", 1)[1]
+        db = SessionLocal()
+        try:
+            u = db.query(User).filter_by(telegram_id=str(update.effective_user.id)).first()
+            if not u:
+                return
+            row = db.query(SavedJob).filter_by(user_id=u.id, job_id=job_id).first()
+            if row:
+                db.delete(row)
+                db.commit()
+            await q.answer("Removed from saved.", show_alert=False)
+            try:
+                await q.message.delete()
+            except Exception:
+                pass
+        finally:
+            db.close()
+        return
+
+    if data.startswith("dismiss:"):
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        return
+
+# ───────────────────────── Webhook lifecycle ─────────────────────────
+def get_webhook_url() -> str:
+    if not BASE_URL:
+        raise RuntimeError("BASE_URL is not set")
+    return f"{BASE_URL}/webhook/{WEBHOOK_SECRET}"
 
 @app.on_event("startup")
-async def _startup():
-    # set webhook on startup (robust)
-    if BOT_TOKEN and WEBHOOK_URL:
-        try:
-            application.bot.delete_webhook()
-            application.bot.set_webhook = application.bot.set_webhook  # silence pyright
-            await application.bot.delete_webhook()
-            await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook/{WEBHOOK_SECRET}")
-            print(f"[startup] Webhook set to {WEBHOOK_URL}/webhook/{WEBHOOK_SECRET}")
-        except Exception as e:
-            print("[startup] set_webhook error:", e)
+async def on_startup():
+    global tg_app
+    tg_app = build_application()
+    await tg_app.initialize()
+    await tg_app.start()
+    url = get_webhook_url()
+    await tg_app.bot.delete_webhook(drop_pending_updates=True)
+    await tg_app.bot.set_webhook(url=url, allowed_updates=Update.ALL_TYPES)
+    me = await tg_app.bot.get_me()
+    log.info("PTB app initialized. Webhook set to %s (bot=%s).", url, me.username)
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    if tg_app:
+        await tg_app.bot.delete_webhook()
+        await tg_app.stop()
+        await tg_app.shutdown()
+        log.info("PTB app stopped.")
 
 @app.post(f"/webhook/{WEBHOOK_SECRET}")
-async def tg_webhook(request: Request):
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    if tg_app is None:
+        return PlainTextResponse("App not ready", status_code=503)
     try:
-        data = await request.json()
-        kind = (
-            data.get("message", {}).get("text")
-            or data.get("callback_query", {}).get("data")
-            or "update"
-        )
-        print(f"[webhook] incoming: {kind}")
-        update = Update.de_json(data, application.bot)
-        await application.process_update(update)
-        return JSONResponse({"ok": True})
+        update = Update.de_json(data, tg_app.bot)
+        logging.info("Webhook update received.")
+        await tg_app.process_update(update)
     except Exception as e:
-        print("[webhook] ERROR:", e)
-        print(traceback.format_exc())
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        logging.exception("Webhook processing error: %s", e)
+    return PlainTextResponse("OK")
 
 @app.get("/")
-def root():
-    return {"status": "ok"}
+async def root():
+    return PlainTextResponse("OK")
 
-# ------------- build PTB app -------------
-def build_application():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN missing")
-    appb = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    appb.add_handler(CommandHandler("start", start_cmd))
-    appb.add_handler(CommandHandler("menu", menu_cmd))
-    appb.add_handler(CommandHandler("help", help_cmd))
-    appb.add_handler(CommandHandler("selftest", selftest_cmd))
-    appb.add_handler(CommandHandler("admin", admin_cmd))
-    appb.add_handler(CommandHandler("grant", grant_cmd))
-    appb.add_handler(CommandHandler("feedsstatus", feedsstatus_cmd))
-
-    appb.add_handler(CallbackQueryHandler(button_cb))
-
-    # Text (κουμπιά + "Start" ως free text)
-    appb.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
-
-    appb.add_error_handler(on_error)
-    return appb
-
-application = build_application()
-
+# ───────────────────────── Entrypoint ─────────────────────────
 if __name__ == "__main__":
-    uvicorn.run("bot:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+    uvicorn.run("bot:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
