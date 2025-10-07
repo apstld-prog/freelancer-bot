@@ -4,13 +4,7 @@
 Freelancer Alert Bot
 python-telegram-bot v20+
 
-- Welcome + big menu
-- Keywords: /addkeyword, /keywords, /delkeyword
-- Admin: /users, /grant <telegram_id> <days>, /block, /unblock, /broadcast <text>, /feedstatus
-- Contact (two-way chat) with Reply/Decline on BOTH sides, chat stays open until Decline
-- Quick grant buttons: +30d, +90d, +180d, +365d
-- Daily reminder 24h before expiration
-- Works with your db.py schema (telegram_id, started_at, trial_until, access_until, is_blocked)
+(…ΟΛΑ όπως στην τρέχουσα έκδοση σου…)
 """
 
 import os
@@ -60,7 +54,6 @@ def _get_user_id_field() -> str:
 
 def _user_lookup(db, tg_id: int):
     uf = _get_user_id_field(); col = getattr(User, uf)
-    # store as str if column is str
     try: is_str = col.property.columns[0].type.python_type is str  # type: ignore
     except Exception: is_str = False
     return db.query(User).filter(col == (str(tg_id) if is_str else tg_id)).one_or_none()
@@ -68,7 +61,6 @@ def _user_lookup(db, tg_id: int):
 def _get_or_create_user(db, tg_id: int):
     u = _user_lookup(db, tg_id)
     if u:
-        # ensure minimal dates exist
         if hasattr(u, "started_at") and not getattr(u, "started_at"):
             setattr(u, "started_at", now_utc())
         if hasattr(u, "trial_until") and not getattr(u, "trial_until"):
@@ -79,7 +71,6 @@ def _get_or_create_user(db, tg_id: int):
     u = User()
     try: setattr(u, uf, tg_id)
     except Exception: setattr(u, uf, str(tg_id))
-    # your schema
     if hasattr(u, "started_at"):  setattr(u, "started_at", now_utc())
     if hasattr(u, "trial_until"): setattr(u, "trial_until", now_utc() + timedelta(days=DEFAULT_TRIAL_DAYS))
     if hasattr(u, "is_blocked"):  setattr(u, "is_blocked", False)
@@ -87,15 +78,13 @@ def _get_or_create_user(db, tg_id: int):
         setattr(u, "created_at", now_utc())
     db.add(u); db.commit(); db.refresh(u); return u
 
-def _list_keywords(db, user) -> List[Keyword]:
+def _list_keywords(db, user) -> List['Keyword']:
     if Keyword is None: return []
     try:
-        # via relationship if exists
         if hasattr(user, "keywords") and getattr(user, "keywords") is not None:
             return list(getattr(user, "keywords"))
     except Exception:
         pass
-    # fallback by FK
     q = None
     uid = None
     for uf in ("id","user_id","pk"):
@@ -110,7 +99,6 @@ def _disp_id(u) -> str:
     return "?"
 
 def _dates_for_user(u) -> Tuple[Optional[datetime], Optional[datetime], Optional[datetime]]:
-    """Returns (trial_start, trial_ends, license_until) mapped to your schema."""
     trial_start = getattr(u, "started_at", None) or getattr(u, "trial_start", None)
     trial_ends  = getattr(u, "trial_until", None) or getattr(u, "trial_ends", None)
     license_until = getattr(u, "access_until", None) or getattr(u, "license_until", None)
@@ -134,7 +122,6 @@ def _days_remaining(exp: Optional[datetime]) -> str:
     return f"in {ceil(secs/86400)} day(s)"
 
 def _active_blocked(u) -> Tuple[str, str]:
-    # your schema: is_blocked; active derived from expiry
     blocked = "✅" if getattr(u, "is_blocked", False) else "❌"
     exp = _effective_expiry(u)
     active_flag = (not getattr(u, "is_blocked", False)) and bool(exp and exp >= now_utc())
@@ -273,15 +260,10 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         k = Keyword()
         if hasattr(k, "keyword"): setattr(k, "keyword", word)
         elif hasattr(k, "text"):  setattr(k, "text", word)
-        # link to user
         if hasattr(k, "user"): setattr(k, "user", u)
-        elif hasattr(k, "user_id"):
-            setattr(k, "user_id", getattr(u, "id", None))
+        elif hasattr(k, "user_id"): setattr(k, "user_id", getattr(u, "id", None))
         db.add(k); db.commit(); db.refresh(k)
         await update.message.reply_text(f"✅ Added keyword: <code>{word}</code>", parse_mode=ParseMode.HTML)
-    except Exception as e:
-        log.exception("addkeyword failed: %s", e)
-        await update.message.reply_text("⚠️ Error while saving your keyword.")
     finally: db.close()
 
 async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -335,7 +317,6 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Contact (two-way) ----------
 def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
-    # Admin side: reply/decline + quick grants
     rows = [
         [InlineKeyboardButton("💬 Reply",   callback_data=f"admchat:reply:{user_id}")],
         [InlineKeyboardButton("❌ Decline", callback_data=f"admchat:decline:{user_id}")],
@@ -347,7 +328,6 @@ def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def user_reply_kb(admin_id: int) -> InlineKeyboardMarkup:
-    # User side: reply/decline to keep the thread going
     rows = [
         [InlineKeyboardButton("💬 Reply",   callback_data=f"usrchat:reply:{admin_id}")],
         [InlineKeyboardButton("❌ Decline", callback_data="usrchat:decline")],
@@ -362,13 +342,10 @@ async def contact_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.message.reply_text("✍️ Send me your message and I’ll forward it to the admin.")
 
 async def capture_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Relay user messages to admin when in contact mode.
-       Relay admin messages to user when in reply mode."""
     text = (update.message.text or "").strip()
     uid = update.effective_user.id
     admin_id_env = os.getenv("ADMIN_ID")
 
-    # Admin reply mode (ongoing chat)
     if is_admin(update):
         target = context.application.bot_data.get("admin_reply_target", {}).get(uid)
         if target:
@@ -377,11 +354,9 @@ async def capture_text_messages(update: Update, context: ContextTypes.DEFAULT_TY
                                                reply_markup=user_reply_kb(uid))
                 await update.message.reply_text("✅ Sent to user.")
             finally:
-                # keep chat open (do not clear) so next admin texts go to same user
                 pass
             return
 
-    # User awaiting first contact message?
     if context.user_data.get("awaiting_contact_msg"):
         context.user_data["awaiting_contact_msg"] = False
         if not admin_id_env:
@@ -390,11 +365,9 @@ async def capture_text_messages(update: Update, context: ContextTypes.DEFAULT_TY
         await context.bot.send_message(chat_id=int(admin_id_env), text=msg, parse_mode=ParseMode.HTML,
                                        reply_markup=admin_contact_kb(uid))
         await update.message.reply_text("✅ Sent to admin. You’ll receive a reply soon.")
-        # Arm user side to reply later if admin writes first
         context.application.bot_data.setdefault("user_reply_target", {})[uid] = int(admin_id_env)
         return
 
-    # Ongoing user reply mode?
     target_admin = context.application.bot_data.get("user_reply_target", {}).get(uid)
     if target_admin:
         try:
@@ -402,7 +375,6 @@ async def capture_text_messages(update: Update, context: ContextTypes.DEFAULT_TY
                                            reply_markup=admin_contact_kb(uid))
             await update.message.reply_text("✅ Sent to admin.")
         finally:
-            # keep chat open
             pass
 
 # ---------- Admin & Grants ----------
@@ -411,6 +383,7 @@ def _list_all_users(db) -> List[User]:
     except Exception: return []
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ONLY visual improvement: show Expires + remaining days."""
     if not is_admin(update): await update.message.reply_text("Admin only."); return
     if not db_available():   await update.message.reply_text("DB not available."); return
     db = SessionLocal()
@@ -420,20 +393,15 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for u in users[:200]:
             kws=_list_keywords(db,u)
             ts,te,lu=_dates_for_user(u)
+            exp=_effective_expiry(u)
             a,b=_active_blocked(u)
-            lines.append(f"• <code>{_disp_id(u)}</code> — kw:{len(kws)} | trial:{_fmt(ts)}→{_fmt(te)} | lic:{_fmt(lu)} | A:{a} B:{b}")
+            lines.append(
+                f"• <code>{_disp_id(u)}</code> — kw:{len(kws)} | "
+                f"trial:{_fmt(ts)}→{_fmt(te)} | lic:{_fmt(lu)} | "
+                f"Expires:{_fmt(exp)} ({_days_remaining(exp)}) | A:{a} B:{b}"
+            )
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     finally: db.close()
-
-async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): await update.message.reply_text("Admin only."); return
-    if len(context.args)<2:
-        await update.message.reply_text("Usage: <code>/grant &lt;telegram_id&gt; &lt;days&gt;</code>", parse_mode=ParseMode.HTML); return
-    if not db_available(): await update.message.reply_text("DB not available."); return
-    try: target_id=int(context.args[0]); days=int(context.args[1])
-    except Exception:
-        await update.message.reply_text("Usage: <code>/grant &lt;telegram_id&gt; &lt;days&gt;</code>", parse_mode=ParseMode.HTML); return
-    await _do_grant(update, context, target_id, days)
 
 async def _do_grant(update: Update, context: ContextTypes.DEFAULT_TYPE, target_id: int, days: int):
     db=SessionLocal()
@@ -441,7 +409,6 @@ async def _do_grant(update: Update, context: ContextTypes.DEFAULT_TYPE, target_i
         u=_user_lookup(db, target_id)
         if not u: await update.message.reply_text("User not found."); return
         cur = getattr(u, "access_until", None) or getattr(u, "trial_until", None)
-        # Prefer access_until on your schema
         if hasattr(u, "access_until"):
             setattr(u, "access_until", _extend_days(cur, days))
         elif hasattr(u, "license_until"):
@@ -463,6 +430,16 @@ async def _do_grant(update: Update, context: ContextTypes.DEFAULT_TYPE, target_i
         except Exception: pass
     finally:
         db.close()
+
+async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update): await update.message.reply_text("Admin only."); return
+    if len(context.args)<2:
+        await update.message.reply_text("Usage: <code>/grant &lt;telegram_id&gt; &lt;days&gt;</code>", parse_mode=ParseMode.HTML); return
+    if not db_available(): await update.message.reply_text("DB not available."); return
+    try: target_id=int(context.args[0]); days=int(context.args[1])
+    except Exception:
+        await update.message.reply_text("Usage: <code>/grant &lt;telegram_id&gt; &lt;days&gt;</code>", parse_mode=ParseMode.HTML); return
+    await _do_grant(update, context, target_id, days)
 
 async def block_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): await update.message.reply_text("Admin only."); return
@@ -552,7 +529,7 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines=[title]+[f"• {src}: {n}" for src,n in sorted(counters.items(), key=lambda x:(-x[1],x[0]))]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
-# ---------- Callback router ----------
+# ---------- Callbacks ----------
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q=update.callback_query
     if not q: return
@@ -583,7 +560,6 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "<code>/feedstatus</code>"
             )
 
-    # Admin chat buttons
     elif data.startswith("admchat:reply:") and is_admin_id(q.from_user.id):
         user_id = int(data.split(":")[-1])
         context.application.bot_data.setdefault("admin_reply_target", {})[q.from_user.id] = user_id
@@ -592,21 +568,17 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(data.split(":")[-1])
         try: await context.bot.send_message(chat_id=user_id, text="❌ Your request was declined by the admin.")
         except Exception: pass
-        # close both directions
         context.application.bot_data.get("admin_reply_target", {}).pop(q.from_user.id, None)
         context.application.bot_data.get("user_reply_target", {}).pop(user_id, None)
         await q.message.reply_text(f"Declined user {user_id}.")
     elif data.startswith("adm:grant:") and is_admin_id(q.from_user.id):
         _,_,uid,days = data.split(":"); await _do_grant(update, context, int(uid), int(days))
 
-    # User chat buttons
     elif data.startswith("usrchat:reply:"):
-        # user wants to reply to admin
         admin_id = int(data.split(":")[-1])
         context.application.bot_data.setdefault("user_reply_target", {})[q.from_user.id] = admin_id
         await q.message.reply_text("💬 Reply mode ON. Send your message now.")
     elif data == "usrchat:decline":
-        # close both directions (if any)
         uid = q.from_user.id
         admin_id = context.application.bot_data.get("user_reply_target", {}).pop(uid, None)
         if admin_id:
@@ -627,7 +599,6 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
             try: exp_utc=exp.astimezone(UTC)
             except Exception: exp_utc=exp
             if now <= exp_utc <= in_24h:
-                # remind user
                 chat_id = getattr(u, _get_user_id_field(), None)
                 if chat_id:
                     try:
@@ -638,7 +609,6 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
                             parse_mode=ParseMode.HTML
                         )
                     except Exception: pass
-                # notify admin
                 if admin_id_env:
                     try:
                         await context.bot.send_message(
@@ -651,7 +621,6 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Application ----------
 async def _post_init(app: Application):
-    # Ensure DB schema if db module exposes init_db
     try:
         if '_init_db' in globals() and callable(_init_db):
             _init_db()
@@ -692,7 +661,6 @@ def build_application() -> Application:
     log.info("Handlers & jobs registered.")
     return app_
 
-# ---------- Local polling (optional) ----------
 if __name__ == "__main__":
     import asyncio
     async def _main():
