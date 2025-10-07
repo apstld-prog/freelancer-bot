@@ -5,13 +5,13 @@ Telegram bot (python-telegram-bot v20+), English UI
 
 - Welcome card with HTML + big inline buttons (functional)
 - Shows Trial Start / Trial Ends / License Until + "Expires (in N days)"
-- /whoami shows role (Admin/User)
+- /whoami shows role (Admin/User) and omits username line if empty
 - Keywords persistence: /addkeyword, /keywords, /delkeyword
 - Admin controls:
     /users, /grant <telegram_id> <days>, /block, /unblock, /broadcast <text>, /feedstatus (/feedstats)
 - User → Admin extension flow: /extend + admin Approve/Decline (inline)
 - Automatic reminder 24h before expiration (trial or license) via JobQueue
-- No "affiliate" wording in UI (functionality unchanged)
+- UI text does not contain the word "affiliate" (functionality unchanged)
 
 NOTE: JobQueue scheduling is done via ApplicationBuilder.post_init to avoid None job_queue on import.
 """
@@ -211,7 +211,6 @@ def _extend_days(dt0: Optional[datetime], days: int) -> datetime:
 # ---------- UI ----------
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
-    # Each button uses a callback action so buttons "work"
     rows = [
         [
             InlineKeyboardButton("➕ Add Keywords", callback_data="act:add"),
@@ -271,14 +270,24 @@ def settings_card_text(u, kws: List[str]) -> str:
         "When your trial ends, please <b>contact the admin</b> to extend your access."
     )
 
+# ---------- Send helper (works for commands & callbacks) ----------
+
+async def _send_html(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """Safely send to the active chat, whether command or callback."""
+    chat_id = None
+    if update.effective_chat:
+        chat_id = update.effective_chat.id
+    elif update.callback_query and update.callback_query.message:
+        chat_id = update.callback_query.message.chat_id
+    if chat_id is not None:
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
 # ---------- Commands (user) ----------
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Welcome block (HTML)
     await update.message.reply_text(WELCOME_HEAD, reply_markup=main_menu_keyboard(),
                                     parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
-    # Show settings card with dates + remaining days under the welcome
     if db_available():
         db = SessionLocal()
         try:
@@ -289,7 +298,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             db.close()
 
-    # Features block
     await update.message.reply_text(FEATURES_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -302,13 +310,16 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "5) Stats (admin): <code>/feedstatus</code>\n\n"
         "When your free trial ends, please contact the admin to extend your access."
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    await _send_html(update, context, text)
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     role = "Admin" if is_admin(update) else "User"
-    uname = update.effective_user.username or "—"
-    await update.message.reply_text(f"🆔 Your ID: <code>{uid}</code>\nRole: <b>{role}</b>\n@{uname}", parse_mode=ParseMode.HTML)
+    uname = update.effective_user.username
+    text = f"🆔 Your ID: <code>{uid}</code>\nRole: <b>{role}</b>"
+    if uname:
+        text += f"\n@{uname}"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -519,7 +530,6 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"trial: {_fmt(ts)} → {_fmt(te)}\n"
             f"license_until: {_fmt(lu)}", parse_mode=ParseMode.HTML
         )
-        # Notify user
         try:
             await context.bot.send_message(chat_id=target_id, text=f"✅ Your access has been extended by {days} day(s).")
         except Exception:
@@ -661,7 +671,15 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             db.close()
     elif data == "act:help":
-        await help_cmd(update, context)
+        await _send_html(update, context, 
+            "🧭 <b>Help / How it works</b>\n\n"
+            "1) Add keywords with <code>/addkeyword python</code>\n"
+            "2) List your keywords with <code>/keywords</code>\n"
+            "3) Delete with <code>/delkeyword &lt;word|id&gt;</code>\n"
+            "4) Request extension with <code>/extend</code>\n"
+            "5) Stats (admin): <code>/feedstatus</code>\n\n"
+            "When your free trial ends, please contact the admin to extend your access."
+        )
     elif data == "act:saved":
         await q.message.reply_text("Saved items will appear here (coming soon).")
     elif data == "act:contact":
@@ -670,14 +688,13 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin_id(q.from_user.id):
             await q.message.reply_text("Admin only.")
         else:
-            await q.message.reply_text(
+            await _send_html(update, context,
                 "Admin commands:\n"
                 "/users\n"
-                "/grant <telegram_id> <days>\n"
-                "/block <telegram_id> /unblock <telegram_id>\n"
-                "/broadcast <text>\n"
-                "/feedstatus",
-                parse_mode=ParseMode.HTML
+                "/grant &lt;telegram_id&gt; &lt;days&gt;\n"
+                "/block &lt;telegram_id&gt; /unblock &lt;telegram_id&gt;\n"
+                "/broadcast &lt;text&gt;\n"
+                "/feedstatus"
             )
     elif data.startswith("adm:approve:") and is_admin_id(q.from_user.id):
         target = int(data.split(":")[-1])
