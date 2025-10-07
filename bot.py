@@ -4,7 +4,13 @@
 Freelancer Alert Bot
 python-telegram-bot v20+
 
-(…ΟΛΑ όπως στην τρέχουσα έκδοση σου…)
+- Welcome + big menu
+- Keywords: /addkeyword, /keywords, /delkeyword
+- Admin: /users, /grant <telegram_id> <days>, /block, /unblock, /broadcast <text>, /feedstatus
+- Contact (two-way chat) with Reply/Decline on BOTH sides, chat stays open until Decline
+- Quick grant buttons: +30d, +90d, +180d, +365d
+- Daily reminder 24h before expiration
+- Works with your db.py schema (telegram_id, started_at, trial_until, access_until, is_blocked)
 """
 
 import os
@@ -383,7 +389,6 @@ def _list_all_users(db) -> List[User]:
     except Exception: return []
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ONLY visual improvement: show Expires + remaining days."""
     if not is_admin(update): await update.message.reply_text("Admin only."); return
     if not db_available():   await update.message.reply_text("DB not available."); return
     db = SessionLocal()
@@ -498,38 +503,67 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"📣 Broadcast sent to {sent} users.")
     finally: db.close()
 
+# ---------- FIXED feedstatus ----------
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): await update.message.reply_text("Admin only."); return
-    known = ["Freelancer","PeoplePerHour","Malt","Workana","Guru","99designs","Toptal","Codeable","YunoJuno",
-             "Worksome","twago","freelancermap","Wripple","JobFind","Skywalker","Kariera","Careerjet"]
+    if not is_admin(update):
+        await update.message.reply_text("Admin only.")
+        return
+
+    known = [
+        "99designs","Careerjet","Codeable","Freelancer","Guru","JobFind",
+        "Kariera","Malt","PeoplePerHour","Skywalker","Toptal","Workana",
+        "Worksome","Wripple","YunoJuno","freelancermap","twago"
+    ]
     counters: Dict[str,int] = {k:0 for k in known}
-    prefix_map = {"freelancer":"Freelancer","pph":"PeoplePerHour","malt":"Malt","workana":"Workana","guru":"Guru",
-                  "99designs":"99designs","toptal":"Toptal","codeable":"Codeable","yuno_juno":"YunoJuno",
-                  "worksome":"Worksome","twago":"twago","freelancermap":"freelancermap","wripple":"Wripple",
-                  "jobfind":"JobFind","sky":"Skywalker","kariera":"Kariera","careerjet":"Careerjet"}
-    used_db=False
+
+    prefix_map = {
+        "freelancer":"Freelancer", "pph":"PeoplePerHour", "malt":"Malt",
+        "workana":"Workana", "guru":"Guru", "99designs":"99designs",
+        "toptal":"Toptal", "codeable":"Codeable", "yuno_juno":"YunoJuno",
+        "worksome":"Worksome", "twago":"twago", "freelancermap":"freelancermap",
+        "wripple":"Wripple", "jobfind":"JobFind", "sky":"Skywalker",
+        "kariera":"Kariera", "careerjet":"Careerjet"
+    }
+
+    used_db = False
     if SessionLocal and JobSent:
-        db=SessionLocal()
+        db = SessionLocal()
         try:
-            since=now_utc()-timedelta(hours=24)
-            rows=db.query(JobSent).filter(JobSent.created_at>=since).all()
+            since = now_utc() - timedelta(hours=24)
+            rows = db.query(JobSent).filter(JobSent.created_at >= since).all()
             for r in rows:
-                jid=(getattr(r,"job_id","") or "").strip()
-                pref = jid.split("-",1)[0] if "-" in jid else ""
-                label = prefix_map.get(pref)
-                if label: counters[label]=counters.get(label,0)+1
-            used_db=True
+                label = None
+
+                # 1) αν υπάρχει explicit source
+                src = getattr(r, "source", None)
+                if src:
+                    lbl = prefix_map.get(str(src).strip().lower())
+                    if lbl: label = lbl
+
+                # 2) αλλιώς από job_id prefix (CAST σε str -> strip)
+                if not label:
+                    jid = str(getattr(r, "job_id", "") or "").strip()
+                    pref = jid.split("-", 1)[0].lower() if "-" in jid else jid.lower()
+                    label = prefix_map.get(pref)
+
+                if label:
+                    counters[label] = counters.get(label, 0) + 1
+
+            used_db = True
         except Exception as e:
             log.warning("feedstatus query failed: %s", e)
         finally:
             try: db.close()
             except Exception: pass
-    title="📊 <b>Sent jobs by platform (last 24h)</b>"
-    if not used_db: title+="\n<i>(DB not available — showing zeros)</i>"
-    lines=[title]+[f"• {src}: {n}" for src,n in sorted(counters.items(), key=lambda x:(-x[1],x[0]))]
+
+    title = "📊 <b>Sent jobs by platform (last 24h)</b>"
+    if not used_db:
+        title += "\n<i>(DB not available — showing zeros)</i>"
+
+    lines = [title] + [f"• {src}: {counters.get(src,0)}" for src in known]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
-# ---------- Callbacks ----------
+# ---------- Callback router ----------
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q=update.callback_query
     if not q: return
@@ -661,6 +695,7 @@ def build_application() -> Application:
     log.info("Handlers & jobs registered.")
     return app_
 
+# ---------- Local polling (optional) ----------
 if __name__ == "__main__":
     import asyncio
     async def _main():
