@@ -4,14 +4,13 @@
 Telegram bot (python-telegram-bot v20+), English UI
 
 - Welcome card + big inline buttons (functional)
-- Shows Trial Start / Trial Ends / License Until + "Expires (in N days)"
-- /whoami shows role (Admin/User) and omits username line if empty
-- Keywords persistence: /addkeyword, /keywords, /delkeyword
-- Admin controls:
-    /users, /grant <telegram_id> <days>, /block, /unblock, /broadcast <text>, /feedstatus (/feedstats)
-- User → Admin extension flow: /extend [message] → admin receives Approve buttons (+3/+7/+14/+30 days) & Decline
-- Automatic reminder 24h before expiration (trial or license) via JobQueue
-- UI/help avoids the word "affiliate" (functionality unchanged)
+- Trial Start / Trial Ends / License Until + "Expires (in N days)"
+- /whoami shows role (Admin/User), omits username line if empty
+- Keywords: /addkeyword, /keywords, /delkeyword
+- Admin: /users, /grant <telegram_id> <days>, /block, /unblock, /broadcast <text>, /feedstatus (/feedstats)
+- Contact flow (user -> admin) with inline Reply / Decline buttons and admin-to-user reply relay
+- Daily reminder 24h before expiration (trial/license)
+- UI avoids the word "affiliate" (functionality unchanged)
 """
 
 import os
@@ -31,6 +30,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 from telegram.constants import ParseMode
 
@@ -57,8 +58,7 @@ UTC = timezone.utc
 # ---------- ENV ----------
 DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "10"))
 ADMIN_CONTACT_TEXT = os.getenv("ADMIN_CONTACT_TEXT", "Contact the admin via this chat.")
-# day options for inline approvals
-APPROVE_DAY_OPTIONS = [3, 7, 14, 30]
+APPROVE_DAY_OPTIONS = [3, 7, 14, 30]  # quick buttons on admin side
 
 # ---------- Helpers ----------
 
@@ -84,7 +84,7 @@ def _get_user_id_field() -> str:
     for cand in ("telegram_id", "tg_id", "chat_id", "user_id"):
         if hasattr(User, cand):
             return cand
-    raise RuntimeError("User model must expose telegram id (telegram_id/tg_id/chat_id/user_id).")
+    raise RuntimeError("User model must expose telegram id field.")
 
 def _get_keyword_text_field() -> str:
     for fld in ("text", "name", "word", "value", "keyword"):
@@ -104,25 +104,36 @@ def _user_lookup(db, tg_id: int):
 def _get_or_create_user(db, tg_id: int):
     u = _user_lookup(db, tg_id)
     if u:
+        # ensure essential fields exist
+        if hasattr(u, "trial_start") and not getattr(u, "trial_start", None):
+            setattr(u, "trial_start", now_utc())
+        if hasattr(u, "trial_ends") and not getattr(u, "trial_ends", None):
+            setattr(u, "trial_ends", now_utc() + timedelta(days=DEFAULT_TRIAL_DAYS))
+        db.commit()
         return u
+
     uf = _get_user_id_field()
     u = User()
     try:
         setattr(u, uf, tg_id)
     except Exception:
         setattr(u, uf, str(tg_id))
-    # initialize flags/dates if exist
-    if hasattr(u, "trial_start") and getattr(u, "trial_start") in (None, ""):
+
+    if hasattr(u, "trial_start"):
         setattr(u, "trial_start", now_utc())
-    if hasattr(u, "trial_ends") and getattr(u, "trial_ends") in (None, ""):
+    if hasattr(u, "trial_ends"):
         setattr(u, "trial_ends", now_utc() + timedelta(days=DEFAULT_TRIAL_DAYS))
-    if hasattr(u, "active") and getattr(u, "active") is None:
+    if hasattr(u, "active"):
         setattr(u, "active", True)
-    if hasattr(u, "blocked") and getattr(u, "blocked") is None:
+    if hasattr(u, "blocked"):
         setattr(u, "blocked", False)
-    if hasattr(u, "created_at") and getattr(u, "created_at") is None:
+    if hasattr(u, "created_at"):
         setattr(u, "created_at", now_utc())
-    db.add(u); db.commit(); db.refresh(u)
+    # license_until stays None initially
+
+    db.add(u)
+    db.commit()
+    db.refresh(u)
     return u
 
 def _list_keywords(db, user) -> List[Keyword]:
@@ -204,7 +215,7 @@ def _extend_days(dt0: Optional[datetime], days: int) -> datetime:
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("➕ Add Keywords", callback_data="act:add"),
-         InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
+         InlineKeyboardButton(⚙️ Settings", callback_data="act:settings")],
         [InlineKeyboardButton("🆘 Help", callback_data="act:help"),
          InlineKeyboardButton("💾 Saved", callback_data="act:saved")],
         [InlineKeyboardButton("📞 Contact", callback_data="act:contact"),
@@ -234,7 +245,7 @@ FEATURES_TEXT = (
 HELP_TEXT = (
     "🧭 <b>Help / How it works</b>\n\n"
     "1️⃣ Add keywords with <code>/addkeyword python, telegram</code> (comma-separated, English or Greek).\n"
-    "2️⃣ Set your countries with <code>/setcountry US,UK</code> (or <code>ALL</code>). \n"
+    "2️⃣ Set your countries with <code>/setcountry US,UK</code> (or <code>ALL</code>).\n"
     "3️⃣ Save a proposal template with <code>/setproposal &lt;text&gt;</code> — Placeholders: "
     "<code>{jobtitle}</code>, <code>{experience}</code>, <code>{stack}</code>, <code>{availability}</code>, "
     "<code>{step1}</code>, <code>{step2}</code>, <code>{step3}</code>, <code>{budgettime}</code>, "
@@ -333,7 +344,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = _get_or_create_user(db, update.effective_user.id)
         k = Keyword()
         setattr(k, _get_keyword_text_field(), word)
-        # relationship/FK
+        # relation/FK
         set_ok = False
         if hasattr(Keyword, "user"):
             try: setattr(k, "user", u); set_ok = True
@@ -346,6 +357,9 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if hasattr(Keyword, kf):
                             setattr(k, kf, uid); set_ok = True; break
                 if set_ok: break
+        if hasattr(k, "created_at") and getattr(k, "created_at") is None:
+            from datetime import datetime as _dt
+            setattr(k, "created_at", _dt.now(UTC))
         db.add(k); db.commit(); db.refresh(k)
         await update.message.reply_text(f"✅ Added keyword: <code>{word}</code>", parse_mode=ParseMode.HTML)
     except Exception as e:
@@ -431,29 +445,68 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
-# ---------- User → Admin extension flow ----------
+# ---------- Contact flow (user -> admin) ----------
 
-def _approval_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(f"✅ +{d} days", callback_data=f"adm:approve:{user_id}:{d}")]
-            for d in APPROVE_DAY_OPTIONS]
-    rows.append([InlineKeyboardButton("❌ Decline", callback_data=f"adm:decline:{user_id}")])
+def _admin_contact_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("💬 Reply", callback_data=f"admchat:reply:{user_id}")],
+        [InlineKeyboardButton("❌ Decline", callback_data=f"admchat:decline:{user_id}")],
+        [InlineKeyboardButton("➕ +3d", callback_data=f"adm:approve:{user_id}:3"),
+         InlineKeyboardButton("➕ +7d", callback_data=f"adm:approve:{user_id}:7")],
+        [InlineKeyboardButton("➕ +14d", callback_data=f"adm:approve:{user_id}:14"),
+         InlineKeyboardButton("➕ +30d", callback_data=f"adm:approve:{user_id}:30")],
+    ]
     return InlineKeyboardMarkup(rows)
 
-async def extend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_msg = " ".join(context.args).strip() if context.args else ""
-    admin_id_env = os.getenv("ADMIN_ID")
-    if not admin_id_env:
-        await update.message.reply_text("Admin is not configured.")
+async def contact_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User clicked Contact on the main menu."""
+    q = update.callback_query
+    if not q:
         return
-    text = f"🔔 Extension request from <code>{user_id}</code>"
-    if user_msg:
-        text += f"\n\n📝 <b>Message</b>:\n{user_msg}"
-    await context.bot.send_message(chat_id=int(admin_id_env), text=text,
-                                   parse_mode=ParseMode.HTML, reply_markup=_approval_keyboard(user_id))
-    await update.message.reply_text("Your request was sent to the admin. You'll receive a reply soon.")
+    await q.answer()
+    # Mark user as composing a contact message
+    context.user_data["awaiting_contact_msg"] = True
+    await q.message.reply_text("✍️ Send me your message and I’ll forward it to the admin.")
 
-# ---------- Admin actions ----------
+async def capture_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Capture user texts for Contact, and admin reply texts when in reply mode."""
+    text = (update.message.text or "").strip()
+    uid = update.effective_user.id
+
+    # Admin replying?
+    if is_admin(update):
+        target = context.application.bot_data.get("admin_reply_target", {}).get(uid)
+        if target:
+            try:
+                await context.bot.send_message(chat_id=target, text=f"📨 Admin reply:\n{text}")
+                await update.message.reply_text("✅ Sent to user.")
+            finally:
+                # clear target
+                context.application.bot_data["admin_reply_target"].pop(uid, None)
+            return
+
+    # User sending contact?
+    if context.user_data.get("awaiting_contact_msg"):
+        context.user_data["awaiting_contact_msg"] = False
+        admin_id_env = os.getenv("ADMIN_ID")
+        if not admin_id_env:
+            await update.message.reply_text("Admin is not configured.")
+            return
+        msg = (
+            f"📥 <b>New message from user</b>\n"
+            f"ID: <code>{uid}</code>\n\n"
+            f"{text}"
+        )
+        await context.bot.send_message(
+            chat_id=int(admin_id_env),
+            text=msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_admin_contact_keyboard(uid)
+        )
+        await update.message.reply_text("✅ Sent to admin. You’ll receive a reply soon.")
+        return
+
+# ---------- Admin actions & chat ----------
 
 def _list_all_users(db) -> List[User]:
     try:
@@ -599,12 +652,10 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show sent jobs per platform for the last 24h. Works even without DB (falls back to zeros)."""
     if not is_admin(update):
         await update.message.reply_text("Admin only.")
         return
 
-    # Known platforms (labels)
     known = [
         "Freelancer", "PeoplePerHour", "Malt", "Workana", "Guru", "99designs", "Toptal",
         "Codeable", "YunoJuno", "Worksome", "twago", "freelancermap", "Wripple",
@@ -612,7 +663,6 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     counters: Dict[str, int] = {k: 0 for k in known}
 
-    # Map prefix->label (as stored in job_id like "freelancer-12345")
     prefix_map = {
         "freelancer": "Freelancer",
         "pph": "PeoplePerHour",
@@ -633,7 +683,6 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "careerjet": "Careerjet",
     }
 
-    # Try DB
     used_db = False
     if SessionLocal is not None and JobSent is not None:
         db = SessionLocal()
@@ -653,7 +702,6 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: db.close()
             except Exception: pass
 
-    # Build message
     title = "📊 <b>Sent jobs by platform (last 24h)</b>"
     if not used_db:
         title += "\n<i>(DB not available — showing zeros)</i>"
@@ -664,13 +712,14 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
-# ---------- Callback buttons ----------
+# ---------- Callback buttons (admin chat + approvals) ----------
 
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q: return
     data = q.data or ""
     await q.answer()
+
     if data == "act:add":
         await q.message.reply_text("Add a keyword with: <code>/addkeyword lighting</code>", parse_mode=ParseMode.HTML)
     elif data == "act:settings":
@@ -689,7 +738,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "act:saved":
         await q.message.reply_text("Saved items will appear here (coming soon).")
     elif data == "act:contact":
-        await q.message.reply_text(ADMIN_CONTACT_TEXT + "\nYou can also use /extend to ask for more days.")
+        await contact_button(update, context)
     elif data == "act:admin":
         if not is_admin_id(q.from_user.id):
             await q.message.reply_text("Admin only.")
@@ -702,13 +751,24 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "<code>/broadcast &lt;text&gt;</code>\n"
                 "<code>/feedstatus</code>"
             )
+    elif data.startswith("admchat:reply:") and is_admin_id(q.from_user.id):
+        target = int(data.split(":")[-1])
+        # arm reply-mode for this admin
+        mapping = context.application.bot_data.setdefault("admin_reply_target", {})
+        mapping[q.from_user.id] = target
+        await q.message.reply_text(f"💬 Reply mode ON for user {target}. Send your message now.")
+    elif data.startswith("admchat:decline:") and is_admin_id(q.from_user.id):
+        target = int(data.split(":")[-1])
+        try:
+            await context.bot.send_message(chat_id=target, text="❌ Your request was declined by the admin.")
+        except Exception:
+            pass
+        await q.message.reply_text(f"Declined user {target}.")
     elif data.startswith("adm:approve:") and is_admin_id(q.from_user.id):
         # adm:approve:<user_id>:<days>
         parts = data.split(":")
-        if len(parts) == 4:
+        if len(parts) == 4 and db_available():
             target = int(parts[2]); days = int(parts[3])
-            if not db_available():
-                await q.message.reply_text("DB not available."); return
             db = SessionLocal()
             try:
                 u = _user_lookup(db, target)
@@ -721,25 +781,16 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if hasattr(u, "active"): setattr(u, "active", True)
                 if hasattr(u, "blocked"): setattr(u, "blocked", False)
                 db.commit()
-                await q.message.reply_text(f"✅ Approved. Extended {days} day(s) for {target}.")
+                await q.message.reply_text(f"✅ Extended {days} day(s) for {target}.")
                 try:
-                    await context.bot.send_message(chat_id=target,
-                        text=f"✅ Approved. Your access was extended by {days} day(s).")
+                    await context.bot.send_message(chat_id=target, text=f"✅ Your access was extended by {days} day(s).")
                 except Exception: pass
             finally:
                 db.close()
-    elif data.startswith("adm:decline:") and is_admin_id(q.from_user.id):
-        target = int(data.split(":")[-1])
-        await q.message.reply_text(f"❌ Declined extension for {target}.")
-        try:
-            await context.bot.send_message(chat_id=target, text="❌ Your extension request was declined.")
-        except Exception:
-            pass
 
 # ---------- Reminder job ----------
 
 async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
-    """Runs daily. Sends reminder to users expiring within 24h (license or trial)."""
     if not db_available():
         return
     admin_id_env = os.getenv("ADMIN_ID")
@@ -769,7 +820,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(
                             chat_id=chat_id,
                             text=f"⏳ Reminder: your access expires on <b>{_fmt(exp_utc)}</b> "
-                                 f"({_days_remaining(exp_utc)}). Use /extend to request extra days.",
+                                 f"({_days_remaining(exp_utc)}). Use the Contact button to reach the admin.",
                             parse_mode=ParseMode.HTML
                         )
                     except Exception:
@@ -810,7 +861,6 @@ def build_application() -> Application:
     app_.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app_.add_handler(CommandHandler("keywords", keywords_cmd))
     app_.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
-    app_.add_handler(CommandHandler("extend", extend_cmd))
 
     # admin commands
     app_.add_handler(CommandHandler("users", users_cmd))
@@ -822,6 +872,9 @@ def build_application() -> Application:
 
     # buttons
     app_.add_handler(CallbackQueryHandler(button_router))
+
+    # text message relay (user contact mode & admin reply mode)
+    app_.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, capture_text_messages))
 
     log.info("Handlers & jobs registered.")
     return app_
