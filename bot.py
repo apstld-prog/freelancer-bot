@@ -1,28 +1,28 @@
 # bot.py
 # -----------------------------------------------------------------------------
-# Telegram bot – ΧΩΡΙΣ async context manager για DB. Χρήση SessionLocal() παντού.
-# Διατηρώ το στήσιμο μηνυμάτων/κουμπιών όπως έχεις ζητήσει (Proposal/Original/Keep/Delete).
+# Sync DB sessions (SessionLocal). Στήσιμο: Start hero + Features,
+# Help, MySettings, Keep/Delete callbacks & /feedsstatus register.
 # -----------------------------------------------------------------------------
 
 import os
 from typing import Optional
 
-from telegram import (
-    Update, InlineKeyboardMarkup, InlineKeyboardButton,
-)
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, ApplicationBuilder, CommandHandler,
     CallbackQueryHandler, ContextTypes,
 )
 
 from db import SessionLocal, User, Keyword, Job, SavedJob, JobSent
-from feedsstatus_handler import register_feedsstatus_handler
+try:
+    from feedsstatus_handler import register_feedsstatus_handler  # pragma: no cover
+except Exception:
+    def register_feedsstatus_handler(app: Application):
+        return
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID  = os.getenv("ADMIN_ID", "")
 
-
-# --------------- utils ---------------
 
 def is_admin(update: Update) -> bool:
     try:
@@ -37,8 +37,6 @@ def md_esc(s: str) -> str:
         .replace("[", r"\[")
         .replace("`", r"\`")
     )
-
-# --------------- DB helpers ---------------
 
 def ensure_user_sync(tg_id: str, name: str, username: Optional[str]) -> User:
     db = SessionLocal()
@@ -59,8 +57,6 @@ def ensure_user_sync(tg_id: str, name: str, username: Optional[str]) -> User:
     finally:
         db.close()
 
-
-# --------------- commands ---------------
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _u = ensure_user_sync(
@@ -102,14 +98,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧭 *Help / How it works*\n"
         "1) /addkeyword _python, telegram_\n"
         "2) /setcountry _US,UK_ (or ALL)\n"
-        "3) /setproposal `<text>` with placeholders.\n"
-        "4) When a job arrives you can: ⭐ Keep / 🗑️ Delete / 📦 Proposal / 🔗 Original\n\n"
-        "• Use /mysettings anytime.\n"
-        "• /selftest for a test job.\n"
-        "• /platforms CC to see platforms by country.\n\n"
-        "📋 *Platforms monitored*\n"
-        "Global: Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
-        "Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n"
+        "3) /setproposal `<text>`\n"
+        "4) Job actions: ⭐ Keep / 🗑️ Delete / 📦 Proposal / 🔗 Original\n\n"
+        "• /mysettings to review your config\n"
+        "• /selftest for a test card\n"
+        "• /platforms CC to list platforms by country\n"
     )
     await update.effective_chat.send_message(txt, parse_mode="Markdown")
 
@@ -132,8 +125,6 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 
-# --------------- callbacks (keep/delete) ---------------
-
 async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -149,7 +140,6 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not already:
                 db.add(SavedJob(user_id=u.id, job_id=j.id))
                 db.commit()
-            # ενημέρωση markup: "Kept"
             await q.edit_message_reply_markup(
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📦 Proposal", url=j.proposal_url or j.url),
@@ -170,18 +160,17 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-# --------------- init ---------------
-
 def build_application() -> Application:
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    if not BOT_TOKEN:
+        # θα σκάσει InvalidToken νωρίτερα, αλλά ας το ελέγξουμε καθαρά
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is empty.")
 
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
-
     app.add_handler(CallbackQueryHandler(button_cb))
 
-    # admin-only /feedsstatus
+    # admin-only feedsstatus (no-op αν λείπει το module)
     register_feedsstatus_handler(app)
-
     return app

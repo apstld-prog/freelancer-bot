@@ -1,7 +1,6 @@
 # worker.py
 # -----------------------------------------------------------------------------
-# Worker loop: διαβάζει keywords, τραβάει αγγελίες, στέλνει κάρτες
-# ΧΩΡΙΣ async context manager για DB — χρησιμοποιεί καθαρά SessionLocal().
+# Sync DB sessions (SessionLocal), async HTTP/Telegram. Κανένα "async with get_session()".
 # -----------------------------------------------------------------------------
 
 import asyncio
@@ -11,14 +10,17 @@ from typing import List, Dict, Any, Optional
 import httpx
 
 from db import SessionLocal, User, Keyword, Job, JobSent, SavedJob, now_utc
-from worker_stats_sidecar import publish_stats  # αφήνω όπως το έχεις
+# publish_stats είναι optional – αν λείπει το module, απλά no-op
+try:
+    from worker_stats_sidecar import publish_stats  # pragma: no cover
+except Exception:  # pragma: no cover
+    def publish_stats(**kwargs):
+        pass
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "120"))
 
-
-# ----------------- helpers -----------------
 
 def md_esc(s: str) -> str:
     return (
@@ -40,7 +42,7 @@ async def tg_send(chat_id: int, text: str, reply_markup: Optional[dict] = None, 
         return r.json()
 
 
-# ----------------- feeds (ελάχιστα, όπως τα είχες) -----------------
+# ----------------- FREELANCER FEED -----------------
 
 async def fetch_freelancer(q: str) -> List[dict]:
     url = "https://www.freelancer.com/api/projects/0.1/projects/active/"
@@ -84,7 +86,6 @@ async def fetch_freelancer(q: str) -> List[dict]:
 async def upsert_and_send(db, u: User, job_payloads: List[dict]) -> int:
     sent = 0
     for payload in job_payloads:
-        # upsert με (source, external_id)
         j = db.query(Job).filter(
             Job.source == payload["source"],
             Job.external_id == payload["external_id"]
@@ -95,7 +96,6 @@ async def upsert_and_send(db, u: User, job_payloads: List[dict]) -> int:
             db.commit()
             db.refresh(j)
 
-        # μην το ξαναστείλουμε στον ίδιο user
         already = db.query(JobSent).filter(
             JobSent.user_id == u.id,
             JobSent.job_id == j.id
@@ -103,7 +103,6 @@ async def upsert_and_send(db, u: User, job_payloads: List[dict]) -> int:
         if already:
             continue
 
-        # compose card (όπως το θέλεις: Proposal / Original / Keep / Delete)
         title = md_esc(j.title or "Untitled")
         lines = [
             f"*{title}*",
@@ -123,7 +122,6 @@ async def upsert_and_send(db, u: User, job_payloads: List[dict]) -> int:
         lines.append("")
         if j.matched_keyword:
             lines.append(f"Keyword matched: {md_esc(j.matched_keyword)}")
-
         text = "\n".join([x for x in lines if x is not None])
 
         kb = {
@@ -151,7 +149,6 @@ async def upsert_and_send(db, u: User, job_payloads: List[dict]) -> int:
 async def process_user(u: User) -> int:
     db = SessionLocal()
     try:
-        # φορτώνουμε keywords
         u = db.query(User).filter(User.id == u.id).one()
         kws = [k.keyword for k in (u.keywords or [])]
         if not kws:
@@ -161,15 +158,11 @@ async def process_user(u: User) -> int:
         feeds_counts: Dict[str, Dict[str, Any]] = {}
 
         for kw in kws:
-            # freelancer
             fl = await fetch_freelancer(kw)
             feeds_counts.setdefault("freelancer", {"count": 0, "error": None})
             feeds_counts["freelancer"]["count"] += len(fl)
             sent_total += await upsert_and_send(db, u, fl)
 
-            # (άλλα feeds αν θέλεις — τα έχεις/κρατάς όπως ήταν)
-
-        # δημοσίευση στατιστικών για /feedsstatus
         publish_stats(
             feeds_counts=feeds_counts,
             cycle_seconds=0.0,
