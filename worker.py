@@ -1,6 +1,7 @@
 # worker.py
 # -----------------------------------------------------------------------------
-# Sync DB sessions (SessionLocal) + async HTTP. Στέλνει κάρτες με USD conversion.
+# Worker που διαβάζει keywords, φέρνει αγγελίες (Freelancer) και τις στέλνει
+# σε Telegram, με σωστό conversion σε USD.
 # -----------------------------------------------------------------------------
 import asyncio
 import os
@@ -8,7 +9,6 @@ import time
 from typing import List, Dict, Any, Optional
 
 import httpx
-
 from db import SessionLocal, User, Keyword, Job, JobSent, SavedJob, now_utc
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -22,10 +22,10 @@ async def get_rates() -> Dict[str, float]:
     """Return dict like {'USD':1, 'EUR':0.92, ...} base=USD. Cached 1h."""
     now = time.time()
     if now - _rates_cache["ts"] < 3600 and _rates_cache.get("rates"):
-        return _rates_cache["rates"]  # type: ignore
+        return _rates_cache["rates"]  # cached
     url = "https://api.exchangerate.host/latest?base=USD"
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(url)
             r.raise_for_status()
             data = r.json()
@@ -34,10 +34,12 @@ async def get_rates() -> Dict[str, float]:
             _rates_cache["rates"] = rates
             _rates_cache["ts"] = now
             return rates
-    except Exception:
-        return _rates_cache.get("rates", {"USD": 1.0})  # last known
+    except Exception as e:
+        print(f"Exchange rate fetch failed: {e}")
+        return _rates_cache.get("rates", {"USD": 1.0})
 
 def md_esc(s: str) -> str:
+    """Ασφαλής escaping για markdown text."""
     return (
         s.replace("_", r"\_")
         .replace("*", r"\*")
@@ -46,6 +48,7 @@ def md_esc(s: str) -> str:
     )
 
 async def tg_send(chat_id: int, text: str, reply_markup: Optional[dict] = None, parse_mode: Optional[str] = None):
+    """Αποστολή μηνύματος στο Telegram."""
     async with httpx.AsyncClient(timeout=20) as client:
         payload = {"chat_id": chat_id, "text": text}
         if reply_markup:
@@ -58,6 +61,7 @@ async def tg_send(chat_id: int, text: str, reply_markup: Optional[dict] = None, 
 
 # ---------------- Freelancer feed ----------------
 async def fetch_freelancer(q: str) -> List[dict]:
+    """Αναζήτηση στο Freelancer API."""
     url = "https://www.freelancer.com/api/projects/0.1/projects/active/"
     params = {
         "query": q,
@@ -95,15 +99,16 @@ async def fetch_freelancer(q: str) -> List[dict]:
 
 # ---------------- render card ----------------
 async def format_job_text(j: Job) -> str:
+    """Μορφοποίηση του κειμένου που στέλνεται στο Telegram."""
     title = md_esc(j.title or "Untitled")
 
     lines = [
         f"*{title}*",
-        f"Source: {'Freelancer' if j.source=='freelancer' else j.source.title()}",
+        f"Source: {'Freelancer' if j.source == 'freelancer' else j.source.title()}",
         f"Type: {j.job_type.title()}" if j.job_type else None,
     ]
 
-    # native budget
+    # Native currency budget
     native_budget_line = None
     if (j.budget_min or j.budget_max) and j.budget_currency:
         mn = int(j.budget_min) if j.budget_min else None
@@ -133,8 +138,8 @@ async def format_job_text(j: Job) -> str:
                     else:
                         usd_line = f"~ up to ${mx_usd:,.2f} USD"
                     lines.append(usd_line)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"USD conversion failed: {e}")
 
     if j.bids_count:
         lines.append(f"Bids: {j.bids_count}")
@@ -150,7 +155,9 @@ async def format_job_text(j: Job) -> str:
 
     return "\n".join([x for x in lines if x is not None])
 
+# ---------------- store & send ----------------
 async def upsert_and_send(db, u: User, job_payloads: List[dict]) -> int:
+    """Εισαγωγή/ενημέρωση job και αποστολή στον χρήστη."""
     sent = 0
     for payload in job_payloads:
         j = db.query(Job).filter(
@@ -190,7 +197,9 @@ async def upsert_and_send(db, u: User, job_payloads: List[dict]) -> int:
         sent += 1
     return sent
 
+# ---------------- user cycle ----------------
 async def process_user(u: User) -> int:
+    """Επεξεργάζεται τα keywords του κάθε user."""
     db = SessionLocal()
     try:
         u = db.query(User).filter(User.id == u.id).one()
@@ -209,7 +218,9 @@ async def process_user(u: User) -> int:
         except Exception:
             pass
 
+# ---------------- main loop ----------------
 async def worker_loop():
+    """Κεντρικός loop για όλα τα accounts."""
     while True:
         total = 0
         try:
