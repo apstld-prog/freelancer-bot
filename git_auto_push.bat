@@ -1,63 +1,87 @@
 @echo off
 setlocal enabledelayedexpansion
-REM git_auto_push.bat — Auto add/commit/pull --rebase/push for origin main
+REM git_auto_push.bat — robust auto add/commit/pull --rebase/push
 
-REM 1) Go to repo root (this script's folder)
 cd /d "%~dp0"
 
-REM 2) Sanity checks
+REM Sanity
 git rev-parse --is-inside-work-tree >nul 2>&1
 if errorlevel 1 (
-  echo [ERROR] This folder is not a git repository.
-  pause
-  exit /b 1
+  echo [ERROR] Not a git repository.
+  pause & exit /b 1
 )
 
-REM Optional: target branch (default main). You can call: git_auto_push.bat my-branch
+REM Branch: arg1 or current
 set "BRANCH=%~1"
+if "%BRANCH%"=="" for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set "BRANCH=%%b"
 if "%BRANCH%"=="" set "BRANCH=main"
 
-REM Optional: --force flag as 2nd arg -> force-with-lease push
+REM Force flag as arg2
 set "FORCEFLAG=%~2"
 
 echo.
-echo === Adding all changes ===
-git add -A
+echo === Check for unfinished rebase ===
+if exist ".git\rebase-merge" (
+  echo [WARN] Detected unfinished rebase.
+  if /I "%FORCEFLAG%"=="--continue-rebase" (
+    echo Attempting: git add -A ^& git rebase --continue
+    git add -A
+    git rebase --continue
+    if errorlevel 1 (
+      echo [ERROR] rebase --continue failed. Resolve conflicts, then:
+      echo   git add -A
+      echo   git rebase --continue
+      pause & exit /b 1
+    )
+  ) else if /I "%FORCEFLAG%"=="--abort-rebase" (
+    echo Attempting: git rebase --abort
+    git rebase --abort
+    if errorlevel 1 (
+      echo [ERROR] rebase --abort failed. You may need to remove .git\rebase-merge manually.
+      echo   rmdir /S /Q .git\rebase-merge
+      pause & exit /b 1
+    )
+  ) else (
+    echo Use one of:
+    echo   git_auto_push.bat %BRANCH% --continue-rebase
+    echo   git_auto_push.bat %BRANCH% --abort-rebase
+    pause & exit /b 1
+  )
+)
 
-REM Commit only if there are staged changes
-git diff --cached --quiet
+REM Safe timestamp (PowerShell) for message
+for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "(Get-Date).ToString('yyyy-MM-dd HH:mm:ss')"`) do set "TS=%%t"
+set "MSG=Auto commit %TS%"
+
+echo.
+echo === Refresh index ===
+git update-index -q --refresh
+
+echo.
+echo === Add/Commit if needed ===
+git add -A
+git diff --quiet && git diff --cached --quiet
 if errorlevel 1 (
-  for /f "tokens=1-3 delims=/ " %%a in ("%date%") do set TODAY=%%a-%%b-%%c
-  set NOW=%time: =0%
-  set MSG=Auto commit %TODAY% %NOW%
   echo Commit message: %MSG%
-  git commit -m "%MSG%"
+  git commit -m "%MSG%" || git commit -m "Auto commit"
 ) else (
-  echo No staged changes to commit.
+  echo No changes to commit.
 )
 
 echo.
-echo === Fetch + pull --rebase from origin/%BRANCH% ===
-git fetch origin
+echo === Fetch + pull --rebase --autostash origin/%BRANCH% ===
+git fetch origin || (echo [ERROR] fetch failed. & pause & exit /b 1)
+git pull --rebase --autostash origin %BRANCH%
 if errorlevel 1 (
-  echo [ERROR] git fetch failed.
-  pause
-  exit /b 1
-)
-
-git pull --rebase origin %BRANCH%
-if errorlevel 1 (
-  echo.
-  echo [ERROR] Rebase failed. Resolve conflicts, then run:
+  echo [ERROR] Rebase failed. Resolve conflicts, then:
+  echo   git status
   echo   git add -A
   echo   git rebase --continue
-  echo and re-run this script.
-  pause
-  exit /b 1
+  pause & exit /b 1
 )
 
 echo.
-echo === Pushing to origin/%BRANCH% ===
+echo === Push to origin/%BRANCH% ===
 if /I "%FORCEFLAG%"=="--force" (
   echo Using --force-with-lease
   git push --force-with-lease origin %BRANCH%
@@ -66,15 +90,10 @@ if /I "%FORCEFLAG%"=="--force" (
 )
 
 if errorlevel 1 (
-  echo.
-  echo [WARN] Push failed. Remote may have updated again.
-  echo Try re-running the script, or use:
-  echo   git fetch origin
-  echo   git pull --rebase origin %BRANCH%
+  echo [WARN] Push failed. Try again or run manually:
+  echo   git pull --rebase --autostash origin %BRANCH%
   echo   git push origin %BRANCH%
-  echo If you MUST overwrite remote history: add ^"--force^" as 2nd arg.
 ) else (
-  echo.
   echo ✅ Done! Changes pushed successfully.
 )
 
