@@ -3,24 +3,22 @@
 """
 Telegram bot (python-telegram-bot v20+), English UI
 
-- Welcome card with HTML parse_mode (no raw <b>/<code> showing)
-- Big inline buttons (Add Keywords, Settings, Help, Saved, Contact, Admin) with working callbacks
-- Shows Trial Start / Trial Ends / License Until in the welcome/settings card
+- Welcome card with HTML + big inline buttons (functional)
+- Shows Trial Start / Trial Ends / License Until + "Expires (in N days)"
 - /whoami shows role (Admin/User)
 - Keywords persistence: /addkeyword, /keywords, /delkeyword
 - Admin controls:
-    /users — list users
-    /grant <telegram_id> <days> — extend access
-    /block <telegram_id> /unblock <telegram_id>
-    /broadcast <text>
-    /feedstatus (alias /feedstats) — 24h per-platform counters
-- User → Admin extension flow:
-    /extend — sends a request to admin; admin Approve/Decline via inline buttons
-- Automatic reminder 24h before end (trial or license) via JobQueue repeating task
+    /users, /grant <telegram_id> <days>, /block, /unblock, /broadcast <text>, /feedstatus (/feedstats)
+- User → Admin extension flow: /extend + admin Approve/Decline (inline)
+- Automatic reminder 24h before expiration (trial or license) via JobQueue
+- No "affiliate" wording in UI (functionality unchanged)
+
+NOTE: JobQueue scheduling is done via ApplicationBuilder.post_init to avoid None job_queue on import.
 """
 
 import os
 import logging
+from math import ceil
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -172,6 +170,18 @@ def _fmt(dt: Optional[datetime]) -> str:
     except Exception:
         return str(dt)
 
+def _days_remaining(exp: Optional[datetime]) -> str:
+    if not exp:
+        return "—"
+    try:
+        delta = exp.astimezone(UTC) - now_utc()
+    except Exception:
+        delta = exp - now_utc()
+    secs = delta.total_seconds()
+    if secs < 0:
+        return f"expired {-ceil(abs(secs)/86400)} day(s) ago"
+    return f"in {ceil(secs/86400)} day(s)"
+
 def _active_blocked(u) -> Tuple[str, str]:
     active = "✅"
     if hasattr(u, "active"):
@@ -222,14 +232,14 @@ WELCOME_HEAD = (
     "👋 <b>Welcome to Freelancer Alert Bot!</b>\n\n"
     "🎁 <b>You have a 10-day free trial.</b>\n"
     "Automatically finds matching freelance jobs from top\n"
-    "platforms and sends you instant alerts with affiliate-safe links.\n\n"
+    "platforms and sends you instant alerts.\n\n"
     "Use <code>/help</code> to see how it works."
 )
 
 FEATURES_TEXT = (
     "✨ <b>Features</b>\n"
     "• Realtime job alerts (Freelancer API)\n"
-    "• Affiliate-wrapped <b>Proposal</b> & <b>Original</b> links\n"
+    "• Proposal & Original links (safe wrappers)\n"
     "• Budget shown + USD conversion\n"
     "• ⭐ Keep / 🗑️ Delete buttons\n"
     "• 10-day free trial, extend via admin\n"
@@ -250,12 +260,11 @@ def settings_card_text(u, kws: List[str]) -> str:
         f"🟢 Trial start: {_fmt(ts)}\n"
         f"⏳ Trial ends: {_fmt(te)}\n"
         f"🔑 License until: {_fmt(lu)}\n"
-        f"📅 <b>Expires:</b> {_fmt(exp)}\n"
+        f"📅 <b>Expires:</b> {_fmt(exp)} ({_days_remaining(exp)})\n"
         f"🟢 Active: {active}\n"
         f"⛔ Blocked: {blocked}\n\n"
         "📜 Platforms monitored:\n"
-        "<a href='https://www.freelancer.com/'>Freelancer.com</a> (affiliate links), "
-        "PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, "
+        "Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, "
         "twago, freelancermap\n"
         "(* referral/curated platforms)\n\n"
         "Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
@@ -266,15 +275,17 @@ def settings_card_text(u, kws: List[str]) -> str:
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Welcome block (HTML)
-    await update.message.reply_text(WELCOME_HEAD, reply_markup=main_menu_keyboard(), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    await update.message.reply_text(WELCOME_HEAD, reply_markup=main_menu_keyboard(),
+                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
-    # Show settings card with dates under the welcome
+    # Show settings card with dates + remaining days under the welcome
     if db_available():
         db = SessionLocal()
         try:
             u = _get_or_create_user(db, update.effective_user.id)
             kws = [_get_kw_text(k) for k in _list_keywords(db, u)]
-            await update.message.reply_text(settings_card_text(u, kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            await update.message.reply_text(settings_card_text(u, kws), parse_mode=ParseMode.HTML,
+                                            disable_web_page_preview=True)
         finally:
             db.close()
 
@@ -353,8 +364,10 @@ async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"• <code>{_kw_id(k)}</code> — {_get_kw_text(k)}")
             await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
         else:
-            await update.message.reply_text("You have no keywords yet. Add one with <code>/addkeyword ...</code>", parse_mode=ParseMode.HTML)
-        await update.message.reply_text(settings_card_text(u, shown), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            await update.message.reply_text("You have no keywords yet. Add one with <code>/addkeyword ...</code>",
+                                            parse_mode=ParseMode.HTML)
+        await update.message.reply_text(settings_card_text(u, shown), parse_mode=ParseMode.HTML,
+                                        disable_web_page_preview=True)
     except Exception as e:
         log.exception("keywords_cmd failed: %s", e)
         await update.message.reply_text("⚠️ Error while reading your keywords.")
@@ -363,7 +376,8 @@ async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: <code>/delkeyword &lt;word&gt;</code> or <code>/delkeyword &lt;id&gt;</code>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("Usage: <code>/delkeyword &lt;word&gt;</code> or <code>/delkeyword &lt;id&gt;</code>",
+                                        parse_mode=ParseMode.HTML)
         return
     ident = " ".join(context.args).strip()
     if not db_available():
@@ -404,7 +418,8 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db.delete(row); deleted += 1
             db.commit()
         if deleted:
-            await update.message.reply_text(f"🗑️ Deleted {deleted} keyword(s) for <code>{ident}</code>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(f"🗑️ Deleted {deleted} keyword(s) for <code>{ident}</code>",
+                                            parse_mode=ParseMode.HTML)
         else:
             await update.message.reply_text("Nothing found to delete.")
     except Exception as e:
@@ -422,9 +437,8 @@ async def extend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_id_env:
         await update.message.reply_text("Admin is not configured.")
         return
-    # Notify admin
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Approve +{} days".format(APPROVAL_EXTRA_DAYS), callback_data=f"adm:approve:{user_id}")],
+        [InlineKeyboardButton(f"✅ Approve +{APPROVAL_EXTRA_DAYS} days", callback_data=f"adm:approve:{user_id}")],
         [InlineKeyboardButton("❌ Decline", callback_data=f"adm:decline:{user_id}")],
     ])
     await context.bot.send_message(chat_id=int(admin_id_env),
@@ -473,7 +487,8 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     if len(context.args) < 2:
-        await update.message.reply_text("Usage: <code>/grant &lt;telegram_id&gt; &lt;days&gt;</code>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("Usage: <code>/grant &lt;telegram_id&gt; &lt;days&gt;</code>",
+                                        parse_mode=ParseMode.HTML)
         return
     if not db_available():
         await update.message.reply_text("DB not available.")
@@ -481,7 +496,8 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(context.args[0]); days = int(context.args[1])
     except Exception:
-        await update.message.reply_text("Usage: <code>/grant &lt;telegram_id&gt; &lt;days&gt;</code>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("Usage: <code>/grant &lt;telegram_id&gt; &lt;days&gt;</code>",
+                                        parse_mode=ParseMode.HTML)
         return
     db = SessionLocal()
     try:
@@ -574,7 +590,8 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id = getattr(u, f); break
                 if not chat_id: continue
                 try:
-                    await client.post(api, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True})
+                    await client.post(api, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML",
+                                                 "disable_web_page_preview": True})
                     sent += 1
                 except Exception: pass
         await update.message.reply_text(f"📣 Broadcast sent to {sent} users.")
@@ -639,7 +656,8 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             u = _get_or_create_user(db, q.from_user.id)
             kws = [_get_kw_text(k) for k in _list_keywords(db, u)]
-            await q.message.reply_text(settings_card_text(u, kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            await q.message.reply_text(settings_card_text(u, kws), parse_mode=ParseMode.HTML,
+                                       disable_web_page_preview=True)
         finally:
             db.close()
     elif data == "act:help":
@@ -680,7 +698,8 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.commit()
             await q.message.reply_text(f"✅ Approved. Extended {APPROVAL_EXTRA_DAYS} day(s) for {target}.")
             try:
-                await context.bot.send_message(chat_id=target, text=f"✅ Approved. Your access was extended by {APPROVAL_EXTRA_DAYS} day(s).")
+                await context.bot.send_message(chat_id=target,
+                                               text=f"✅ Approved. Your access was extended by {APPROVAL_EXTRA_DAYS} day(s).")
             except Exception: pass
         finally:
             db.close()
@@ -705,7 +724,6 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
     try:
         users = _list_all_users(db)
         for u in users:
-            # Skip blocked if field exists
             if hasattr(u, "blocked") and bool(getattr(u, "blocked")):
                 continue
             exp = _effective_expiry(u)
@@ -725,8 +743,8 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
                     try:
                         await context.bot.send_message(
                             chat_id=chat_id,
-                            text=f"⏳ Reminder: your access expires on <b>{_fmt(exp_utc)}</b>. "
-                                 "Use /extend to request extra days.",
+                            text=f"⏳ Reminder: your access expires on <b>{_fmt(exp_utc)}</b> "
+                                 f"({_days_remaining(exp_utc)}). Use /extend to request extra days.",
                             parse_mode=ParseMode.HTML
                         )
                     except Exception:
@@ -736,7 +754,8 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
                     try:
                         await context.bot.send_message(
                             chat_id=int(admin_id_env),
-                            text=f"⏳ User <code>{_display_id(u)}</code> expires on <b>{_fmt(exp_utc)}</b>.",
+                            text=f"⏳ User <code>{_display_id(u)}</code> expires on <b>{_fmt(exp_utc)}</b> "
+                                 f"({_days_remaining(exp_utc)}).",
                             parse_mode=ParseMode.HTML
                         )
                     except Exception:
@@ -746,11 +765,19 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Application Builder ----------
 
+async def _post_init(app: Application):
+    """Scheduled after Application.initialize(); job_queue is available here."""
+    try:
+        app.job_queue.run_repeating(check_expirations, interval=24 * 3600, first=60)
+        log.info("Expiration reminder scheduled.")
+    except Exception as e:
+        log.warning("Could not schedule reminder: %s", e)
+
 def build_application() -> Application:
     token = (os.getenv("BOT_TOKEN") or "").strip()
     if not token:
         raise RuntimeError("BOT_TOKEN is not set in environment variables.")
-    app_ = ApplicationBuilder().token(token).build()
+    app_ = ApplicationBuilder().token(token).post_init(_post_init).build()
 
     # user commands
     app_.add_handler(CommandHandler("start", start_cmd))
@@ -771,9 +798,6 @@ def build_application() -> Application:
 
     # buttons
     app_.add_handler(CallbackQueryHandler(button_router))
-
-    # schedule daily expiration check (first run in 60s)
-    app_.job_queue.run_repeating(check_expirations, interval=24 * 3600, first=60)
 
     log.info("Handlers & jobs registered.")
     return app_
