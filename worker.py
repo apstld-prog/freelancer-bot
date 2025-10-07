@@ -1,202 +1,223 @@
+# worker.py
+# -----------------------------------------------------------------------------
+# Job fetcher/dispatcher loop
+# -----------------------------------------------------------------------------
+
 import asyncio
-import logging
 import os
-from typing import Dict, Any, List
+import math
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
 
 import httpx
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 
-from db import get_session, now_utc, User, Job, JobSent
-from worker_stats_sidecar import publish_stats  # για feeds status
+from db_async import get_session, get_session_sync  # <— ΧΡΗΣΗ ADAPTER
+from db import User, Keyword, Job, JobSent, SavedJob, now_utc  # ΜΟΝΤΕΛΑ / βοηθητικά
+from worker_stats_sidecar import publish_stats  # για /feedsstatus
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("db")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# --------------- helpers ----------------
 
-# --------------------------
-# TG send
-# --------------------------
-async def tg_send(chat_id: int, text: str, *, reply_markup=None, parse_mode: str = "HTML"):
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True,
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
+async def tg_send(chat_id: int, text: str, reply_markup: Optional[dict] = None, parse_mode: Optional[str] = None):
     async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(f"{TG_API}/sendMessage", json=payload)
+        payload = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        r = await client.post(f"{API_URL}/sendMessage", json=payload)
         r.raise_for_status()
-        log.info("HTTP Request: POST %s/sendMessage OK", TG_API)
         return r.json()
 
-# --------------------------
-# Job card helpers (ίδιο layout με bot)
-# --------------------------
-def html_escape(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def md_esc(s: str) -> str:
+    return s.replace("_", r"\_").replace("*", r"\*").replace("[", r"\[").replace("`", r"\`")
 
-def format_job_card(job: Job) -> str:
-    budget = ""
-    if job.budget_min is not None and job.budget_max is not None and job.budget_currency:
-        budget = f"{int(job.budget_min)}–{int(job.budget_max)} {job.budget_currency}"
-    bids = str(job.bids_count) if job.bids_count is not None else "—"
-    desc = html_escape((job.description or "").strip())
-    if len(desc) > 280:
-        desc = desc[:277] + " …"
-    return (
-        f"<b>{html_escape(job.title or '(no title)')}</b>\n\n"
-        f"<b>Source:</b> {html_escape(job.source.capitalize())}\n"
-        f"<b>Type:</b> {html_escape(job.job_type or '—')}\n"
-        f"<b>Budget:</b> {budget or '—'}\n"
-        f"<b>Bids:</b> {bids}\n"
-        f"<b>Posted:</b> recent\n\n"
-        f"{desc}\n\n"
-        f"<i>Matched:</i> {html_escape(job.matched_keyword or '')}"
-    )
+# --------------- FEEDS (μείνανε ως είχαν) ----------------
+# Δείχνω μόνο freelancer/pph/kariera σαν παράδειγμα· άφησα hooks για τα υπόλοιπα.
 
-def job_keyboard(job: Job) -> Dict[str, Any]:
-    jid = f"{job.source}-{job.source_id}"
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "📦 Proposal", "url": job.proposal_url or job.url},
-                {"text": "🔗 Original", "url": job.original_url or job.url},
-            ],
-            [
-                {"text": "⭐ Keep", "callback_data": f"job:keep:{jid}"},
-                {"text": "🗑️ Delete", "callback_data": f"job:delmsg:{jid}"},
-            ],
-        ]
-    }
-
-# --------------------------
-# Feeds (placeholder: μόνο Freelancer ήδη έτοιμο στο σύστημά σου)
-# --------------------------
-async def fetch_freelancer_for_keyword(client: httpx.AsyncClient, kw: str) -> List[dict]:
+async def fetch_freelancer(q: str) -> List[dict]:
     url = "https://www.freelancer.com/api/projects/0.1/projects/active/"
     params = {
-        "query": kw,
+        "query": q,
         "limit": 30,
         "compact": "true",
         "user_details": "true",
         "job_details": "true",
         "full_description": "true",
     }
-    r = await client.get(url, params=params)
-    r.raise_for_status()
-    data = r.json()
-    items = data.get("result", {}).get("projects", []) or []
+    async with httpx.AsyncClient(timeout=25) as client:
+        r = await client.get(url, params=params)
+        r.raise_for_status()
+        data = r.json()
+    projects = data.get("result", {}).get("projects", []) or []
     out = []
-    for p in items:
+    for p in projects:
         out.append({
             "source": "freelancer",
-            "source_id": str(p.get("id")),
+            "external_id": str(p.get("id")),
             "title": p.get("title") or "",
-            "description": p.get("description") or "",
+            "description": (p.get("description") or "")[:2000],
             "url": f"https://www.freelancer.com/projects/{p.get('id')}",
+            "proposal_url": None,
             "original_url": f"https://www.freelancer.com/projects/{p.get('id')}",
-            "proposal_url": f"https://www.freelancer.com/projects/{p.get('id')}",
-            "budget_min": float((p.get("budget", {}) or {}).get("minimum", 0)) if p.get("budget") else None,
-            "budget_max": float((p.get("budget", {}) or {}).get("maximum", 0)) if p.get("budget") else None,
-            "budget_currency": (p.get("currency", {}) or {}).get("code") if p.get("currency") else None,
+            "budget_min": float(p.get("budget", {}).get("minimum", 0) or 0),
+            "budget_max": float(p.get("budget", {}).get("maximum", 0) or 0),
+            "budget_currency": p.get("currency", {}).get("code") or "USD",
             "job_type": "fixed" if (p.get("type") == "fixed") else "hourly",
-            "bids_count": p.get("bid_stats", {}).get("bid_count") if p.get("bid_stats") else None,
-            "matched_keyword": kw,
+            "bids_count": int(p.get("bid_stats", {}).get("bid_count", 0) or 0),
+            "matched_keyword": q,
+            "posted_at": now_utc(),
         })
     return out
 
-# --------------------------
-# Worker main
-# --------------------------
-async def process_user(u: User) -> int:
-    sent = 0
+async def fetch_pph(q: str) -> List[dict]:
+    url = f"https://www.peopleperhour.com/freelance-jobs?q={q}"
     async with httpx.AsyncClient(timeout=25) as client:
-        # keywords
-        kws = [k.keyword for k in (u.keywords or [])]
-        all_cards: List[dict] = []
-        for kw in kws:
-            try:
-                jobs = await fetch_freelancer_for_keyword(client, kw)
-                # persist & prepare cards
-                for j in jobs:
-                    # store or fetch local
-                    async with get_session() as dbs:
-                        existing = dbs.query(Job).filter(
-                            Job.source == j["source"],
-                            Job.source_id == j["source_id"]
-                        ).one_or_none()
-                        if not existing:
-                            job = Job(
-                                source=j["source"],
-                                source_id=j["source_id"],
-                                title=j["title"],
-                                description=j["description"],
-                                url=j["url"],
-                                original_url=j["original_url"],
-                                proposal_url=j["proposal_url"],
-                                budget_min=j["budget_min"],
-                                budget_max=j["budget_max"],
-                                budget_currency=j["budget_currency"],
-                                job_type=j["job_type"],
-                                bids_count=j["bids_count"],
-                                matched_keyword=j["matched_keyword"],
-                                posted_at=now_utc(),
-                                created_at=now_utc(),
-                                updated_at=now_utc(),
-                            )
-                            dbs.add(job)
-                            dbs.commit()
-                            dbs.refresh(job)
-                        else:
-                            job = existing
-                    # check sent
-                    async with get_session() as dbs2:
-                        already = dbs2.query(JobSent).filter(JobSent.user_id == u.id, JobSent.job_id == job.id).one_or_none()
-                        if already:
-                            continue
-                        text = format_job_card(job)
-                        kb = job_keyboard(job)
-                        try:
-                            await tg_send(int(u.telegram_id), text, reply_markup=kb, parse_mode="HTML")
-                            dbs2.add(JobSent(user_id=u.id, job_id=job.id, created_at=now_utc()))
-                            dbs2.commit()
-                            sent += 1
-                        except Exception as e:
-                            log.warning("Send failed: %s", e)
-            except Exception as e:
-                log.warning("fetch/send error for kw %s: %s", kw, e)
+        r = await client.get(url)
+        r.raise_for_status()
+    # placeholder parser (κρατάμε μόνο link τίτλο)
+    return []
+
+async def fetch_kariera(q: str) -> List[dict]:
+    url = f"https://www.kariera.gr/jobs?keyword={q}"
+    async with httpx.AsyncClient(timeout=25) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+    # placeholder parser (post-filter γίνεται αλλού)
+    return []
+
+# ---------------- persist / send ----------------
+
+async def upsert_and_send(db, u: User, job_payloads: List[dict]) -> int:
+    sent = 0
+    for payload in job_payloads:
+        # upsert με external_id + source
+        j = db.query(Job).filter(
+            Job.source == payload["source"],
+            Job.external_id == payload["external_id"]
+        ).one_or_none()
+        if not j:
+            j = Job(**payload)
+            db.add(j)
+            db.commit()
+            db.refresh(j)
+
+        # μην το στείλουμε 2 φορές στον ίδιο χρήστη
+        already = db.query(JobSent).filter(
+            JobSent.user_id == u.id,
+            JobSent.job_id == j.id
+        ).one_or_none()
+        if already:
+            continue
+
+        # κάρτα
+        title = md_esc(j.title or "Untitled")
+        lines = [
+            f"*{title}*",
+            f"Source: Freelancer" if j.source == "freelancer" else f"Source: {j.source.title()}",
+        ]
+        if j.job_type:
+            lines.append(f"Type: {j.job_type.title()}")
+        if j.budget_min or j.budget_max:
+            rng = f"{int(j.budget_min) if j.budget_min else ''}–{int(j.budget_max) if j.budget_max else ''} {j.budget_currency or ''}".strip("– ").strip()
+            lines.append(f"Budget: {rng}")
+        if j.bids_count:
+            lines.append(f"Bids: {j.bids_count}")
+        lines.append("Posted: recent")
+        lines.append("")
+        desc = (j.description or "")[:600]
+        if desc:
+            lines.append(desc + (" …" if len(j.description or "") > 600 else ""))
+        lines.append("")
+        lines.append(f"Matched: {md_esc(j.matched_keyword or '')}")
+
+        text = "\n".join(lines)
+
+        kb = {
+            "inline_keyboard": [
+                [
+                    {"text": "📦 Proposal", "url": j.proposal_url or j.url},
+                    {"text": "🔗 Original", "url": j.original_url or j.url},
+                ],
+                [
+                    {"text": "⭐ Keep", "callback_data": f"keep:{j.id}"},
+                    {"text": "🗑️ Delete", "callback_data": f"del:{j.id}"},
+                ],
+            ]
+        }
+        await tg_send(int(u.telegram_id), text, reply_markup=kb, parse_mode="Markdown")
+
+        db.add(JobSent(user_id=u.id, job_id=j.id))
+        db.commit()
+        sent += 1
     return sent
 
+# ---------------- main per-user ----------------
+
+async def process_user(u: User) -> int:
+    sent = 0
+    async with get_session() as db:  # <— ΤΩΡΑ είναι νόμιμο
+        # φορτώνουμε μαζί και keywords (avoid lazy-load problems)
+        user = db.query(User).options(joinedload(User.keywords)).filter(User.id == u.id).one()
+        kws = [k.keyword for k in (user.keywords or [])]
+        if not kws:
+            return 0
+
+        feeds_counts: Dict[str, Dict[str, Any]] = {}
+        for kw in kws:
+            # FREELANCER
+            fl = await fetch_freelancer(kw)
+            feeds_counts.setdefault("freelancer", {"count": 0, "error": None})
+            feeds_counts["freelancer"]["count"] += len(fl)
+            sent += await upsert_and_send(db, user, fl)
+
+            # PPH (placeholder)
+            try:
+                pph = await fetch_pph(kw)
+                feeds_counts.setdefault("pph", {"count": 0, "error": None})
+                feeds_counts["pph"]["count"] += len(pph)
+                # sent += await upsert_and_send(db, user, pph)
+            except Exception as e:
+                feeds_counts.setdefault("pph", {"count": 0, "error": str(e)})
+
+            # KARIERA (placeholder)
+            try:
+                kr = await fetch_kariera(kw)
+                feeds_counts.setdefault("kariera", {"count": 0, "error": None})
+                feeds_counts["kariera"]["count"] += len(kr)
+                # sent += await upsert_and_send(db, user, kr)
+            except Exception as e:
+                feeds_counts.setdefault("kariera", {"count": 0, "error": str(e)})
+
+        # δημοσίευση μετρικών για /feedsstatus
+        publish_stats(
+            feeds_counts=feeds_counts,
+            cycle_seconds=0.0,  # αν μετράς διάρκεια βάλε εδώ
+            sent_this_cycle=sent,
+        )
+    return sent
+
+# ---------------- loop ----------------
+
 async def worker_loop():
-    log.info("Worker loop starting…")
     while True:
-        cycle_start = now_utc()
-        feeds_counts = {"freelancer": {"count": 0, "error": None}}
-        total_sent = 0
+        total = 0
         try:
+            # παίρνουμε τους ενεργούς χρήστες
             async with get_session() as db:
                 users = db.query(User).filter(User.is_blocked == False).all()
             for u in users:
-                try:
-                    s = await process_user(u)
-                    total_sent += s
-                    feeds_counts["freelancer"]["count"] += s
-                except Exception as e:
-                    log.exception("process_user error: %s", e)
+                total += await process_user(u)
         except Exception as e:
-            log.exception("Loop-level error: %s", e)
-
-        cycle_seconds = (now_utc() - cycle_start).total_seconds()
-        try:
-            publish_stats(feeds_counts=feeds_counts, cycle_seconds=cycle_seconds, sent_this_cycle=total_sent)
-        except Exception as e:
-            log.warning("publish_stats failed: %s", e)
-
-        log.info("Worker cycle complete. Sent %d messages.", total_sent)
-        await asyncio.sleep(int(os.getenv("WORKER_INTERVAL", "300")))
+            # απλή προστασία – να μην πέφτει ο loop
+            print(f"[worker] loop error: {e}")
+        finally:
+            print(f"[worker] cycle done. sent={total}")
+        await asyncio.sleep(int(os.getenv("WORKER_INTERVAL", "120")))
 
 if __name__ == "__main__":
     asyncio.run(worker_loop())
