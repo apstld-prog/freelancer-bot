@@ -1,9 +1,8 @@
 # bot.py
 # -----------------------------------------------------------------------------
-# Sync DB sessions (SessionLocal). Στήσιμο: Start hero + Features,
-# Help, MySettings, Keep/Delete callbacks & /feedsstatus register.
+# Σταθερό /start χωρίς 500, ίδιο στήσιμο με hero + features, Help, MySettings,
+# Proposal/Original/Keep/Delete callbacks.
 # -----------------------------------------------------------------------------
-
 import os
 from typing import Optional
 
@@ -14,21 +13,9 @@ from telegram.ext import (
 )
 
 from db import SessionLocal, User, Keyword, Job, SavedJob, JobSent
-try:
-    from feedsstatus_handler import register_feedsstatus_handler  # pragma: no cover
-except Exception:
-    def register_feedsstatus_handler(app: Application):
-        return
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID  = os.getenv("ADMIN_ID", "")
-
-
-def is_admin(update: Update) -> bool:
-    try:
-        return str(update.effective_user.id) == str(ADMIN_ID)
-    except Exception:
-        return False
 
 def md_esc(s: str) -> str:
     return (
@@ -57,13 +44,16 @@ def ensure_user_sync(tg_id: str, name: str, username: Optional[str]) -> User:
     finally:
         db.close()
 
-
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    _u = ensure_user_sync(
-        str(update.effective_user.id),
-        update.effective_user.full_name,
-        update.effective_user.username
-    )
+    try:
+        _u = ensure_user_sync(
+            str(update.effective_user.id),
+            update.effective_user.full_name,
+            update.effective_user.username
+        )
+    except Exception:
+        # μην ρίχνουμε 500 – απλά συνεχίζουμε με UI
+        pass
 
     hero = (
         "👋 *Welcome to Freelancer Alert Bot!*\n\n"
@@ -92,7 +82,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_chat.send_message(features, parse_mode="Markdown")
 
-
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "🧭 *Help / How it works*\n"
@@ -105,7 +94,6 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /platforms CC to list platforms by country\n"
     )
     await update.effective_chat.send_message(txt, parse_mode="Markdown")
-
 
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
@@ -123,7 +111,6 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message(txt, parse_mode="Markdown")
     finally:
         db.close()
-
 
 async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -159,18 +146,12 @@ async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-
 def build_application() -> Application:
     if not BOT_TOKEN:
-        # θα σκάσει InvalidToken νωρίτερα, αλλά ας το ελέγξουμε καθαρά
         raise RuntimeError("TELEGRAM_BOT_TOKEN is empty.")
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CallbackQueryHandler(button_cb))
-
-    # admin-only feedsstatus (no-op αν λείπει το module)
-    register_feedsstatus_handler(app)
     return app
