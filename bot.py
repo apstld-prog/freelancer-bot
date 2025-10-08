@@ -41,7 +41,7 @@ def main_kb():
         [InlineKeyboardButton("🆘 Help",callback_data="act:help"),
          InlineKeyboardButton("💾 Saved",callback_data="act:saved")],
         [InlineKeyboardButton("📞 Contact",callback_data="act:contact"),
-         InlineKeyboardButton("Admin",callback_data="act:admin")],  # χωρίς σύμβολα
+         InlineKeyboardButton("Admin",callback_data="act:admin")],  # χωρίς emoji
     ])
 
 WELCOME_HEAD=(
@@ -104,7 +104,7 @@ def settings_card(u, kws:List[str])->str:
         if not x: return "—"
         s=(x - now_utc()).total_seconds()
         if s<0: return f"expired {int(abs(s)//86400)+1} day(s) ago"
-        return f"in {int(s//86400)+1} day(s)"
+        return f"in {int(s)//86400 + 1} day(s)"
     active="✅" if (not getattr(u,"is_blocked",False) and exp and exp>=now_utc()) else "❌"
     blocked="✅" if getattr(u,"is_blocked",False) else "❌"
     kw=", ".join(kws) if kws else "—"
@@ -115,7 +115,7 @@ def settings_card(u, kws:List[str])->str:
             f"Active: {active}   Blocked: {blocked}\n\n"
             "Platforms monitored:\n"
             "Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, "
-            "twago, freelancermap\n(* referral/curated platforms)\n\n"
+            "twago, freelancermap\n(* referral/curated)\n\n"
             "Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
             "When your trial ends, please contact the admin to extend your access.")
 
@@ -144,15 +144,20 @@ async def help_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def mysettings_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    """Works for both /mysettings AND Settings button (callback)."""
     if not (SessionLocal and User):
-        await update.message.reply_text("DB not available."); return
+        await (update.effective_message or update.message).reply_text("DB not available.")
+        return
     db=SessionLocal()
     try:
         u=db.query(User).filter(getattr(User,_uid_field())==str(update.effective_user.id)).one_or_none()
         if not u:
-            await update.message.reply_text("User not found."); return
+            await (update.effective_message or update.message).reply_text("User not found.")
+            return
         kws=_collect_keywords(u)
-        await update.message.reply_text(settings_card(u,kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        await (update.effective_message or update.message).reply_text(
+            settings_card(u,kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
     finally:
         try: db.close()
         except Exception: pass
@@ -167,7 +172,6 @@ async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         rows=db.query(User).all()
         lines=["Users"]
         for u in rows:
-            kid=getattr(u,"id",None)
             tid=getattr(u,_uid_field(),None)
             kws=_collect_keywords(u)
             trial=getattr(u,"trial_until",None)
@@ -257,7 +261,8 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
 
     await q.answer()
 
-# ===== /feedstatus (JOIN job_sent -> job) =====
+# ===== /feedstatus =====
+def now(): return datetime.now(UTC)
 async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if not is_admin_id(update.effective_user.id):
         await update.message.reply_text("Admin only."); return
@@ -265,7 +270,7 @@ async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("DB not available."); return
     db=SessionLocal()
     try:
-        since=now_utc()-timedelta(hours=24)
+        since=now()-timedelta(hours=24)
         rows=(db.query(Job.source)
                 .join(JobSent, JobSent.job_id==Job.id)
                 .filter(JobSent.created_at>=since)
@@ -303,5 +308,4 @@ def build_application()->Application:
     app.add_handler(CallbackQueryHandler(job_buttons_cb, pattern=r"^job:(save|delete):"))
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))
 
-    # (Όλα τα υπόλοιπα custom handlers σου μένουν ως έχουν στο project)
     return app
