@@ -21,21 +21,17 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     telegram_id = Column(String, unique=True, nullable=False)
 
-    # flags
     is_admin = Column(Boolean, nullable=False, server_default=text("false"))
     is_active = Column(Boolean, nullable=False, server_default=text("true"))
     is_blocked = Column(Boolean, nullable=False, server_default=text("false"))
 
-    # access dates
     trial_start = Column(TIMESTAMP(timezone=True))
     trial_end = Column(TIMESTAMP(timezone=True))
     license_until = Column(TIMESTAMP(timezone=True))
 
-    # settings
-    countries = Column(String)                 # CSV or 'ALL'
+    countries = Column(String)
     proposal_template = Column(String)
 
-    # audit
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
@@ -57,92 +53,154 @@ class Keyword(Base):
 
 
 def ensure_schema():
-    # 1) create tables if not exist
+    # 1) Δημιουργία tables αν δεν υπάρχουν
     Base.metadata.create_all(bind=engine)
 
-    # 2) idempotent migrations: add missing columns safely
+    # 2) Idempotent migrations (δεν σπάνε αν τρέξουν πολλές φορές)
     with engine.begin() as conn:
-        # user flags
+        # --- USER columns ---
         conn.exec_driver_sql("""
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='user' AND column_name='is_active') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='user' AND column_name='is_active'
+            ) THEN
                 ALTER TABLE "user" ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT true;
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='user' AND column_name='is_blocked') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='user' AND column_name='is_blocked'
+            ) THEN
                 ALTER TABLE "user" ADD COLUMN is_blocked BOOLEAN NOT NULL DEFAULT false;
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='user' AND column_name='is_admin') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='user' AND column_name='is_admin'
+            ) THEN
                 ALTER TABLE "user" ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT false;
             END IF;
-        END $$;""")
 
-        # user access dates
-        conn.exec_driver_sql("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='user' AND column_name='trial_start') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='user' AND column_name='trial_start'
+            ) THEN
                 ALTER TABLE "user" ADD COLUMN trial_start TIMESTAMPTZ NULL;
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='user' AND column_name='trial_end') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='user' AND column_name='trial_end'
+            ) THEN
                 ALTER TABLE "user" ADD COLUMN trial_end TIMESTAMPTZ NULL;
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='user' AND column_name='license_until') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='user' AND column_name='license_until'
+            ) THEN
                 ALTER TABLE "user" ADD COLUMN license_until TIMESTAMPTZ NULL;
             END IF;
-        END $$;""")
 
-        # user settings
-        conn.exec_driver_sql("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='user' AND column_name='countries') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='user' AND column_name='countries'
+            ) THEN
                 ALTER TABLE "user" ADD COLUMN countries TEXT NULL;
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='user' AND column_name='proposal_template') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='user' AND column_name='proposal_template'
+            ) THEN
                 ALTER TABLE "user" ADD COLUMN proposal_template TEXT NULL;
             END IF;
-        END $$;""")
 
-        # user audit
-        conn.exec_driver_sql("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='user' AND column_name='created_at') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='user' AND column_name='created_at'
+            ) THEN
                 ALTER TABLE "user" ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT now();
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='user' AND column_name='updated_at') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='user' AND column_name='updated_at'
+            ) THEN
                 ALTER TABLE "user" ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
             END IF;
         END $$;""")
 
-        # keyword audit
+        # --- KEYWORD.value: create & backfill από πιθανές παλιές στήλες ---
         conn.exec_driver_sql("""
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='keyword' AND column_name='created_at') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='keyword' AND column_name='value'
+            ) THEN
+                ALTER TABLE keyword ADD COLUMN value TEXT NULL;
+            END IF;
+
+            -- Backfill από παλιές πιθανές στήλες
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='keyword' AND column_name='keyword'
+            ) THEN
+                UPDATE keyword SET value = COALESCE(value, keyword) WHERE value IS NULL OR value = '';
+            END IF;
+
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='keyword' AND column_name='name'
+            ) THEN
+                UPDATE keyword SET value = COALESCE(value, name) WHERE value IS NULL OR value = '';
+            END IF;
+
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='keyword' AND column_name='term'
+            ) THEN
+                UPDATE keyword SET value = COALESCE(value, term) WHERE value IS NULL OR value = '';
+            END IF;
+
+            -- Τελευταίο fallback: κενό string αντί για NULL
+            UPDATE keyword SET value = '' WHERE value IS NULL;
+
+            -- Τώρα κάνε τη NOT NULL
+            ALTER TABLE keyword ALTER COLUMN value SET NOT NULL;
+        END $$;""")
+
+        # --- KEYWORD unique constraint ---
+        conn.exec_driver_sql("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uq_keyword_user_value'
+            ) THEN
+                ALTER TABLE keyword
+                ADD CONSTRAINT uq_keyword_user_value UNIQUE (user_id, value);
+            END IF;
+        END $$;""")
+
+        # --- KEYWORD audit columns ---
+        conn.exec_driver_sql("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='keyword' AND column_name='created_at'
+            ) THEN
                 ALTER TABLE keyword ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT now();
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='keyword' AND column_name='updated_at') THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='keyword' AND column_name='updated_at'
+            ) THEN
                 ALTER TABLE keyword ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
             END IF;
         END $$;""")
