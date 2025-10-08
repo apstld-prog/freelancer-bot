@@ -7,8 +7,6 @@ Freelancer Bot - Worker
 - Deduplicates (prefer affiliate sources)
 - Stores sent items in JobSent for /feedstatus
 - Sends Telegram messages with Proposal / Original + Save / Delete buttons
-
-SAFE: Δεν αλλάζει schema. Δουλεύει με το υπάρχον db.py.
 """
 
 import os
@@ -19,7 +17,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 import html
 import json
-import math
 
 import httpx
 
@@ -53,10 +50,10 @@ FEED_FREELANCER = os.getenv("FEED_FREELANCER", "1") == "1"
 SKY_FEED_URL = os.getenv("SKY_FEED_URL", "https://www.skywalker.gr/jobs/feed")
 FREELANCER_API = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 
-# Affiliate wrapping (keeps wording hidden, used only on link)
-AFFILIATE_PREFIX = os.getenv("AFFILIATE_PREFIX", "").strip()  # e.g. "https://yoursub.domain/redirect?u="
+# URL wrapper (χωρίς να γράφει “affiliate” πουθενά στο κείμενο)
+AFFILIATE_PREFIX = os.getenv("AFFILIATE_PREFIX", "").strip()  # e.g. "https://yourdomain/redirect?u="
 
-# FX rates (για USD conversion) – μπορείς να περάσεις JSON στο ENV FX_RATES, αλλιώς defaults
+# FX rates για USD conversion (μπορείς να τα περάσεις και από ENV FX_RATES ως JSON)
 _DEFAULT_FX = {
     "USD": 1.0, "EUR": 1.08, "GBP": 1.27, "CAD": 0.73, "AUD": 0.65,
     "CHF": 1.10, "JPY": 0.0066, "NOK": 0.091, "SEK": 0.091, "DKK": 0.145,
@@ -65,6 +62,7 @@ try:
     FX_RATES = json.loads(os.getenv("FX_RATES", "")) if os.getenv("FX_RATES") else _DEFAULT_FX
 except Exception:
     FX_RATES = _DEFAULT_FX
+
 
 # ----------------- helpers -----------------
 def now_utc() -> datetime:
@@ -113,7 +111,6 @@ def _list_keywords(db, user) -> List[str]:
     except Exception:
         pass
 
-    # fallback simple query
     try:
         uid = getattr(user, "id", None)
         if uid is None:
@@ -135,15 +132,10 @@ def normalize_text(s: str) -> str:
     return s
 
 def find_keyword_match(text: str, keywords: List[str]) -> Optional[str]:
-    """Return first matched keyword (case-insensitive) or None."""
-    if not text or not keywords:
-        return None
-    t = text.lower()
+    t = (text or "").lower()
     for w in keywords:
         w2 = (w or "").strip()
-        if not w2:
-            continue
-        if w2.lower() in t:
+        if w2 and w2.lower() in t:
             return w2
     return None
 
@@ -160,7 +152,6 @@ def build_job_id(prefix: str, raw_id: str) -> str:
     return f"{prefix}-{raw}" if raw else f"{prefix}-unknown"
 
 def to_usd_range(min_val: Optional[float], max_val: Optional[float], currency: str) -> Optional[str]:
-    """Convert min/max to USD using FX_RATES."""
     code = (currency or "USD").upper()
     rate = float(FX_RATES.get(code, 1.0))
     try:
@@ -170,31 +161,25 @@ def to_usd_range(min_val: Optional[float], max_val: Optional[float], currency: s
         return None
     def conv(v): return round(float(v) * rate, 2) if v is not None else None
     umin, umax = conv(vmin), conv(vmax)
-    if umin is None and umax is None:
-        return None
-    if umin is None:
-        return f"~${umax}"
-    if umax is None:
-        return f"~${umin}"
+    if umin is None and umax is None: return None
+    if umin is None: return f"~${umax}"
+    if umax is None: return f"~${umin}"
     return f"~${umin}–{umax}"
 
 def human_age(ts: Optional[datetime]) -> str:
-    if not ts:
-        return "unknown"
+    if not ts: return "unknown"
     diff = now_utc() - ts
     s = max(0, int(diff.total_seconds()))
-    if s < 60:
-        return f"{s}s ago"
+    if s < 60: return f"{s}s ago"
     m = s // 60
-    if m < 60:
-        return f"{m}m ago"
+    if m < 60: return f"{m}m ago"
     h = m // 60
-    if h < 24:
-        return f"{h}h ago"
+    if h < 24: return f"{h}h ago"
     d = h // 24
     return f"{d}d ago"
 
-async def send_job(bot_token: str, chat_id: int, text: str, url_buttons: List[Tuple[str, str]], cb_buttons: List[Tuple[str, str]]):
+async def send_job(bot_token: str, chat_id: int, text: str,
+                   url_buttons: List[tuple], cb_buttons: List[tuple]):
     api = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     kb_rows = []
     if url_buttons:
@@ -211,9 +196,14 @@ async def send_job(bot_token: str, chat_id: int, text: str, url_buttons: List[Tu
             "reply_markup": kb
         })
 
+# --- JobSent helpers with rollback-guard to avoid InFailedSqlTransaction ---
 def _safe_add_jobsent(db, user, job_id: str, source: str, title: str, url: str):
     if JobSent is None:
         return
+    try:
+        db.rollback()  # guard in case previous op failed in same session
+    except Exception:
+        pass
     try:
         row = JobSent()
         for f, v in (
@@ -230,12 +220,17 @@ def _safe_add_jobsent(db, user, job_id: str, source: str, title: str, url: str):
         db.add(row)
         db.commit()
     except Exception as e:
-        db.rollback()
+        try: db.rollback()
+        except Exception: pass
         log.warning("JobSent insert failed: %s", e)
 
 def _already_sent(db, user, job_id: str) -> bool:
     if JobSent is None:
         return False
+    try:
+        db.rollback()  # guard
+    except Exception:
+        pass
     try:
         q = db.query(JobSent)
         if hasattr(JobSent, "user_id") and hasattr(user, "id"):
@@ -246,11 +241,12 @@ def _already_sent(db, user, job_id: str) -> bool:
             q = q.filter(JobSent.job_id == job_id)
         return q.first() is not None
     except Exception:
+        try: db.rollback()
+        except Exception: pass
         return False
 
 # ----------------- Feeds -----------------
 async def fetch_skywalker() -> List[Dict]:
-    """Return list of dicts: {id,title,desc,url,source,posted_at,affiliate,budget,currency}"""
     if not FEED_SKY:
         return []
     out: List[Dict] = []
@@ -273,7 +269,6 @@ async def fetch_skywalker() -> List[Dict]:
         posted_at = None
         if pub:
             try:
-                # Example: Tue, 08 Oct 2025 18:42:00 GMT
                 posted_at = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %Z").replace(tzinfo=UTC)
             except Exception:
                 posted_at = now_utc()
@@ -284,11 +279,11 @@ async def fetch_skywalker() -> List[Dict]:
             "title": title,
             "desc": desc,
             "url": link,
-            "source": "Freelancer (curated)" if False else "Skywalker",  # keep wording neutral
+            "source": "Skywalker",
             "affiliate": False,
             "posted_at": posted_at or now_utc(),
             "budget": None,
-            "currency": "EUR",  # άγνωστο στο RSS, βάζουμε None/guess
+            "currency": None,
         })
     log.info("Skywalker fetched %d items", len(out))
     return out
@@ -322,14 +317,11 @@ async def fetch_freelancer_for_queries(queries: List[str]) -> List[Dict]:
                 currency = (p.get("currency") or {}).get("code") or "USD"
                 budget_min = (p.get("budget") or {}).get("minimum")
                 budget_max = (p.get("budget") or {}).get("maximum")
-                # posted time
-                ts = p.get("time_submitted") or p.get("submitdate")  # unix seconds
+                ts = p.get("time_submitted") or p.get("submitdate")
                 posted_at = None
                 if ts:
-                    try:
-                        posted_at = datetime.fromtimestamp(int(ts), tz=UTC)
-                    except Exception:
-                        posted_at = now_utc()
+                    try: posted_at = datetime.fromtimestamp(int(ts), tz=UTC)
+                    except Exception: posted_at = now_utc()
                 url = f"https://www.freelancer.com/projects/{pid}"
                 out.append({
                     "id": build_job_id("freelancer", str(pid)),
@@ -350,9 +342,7 @@ async def fetch_freelancer_for_queries(queries: List[str]) -> List[Dict]:
 def dedup_prefer_affiliate(items: List[Dict]) -> List[Dict]:
     seen: Dict[str, Dict] = {}
     for it in items:
-        key = (it.get("title") or "").lower().strip()
-        if not key:
-            key = (it.get("url") or "").lower().strip()
+        key = (it.get("title") or "").lower().strip() or (it.get("url") or "").lower().strip()
         prev = seen.get(key)
         if not prev:
             seen[key] = it
@@ -395,33 +385,40 @@ async def process_for_user(db, user, all_items: List[Dict]):
         url_wrapped = wrap_affiliate(url_original)
         source = it.get("source") or "Source"
 
-        # Budget + USD
+        # Budget & USD conversion
         usd_txt = None
+        raw_txt = None
         if "budget_min" in it or "budget_max" in it:
             usd_txt = to_usd_range(it.get("budget_min"), it.get("budget_max"), it.get("currency") or "USD")
             cur = (it.get("currency") or "").upper()
-            raw_txt = f"{it.get('budget_min')}-{it.get('budget_max')} {cur}".strip("- ")
-        else:
-            raw_txt = it.get("budget") or None
+            if it.get("budget_min") is not None or it.get("budget_max") is not None:
+                bmin = "" if it.get("budget_min") is None else str(it.get("budget_min"))
+                bmax = "" if it.get("budget_max") is None else str(it.get("budget_max"))
+                raw_txt = f"{bmin}-{bmax} {cur}".strip("- ")
+        elif it.get("budget"):
+            raw_txt = str(it.get("budget"))
 
         age = human_age(it.get("posted_at"))
         matched = it.get("_matched")
+        if matched:
+            match_disp = f"<b><u>{html.escape(matched)}</u></b>"
+        else:
+            match_disp = None
 
+        # === Layout σαν το screenshot ===
         parts = [f"<b>{html.escape(title)}</b>"]
         if raw_txt:
-            if usd_txt:
-                parts.append(f"💵 Budget: {html.escape(raw_txt)} ({usd_txt})")
-            else:
-                parts.append(f"💵 Budget: {html.escape(raw_txt)}")
+            parts.append(f"🧾 Budget: {html.escape(raw_txt)}" + (f" ({usd_txt})" if usd_txt else ""))
         parts.append(f"📎 Source: {source}")
-        if matched:
-            parts.append(f"🔍 Match: <i>{html.escape(matched)}</i>")
+        if match_disp:
+            parts.append(f"🔍 Match: {match_disp}")
         if snippet:
             parts.append(f"📝 {html.escape(snippet)}")
         parts.append(f"⏱️ {age}")
 
         text = "\n".join(parts)
 
+        # Buttons: 1η σειρά links, 2η σειρά actions
         url_buttons = [
             ("📨 Proposal", url_wrapped or url_original),
             ("🔗 Original", url_wrapped or url_original),
@@ -456,16 +453,13 @@ async def worker_cycle():
         users: List[User] = list(db.query(User).all())
     except Exception as e:
         log.warning("DB read users failed: %s", e)
-        try:
-            db.close()
-        except Exception:
-            pass
+        try: db.close()
+        except Exception: pass
         return
 
     items: List[Dict] = []
     try:
         sky = await fetch_skywalker() if FEED_SKY else []
-        # union of all keywords across active users for API efficiency
         fr = []
         if FEED_FREELANCER:
             all_kws = set()
@@ -480,8 +474,7 @@ async def worker_cycle():
         log.warning("Fetch error: %s", e)
         sky, fr = [], []
 
-    items.extend(sky)
-    items.extend(fr)
+    items.extend(sky); items.extend(fr)
 
     total = 0
     for u in users:
@@ -492,10 +485,8 @@ async def worker_cycle():
         except Exception as e:
             log.warning("Process user %s failed: %s", _display_user_id(u), e)
 
-    try:
-        db.close()
-    except Exception:
-        pass
+    try: db.close()
+    except Exception: pass
 
     log.info("Worker cycle complete. Sent %d messages.", total)
 
