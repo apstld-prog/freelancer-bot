@@ -41,7 +41,7 @@ def main_kb():
         [InlineKeyboardButton("🆘 Help",callback_data="act:help"),
          InlineKeyboardButton("💾 Saved",callback_data="act:saved")],
         [InlineKeyboardButton("📞 Contact",callback_data="act:contact"),
-         InlineKeyboardButton("👑 Admin",callback_data="act:admin")],
+         InlineKeyboardButton("Admin",callback_data="act:admin")],  # χωρίς σύμβολα
     ])
 
 WELCOME_HEAD=(
@@ -110,14 +110,14 @@ def settings_card(u, kws:List[str])->str:
     kw=", ".join(kws) if kws else "—"
     return ("🛠️ <b>Your Settings</b>\n"
             f"• Keywords: {kw}\n• Countries: ALL\n• Proposal template: (none)\n\n"
-            f"🟢 Trial start: {fmt(ts)}\n⏳ Trial ends: {fmt(te)}\n🔑 License until: {fmt(lu)}\n"
-            f"📅 <b>Expires:</b> {fmt(exp)} ({left(exp)})\n"
-            f"🟢 Active: {active}\n⛔ Blocked: {blocked}\n\n"
-            "📜 Platforms monitored:\n"
+            f"Trial start: {fmt(ts)}\nTrial ends: {fmt(te)}\nLicense until: {fmt(lu)}\n"
+            f"<b>Expires:</b> {fmt(exp)} ({left(exp)})\n"
+            f"Active: {active}   Blocked: {blocked}\n\n"
+            "Platforms monitored:\n"
             "Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, "
             "twago, freelancermap\n(* referral/curated platforms)\n\n"
             "Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
-            "When your trial ends, please <b>contact the admin</b> to extend your access.")
+            "When your trial ends, please contact the admin to extend your access.")
 
 # ===== commands =====
 async def start_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
@@ -142,6 +142,55 @@ async def start_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+async def mysettings_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    if not (SessionLocal and User):
+        await update.message.reply_text("DB not available."); return
+    db=SessionLocal()
+    try:
+        u=db.query(User).filter(getattr(User,_uid_field())==str(update.effective_user.id)).one_or_none()
+        if not u:
+            await update.message.reply_text("User not found."); return
+        kws=_collect_keywords(u)
+        await update.message.reply_text(settings_card(u,kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    finally:
+        try: db.close()
+        except Exception: pass
+
+async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    if not is_admin_id(update.effective_user.id):
+        await update.message.reply_text("Admin only."); return
+    if not (SessionLocal and User):
+        await update.message.reply_text("DB not available."); return
+    db=SessionLocal()
+    try:
+        rows=db.query(User).all()
+        lines=["Users"]
+        for u in rows:
+            kid=getattr(u,"id",None)
+            tid=getattr(u,_uid_field(),None)
+            kws=_collect_keywords(u)
+            trial=getattr(u,"trial_until",None)
+            lic  =getattr(u,"access_until",None) or getattr(u,"license_until",None)
+            act="✅" if (not getattr(u,"is_blocked",False) and (lic or trial) and (lic or trial)>=now_utc()) else "❌"
+            blk="✅" if getattr(u,"is_blocked",False) else "❌"
+            lines.append(f"• {tid} — kw:{len(kws)} | trial:{trial} | lic:{lic} | A:{act} B:{blk}")
+        await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
+    finally:
+        try: db.close()
+        except Exception: pass
+
+async def platforms_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    cc=" ".join(context.args).strip().upper() if context.args else ""
+    if not cc:
+        await update.message.reply_text("Usage: /platforms CC  (e.g., /platforms GR or /platforms ALL)")
+        return
+    if cc=="GR":
+        txt="Greece: JobFind.gr, Skywalker.gr, Kariera.gr"
+    else:
+        txt=("Global: Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, "
+             "Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap (*referral/curated)")
+    await update.message.reply_text(txt)
 
 async def selftest_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     kb=InlineKeyboardMarkup([
@@ -182,31 +231,17 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
         msg=("Type keywords using:\n"
              "<code>/addkeyword python, telegram</code>\n\n"
              "Tip: you can send English or Greek.")
-        await q.message.reply_text(msg, parse_mode=ParseMode.HTML)
-        await q.answer()
-        return
+        await q.message.reply_text(msg, parse_mode=ParseMode.HTML); await q.answer(); return
 
     if act=="settings":
-        if not (SessionLocal and User):
-            await q.answer(); return
-        db=SessionLocal()
-        try:
-            u=db.query(User).filter(getattr(User,_uid_field())==str(q.from_user.id)).one_or_none()
-            if u:
-                kws=_collect_keywords(u)
-                await q.message.reply_text(settings_card(u,kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        finally:
-            try: db.close()
-            except Exception: pass
-        await q.answer()
-        return
+        await mysettings_cmd(update, context); await q.answer(); return
 
     if act=="help":
         await q.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         await q.answer(); return
 
     if act=="saved":
-        await q.message.reply_text("Saved jobs list will appear here soon. (WIP)")
+        await q.message.reply_text("Saved jobs list will appear here soon.")
         await q.answer(); return
 
     if act=="contact":
@@ -236,14 +271,12 @@ async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
                 .filter(JobSent.created_at>=since)
                 .all())
         counts:Dict[str,int]={}
-        for (src,) in rows:
-            counts[src]=counts.get(src,0)+1
+        for (src,) in rows: counts[src]=counts.get(src,0)+1
         ordered=["99designs","Careerjet","Codeable","Freelancer","Guru","JobFind","Kariera","Malt",
                  "PeoplePerHour","Skywalker","Toptal","Workana","Worksome","Wripple","YunoJuno",
                  "freelancermap","twago"]
         lines=["📊 <b>Sent jobs by platform (last 24h)</b>"]
-        for name in ordered:
-            lines.append(f"• {name}: {counts.get(name,0)}")
+        for name in ordered: lines.append(f"• {name}: {counts.get(name,0)}")
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
     except Exception as e:
         log.warning("feedstatus failed: %s", e)
@@ -260,6 +293,9 @@ def build_application()->Application:
     # Commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
+    app.add_handler(CommandHandler("users", users_cmd))
+    app.add_handler(CommandHandler("platforms", platforms_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
     app.add_handler(CommandHandler(["feedstatus","feedstats"], feedstatus_cmd))
 
@@ -267,7 +303,5 @@ def build_application()->Application:
     app.add_handler(CallbackQueryHandler(job_buttons_cb, pattern=r"^job:(save|delete):"))
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))
 
-    # (Όλα τα υπόλοιπα handlers σου – whoami, addkeyword, keywords, delkeyword,
-    #  contact/admin chat, grant/block/unblock/broadcast – μένουν ως έχουν στο project)
-
+    # (Όλα τα υπόλοιπα custom handlers σου μένουν ως έχουν στο project)
     return app

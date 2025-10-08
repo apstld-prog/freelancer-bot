@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Optional
 import httpx
 
-# === DB wiring ===
+# ===== DB wiring =====
 SessionLocal = None; User=None; Keyword=None; Job=None; JobSent=None
 try:
     from db import SessionLocal as _S, User as _U, Keyword as _K, Job as _J, JobSent as _JS, init_db as _init_db
@@ -23,7 +23,7 @@ log = logging.getLogger("worker")
 logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"))
 UTC = timezone.utc
 
-# === ENV ===
+# ===== ENV =====
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT","20"))
 CYCLE_SECONDS = int(os.getenv("WORKER_INTERVAL","60"))
@@ -42,7 +42,7 @@ try:
 except Exception:
     FX_RATES = _DEFAULT_FX
 
-# === helpers ===
+# ===== helpers =====
 def now_utc(): return datetime.now(UTC)
 def _uid_field():
     for c in ("telegram_id","tg_id","chat_id","user_id","id"):
@@ -106,7 +106,7 @@ def _snippet(s, n=220):
     s=(s or "").strip()
     return (s[:n]+"…") if len(s)>n else s
 
-# === Telegram send (2-per-row) ===
+# ===== Telegram send =====
 async def _send(bot_token, chat_id, text, url_btns, cb_btns):
     api=f"https://api.telegram.org/bot{bot_token}/sendMessage"
     kb={"inline_keyboard":[]}
@@ -120,11 +120,12 @@ async def _send(bot_token, chat_id, text, url_btns, cb_btns):
             "disable_web_page_preview": True, "reply_markup": kb
         })
 
-# === DB helpers (strict safe defaults) ===
+# ===== DB helpers =====
 def get_or_create_job(db, *, source:str, source_id:str, title:str, desc:str,
                       url:str, proposal_url:str, original_url:str,
                       bmin:Optional[float], bmax:Optional[float], currency:Optional[str],
                       matched:Optional[str], posted_at:Optional[datetime]) -> int:
+    """Upsert σε job(source, source_id). ΠΟΤΕ κενά σε NOT NULL."""
     title = (title or f"Untitled Job #{source_id}").strip()[:512]
     url = (url or "").strip()
     if not url:
@@ -176,7 +177,7 @@ def add_jobsent(db, user_id:int, job_id:int):
         except Exception: pass
         log.warning("JobSent insert failed: %s", e)
 
-# === feeds ===
+# ===== feeds =====
 async def fetch_skywalker()->List[Dict]:
     if not FEED_SKY: return []
     try:
@@ -189,7 +190,7 @@ async def fetch_skywalker()->List[Dict]:
     for it in items:
         title=norm("".join(re.findall(r"<title>(.*?)</title>", it, flags=re.S))) or "Untitled Job"
         link =norm("".join(re.findall(r"<link>(.*?)</link>", it, flags=re.S)))
-        if not link:  # never insert without URL
+        if not link:  # χωρίς URL δεν στέλνουμε/αποθηκεύουμε
             continue
         guid =norm("".join(re.findall(r"<guid.*?>(.*?)</guid>", it, flags=re.S))) or link
         desc =norm("".join(re.findall(r"<description>(.*?)</description>", it, flags=re.S)))
@@ -228,7 +229,7 @@ async def fetch_freelancer_for_queries(queries: List[str]) -> List[Dict]:
                 desc  = (p.get("description") or "").strip()
                 url   = f"https://www.freelancer.com/projects/{pid}" if pid else ""
                 if not url:
-                    continue
+                    continue  # ποτέ insert χωρίς URL
                 cur   = ((p.get("currency") or {}).get("code") or "USD").upper()
                 bmin  = (p.get("budget") or {}).get("minimum")
                 bmax  = (p.get("budget") or {}).get("maximum")
@@ -247,7 +248,7 @@ async def fetch_freelancer_for_queries(queries: List[str]) -> List[Dict]:
     log.info("Freelancer fetched ~%d items (merged)", len(out))
     return out
 
-# === matching & send ===
+# ===== matching & send =====
 def dedup_prefer_affiliate(items: List[Dict]) -> List[Dict]:
     seen={}
     for it in items:
@@ -267,7 +268,8 @@ async def process_user(db, user, items)->int:
     matches=[]
     for it in items:
         mk=match_kw(f"{it.get('title','')} {it.get('desc','')}", kws)
-        if mk: x=dict(it); x["_matched"]=mk; matches.append(x)
+        if mk:
+            x=dict(it); x["_matched"]=mk; matches.append(x)
     matches=dedup_prefer_affiliate(matches)
 
     chat_id=getattr(user,_uid_field(),None)
@@ -275,23 +277,29 @@ async def process_user(db, user, items)->int:
 
     sent=0
     for it in matches:
-        # === EXTRA GUARDS: create local safe defaults BEFORE DB call ===
+        # === STRICT local defaults BEFORE touching the DB ===
         source = it.get("source") or "Unknown"
         source_id = str(it.get("source_id") or "").strip() or "unknown"
-        title = it.get("title") or (f"Untitled Job #{source_id}" if source_id else "Untitled Job")
-        url = it.get("url") or (f"https://www.freelancer.com/projects/{source_id}" if source.lower()=="freelancer" and source_id!="unknown" else "")
+        title = (it.get("title") or "").strip()
+        if not title:
+            title = f"Untitled Job #{source_id}" if source_id else "Untitled Job"
+        url = (it.get("url") or "").strip()
         if not url:
-            # δεν προσπαθούμε καν για job χωρίς URL
+            if source.lower()=="freelancer" and source_id!="unknown":
+                url = f"https://www.freelancer.com/projects/{source_id}"
+        if not url:
+            # Μην προχωρήσεις ποτέ χωρίς URL
             continue
-        desc = it.get("desc") or ""
-        proposal = it.get("proposal") or url
-        original = it.get("original") or url
+        desc = (it.get("desc") or "").strip()
+        proposal = (it.get("proposal") or url).strip()
+        original = (it.get("original") or url).strip()
         bmin = it.get("budget_min")
         bmax = it.get("budget_max")
-        cur  = it.get("currency") or "USD"
+        cur  = (it.get("currency") or "USD").upper()
         posted = it.get("posted_at") or it.get("posted") or now_utc()
         matched = it.get("_matched")
 
+        # DB upsert
         try:
             jid = get_or_create_job(
                 db,
@@ -307,12 +315,13 @@ async def process_user(db, user, items)->int:
             except Exception: pass
             continue
 
-        # avoid duplicate per user
+        # Skip duplicate per user
         try: db.rollback()
         except Exception: pass
         already = db.query(JobSent).filter(JobSent.user_id==getattr(user,"id"), JobSent.job_id==jid).first()
         if already: continue
 
+        # Build message
         raw=None; usd=None
         if bmin is not None or bmax is not None:
             bmin_s="" if bmin is None else str(bmin)
