@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-# SQL text helper for SQLAlchemy 2.x
+# SQL text helper (for SQLAlchemy 2.x raw SQL)
 try:
     from sqlalchemy import text as sql_text  # type: ignore
 except Exception:
@@ -114,9 +114,14 @@ def settings_card(u, kws:List[str])->str:
         "When your trial ends, please contact the admin to extend your access."
     )
 
-async def _reply(update:Update, text:str, kb:InlineKeyboardMarkup|None=None):
+async def _reply(update:Update, text:str, kb:InlineKeyboardMarkup|None=None, html:bool=False):
     msg = update.effective_message or update.message
-    return await msg.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
+    return await msg.reply_text(
+        text,
+        reply_markup=kb,
+        disable_web_page_preview=True,
+        parse_mode=ParseMode.HTML if html else None
+    )
 
 # ----------------------------------------------------------
 # COMMANDS
@@ -156,8 +161,25 @@ async def mysettings_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         try: db.close()
         except Exception: pass
 
+async def _send_saved_cards(update:Update, rows):
+    for j in rows:
+        kb=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📨 Proposal", url=j.proposal_url or j.original_url or j.url),
+             InlineKeyboardButton("🔗 Original", url=j.original_url or j.url or j.proposal_url)],
+            [InlineKeyboardButton("⭐ Save", callback_data=f"job:save:{j.id}"),
+             InlineKeyboardButton("🗑️ Delete", callback_data=f"job:delete:{j.id}")],
+        ])
+        text = (
+            f"{j.title or 'Untitled'}\n"
+            + (f"🧾 Budget: {j.budget_min}–{j.budget_max} {j.budget_currency}\n" if j.budget_min or j.budget_max or j.budget_currency else "")
+            + f"📎 Source: {j.source}\n"
+            + (f"🔍 Match: {j.matched_keyword}\n" if getattr(j,'matched_keyword',None) else "")
+            + (f"📝 {(j.description or '')[:1000]}\n" if j.description else "")
+        ).rstrip()
+        await _reply(update, text, kb)
+
 async def saved_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    if not all([SessionLocal, JobAction, Job, User]): 
+    if not all([SessionLocal, JobAction, Job, User]):
         await _reply(update, "DB not available."); return
     db=SessionLocal()
     try:
@@ -166,16 +188,11 @@ async def saved_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
                 .order_by(JobAction.created_at.desc()).limit(10).all()
         if not acts:
             await _reply(update, "No saved jobs yet."); return
-        lines=["💾 Saved jobs (latest 10)"]
-        for a in acts:
-            j = db.query(Job).filter(Job.id==a.job_id).one_or_none()
-            if j:
-                link = j.original_url or j.url
-                if link:
-                    lines.append(f"• {j.title or 'Untitled'}\n{link}")
-                else:
-                    lines.append(f"• {j.title or 'Untitled'}")
-        await _reply(update, "\n".join(lines))
+        job_ids=[a.job_id for a in acts]
+        rows=db.query(Job).filter(Job.id.in_(job_ids)).order_by(Job.id.desc()).all()
+        if not rows:
+            await _reply(update, "No saved jobs yet."); return
+        await _send_saved_cards(update, rows)
     finally:
         try: db.close()
         except Exception: pass
@@ -186,7 +203,6 @@ async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     since = now_utc() - timedelta(days=1)
     db=SessionLocal()
     try:
-        # normalize to lower to avoid duplicates (Freelancer vs freelancer)
         sql = (
             "SELECT LOWER(j.source) AS src, COUNT(*) AS cnt "
             "FROM job_sent s JOIN job j ON j.id=s.job_id "
@@ -208,7 +224,7 @@ async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
 # ----------------------------------------------------------
 async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     q=update.callback_query
-    if not q or not (SessionLocal and JobAction and User): 
+    if not q or not (SessionLocal and JobAction and User):
         if q: await q.answer()
         return
     data=q.data or ""
@@ -221,7 +237,6 @@ async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
         u=db.query(User).filter(getattr(User,_uid_field())==str(q.from_user.id)).one_or_none()
         if not u:
             await q.answer("User not found."); return
-        # store action
         try:
             ja = JobAction(user_id=u.id, job_id=int(jid), action=action)
             db.add(ja); db.commit()
@@ -229,17 +244,18 @@ async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
             db.rollback()
 
         if action=="save":
-            await q.answer("Saved")
-        else:
-            # delete the bot's message in the private chat
             try:
                 await q.message.delete()
             except Exception:
-                # if delete not allowed, at least edit markup to disabled state
-                try:
-                    await q.edit_message_reply_markup(reply_markup=None)
-                except Exception:
-                    pass
+                try: await q.edit_message_reply_markup(reply_markup=None)
+                except Exception: pass
+            await q.answer("Saved")
+        else:
+            try:
+                await q.message.delete()
+            except Exception:
+                try: await q.edit_message_reply_markup(reply_markup=None)
+                except Exception: pass
             await q.answer("Deleted")
     finally:
         try: db.close()
@@ -261,7 +277,15 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Send your message here and the admin will reply to you.")
     elif act=="admin":
         if is_admin_id(q.from_user.id):
-            await q.message.reply_text("Admin panel: use /users, /grant <id> <days>, /block <id>, /unblock <id>, /feedstatus.")
+            txt = (
+                "Admin panel:\n"
+                "• /users — list users\n"
+                "• /grant <id> <days> — extend license\n"
+                "• /block <id> — block user\n"
+                "• /unblock <id> — unblock user\n"
+                "• /feedstatus — show last 24h by platform"
+            )
+            await q.message.reply_text(txt, disable_web_page_preview=True)
         else:
             await q.message.reply_text("Admin only.")
     await q.answer()
@@ -291,17 +315,26 @@ async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         try: db.close()
         except Exception: pass
 
+# === CHANGED: platforms_cmd supports ALL ===
 async def platforms_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    cc=" ".join(context.args).strip().upper() if context.args else ""
-    if not cc:
-        await _reply(update, "Usage: /platforms CC  (e.g., /platforms GR or /platforms ALL)")
+    arg=" ".join(context.args).strip().upper() if context.args else ""
+    global_list = (
+        "Global: Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, "
+        "Toptal*, Codeable*, YunoJuno*, Worksome*, Wripple, twago, freelancermap, Careerjet "
+        "(*referral/curated)"
+    )
+    gr_list = "Greece: JobFind.gr, Skywalker.gr, Kariera.gr"
+    if not arg:
+        await _reply(update, "Usage: /platforms ALL | GLOBAL | GR")
         return
-    if cc=="GR":
-        txt="Greece: JobFind.gr, Skywalker.gr, Kariera.gr"
+    if arg in ("ALL","*"):
+        await _reply(update, f"{global_list}\n\n{gr_list}")
+    elif arg in ("GLOBAL","INT"):
+        await _reply(update, global_list)
+    elif arg=="GR":
+        await _reply(update, gr_list)
     else:
-        txt=("Global: Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, "
-             "Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap (*referral/curated)")
-    await _reply(update, txt)
+        await _reply(update, "Usage: /platforms ALL | GLOBAL | GR")
 
 async def selftest_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     kb=InlineKeyboardMarkup([
@@ -312,12 +345,13 @@ async def selftest_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     ])
     await _reply(update,
         "Logo Reformatting to SVG\n"
-        "🧾 Budget: 30.0–250.0 AUD (~$19.5–$162.5)\n"
+        "🧾 Budget: 30.0–250.0 AUD (~$20–$163)\n"
         "📎 Source: Freelancer\n"
-        "🔍 Match: logo\n"
+        "🔍 Match: <b><u>logo</u></b>\n"
         "📝 I need my existing logo reformatted into SVG... (sample)\n"
         "⏱️ 2m ago",
-        kb
+        kb,
+        html=True
     )
 
 def build_application()->Application:

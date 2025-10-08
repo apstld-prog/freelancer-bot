@@ -26,6 +26,7 @@ FREELANCER_LIMIT      = 30
 SKYWALKER_FEED_URL    = os.getenv("SKYWALKER_FEED", "https://www.skywalker.gr/jobs/feed")
 SEND_TIMEOUT_SECONDS  = 15
 
+# Γρήγορο conversion -> USD (προσεγγιστικό)
 FX: Dict[str, float] = {
     "USD": 1.0, "EUR": 1.09, "GBP": 1.27, "AUD": 0.65, "CAD": 0.73,
     "TRY": 0.03, "INR": 0.012,
@@ -40,14 +41,15 @@ def safe_rate(ccy: Optional[str]) -> float:
 def usd_range(lo: Optional[float], hi: Optional[float], ccy: Optional[str]) -> Optional[Tuple[float,float]]:
     r=safe_rate(ccy)
     if r<=0: return None
-    lo_usd = (lo or hi or 0.0)*r if lo or hi else 0.0
-    hi_usd = (hi or lo or 0.0)*r if lo or hi else 0.0
+    # μετατροπή σε USD
+    lo_usd = (lo if lo is not None else hi or 0.0)*r
+    hi_usd = (hi if hi is not None else lo or 0.0)*r
     return (lo_usd, hi_usd)
 
 def pretty_usd(lo: float, hi: float) -> str:
-    if lo and hi: return f"(${lo:,.0f}–${hi:,.0f})"
+    if lo and hi: return f"${lo:,.0f}–${hi:,.0f}"
     v = lo or hi
-    return f"(${v:,.0f})" if v else ""
+    return f"${v:,.0f}" if v else ""
 
 def timeago(dt: Optional[datetime]) -> str:
     if not dt: return ""
@@ -146,7 +148,7 @@ async def fetch_freelancer_for_keyword(client: httpx.AsyncClient, kw: str) -> Li
         if not pid: continue
         title = norm_text(p.get("title") or "")
         if not title: continue
-        descr = norm_text((p.get("preview_description") or p.get("description") or "")[:3000])  # full text (safe cap)
+        descr = norm_text((p.get("preview_description") or p.get("description") or "")[:3000])
         link  = f"https://www.freelancer.com/projects/{pid}"
         b     = p.get("budget") or {}
         curr  = (b.get("currency") or {}).get("code")
@@ -213,7 +215,7 @@ async def fetch_skywalker(client: httpx.AsyncClient) -> List[dict]:
     return out
 
 def compose_message(job: Job) -> str:
-    title = job.title or "Untitled"
+    title = html.escape(job.title or "Untitled")
     bline=""
     if job.budget_min is not None or job.budget_max is not None or job.budget_currency:
         rng=""
@@ -227,10 +229,9 @@ def compose_message(job: Job) -> str:
         usd_txt=f" (~{pretty_usd(usd[0], usd[1])})" if usd else ""
         bline=f"🧾 Budget: {rng}{usd_txt}".rstrip()
 
-    src=f"📎 Source: {job.source}"
-    mk =f"🔍 Match: {job.matched_keyword}" if getattr(job,"matched_keyword",None) else None
-    # 👉 πλήρης περιγραφή (όπως στην ειδοποίηση), με ασφαλές όριο < 4096
-    desc=(job.description or "").strip()
+    src=f"📎 Source: {html.escape(job.source or '')}"
+    mk = f"🔍 Match: <b><u>{html.escape(job.matched_keyword)}</u></b>" if getattr(job,"matched_keyword",None) else None
+    desc=html.escape((job.description or "").strip())
     if len(desc) > 3000:
         desc = desc[:3000] + "…"
     when=timeago(getattr(job,"posted_at",None))
@@ -263,7 +264,8 @@ async def send_to_user(client:httpx.AsyncClient, u:User, job:Job)->bool:
     payload={"chat_id": str(chat_id),
              "text": compose_message(job),
              "reply_markup": compose_keyboard(job),
-             "disable_web_page_preview": True}
+             "disable_web_page_preview": True,
+             "parse_mode": "HTML"}  # για bold/underline στο matched keyword
     try:
         r=await client.post(tg_api("sendMessage"), json=payload, timeout=SEND_TIMEOUT_SECONDS)
         r.raise_for_status()
@@ -297,13 +299,13 @@ async def cycle_once():
                     except Exception as e:
                         log.warning("Freelancer fetch failed (%s): %s", kw, e)
 
-                # dedup (Skywalker first, Freelancer last → προτεραιότητα Freelancer)
+                # dedup (Skywalker πρώτα, Freelancer τελευταίος -> προτεραιότητα affiliate)
                 pool:Dict[str,dict]={}
                 for rec in sky_list + fl_all:
                     pool[key_of(rec)] = rec
 
                 for rec in pool.values():
-                    # keyword match guard
+                    # keyword check
                     txt=(rec.get("title","")+" "+rec.get("description","")).lower()
                     matched=False
                     for kw in kws:
