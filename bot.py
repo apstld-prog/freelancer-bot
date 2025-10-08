@@ -223,6 +223,79 @@ async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         except Exception: pass
 
 # ----------------------------------------------------------
+
+# ----------------------------------------------------------
+# ADD KEYWORDS COMMAND
+# ----------------------------------------------------------
+async def addkeyword_cmd(update: "Update", context: "ContextTypes.DEFAULT_TYPE"):
+    """
+    Add comma-separated keywords for the current user.
+    Usage:
+      /addkeyword python, telegram, "logo design"
+    """
+    try:
+        _ = SessionLocal  # type: ignore
+        _ = User          # type: ignore
+        _ = Keyword       # type: ignore
+    except NameError:
+        if getattr(update, "message", None):
+            await update.message.reply_text("DB not available.")
+        return
+
+    raw = ""
+    if getattr(context, "args", None):
+        raw = " ".join(context.args)
+    if not raw and getattr(update, "message", None) and getattr(update.message, "text", ""):
+        raw = update.message.text.replace("/addkeyword", "").strip()
+
+    if not raw:
+        if getattr(update, "message", None):
+            await update.message.reply_text("Please provide at least one keyword separated by commas.")
+        return
+
+    kws = [k.strip().lower() for k in raw.split(",") if k.strip()]
+    if not kws:
+        if getattr(update, "message", None):
+            await update.message.reply_text("No valid keywords found.")
+        return
+
+    db = SessionLocal()
+    try:
+        tg_id = str(update.effective_user.id)
+        try:
+            uid_field = _uid_field()  # helper present
+        except Exception:
+            uid_field = "telegram_id"
+        u = db.query(User).filter(getattr(User, uid_field) == tg_id).one_or_none()
+        if not u:
+            trial_days = globals().get("DEFAULT_TRIAL_DAYS", 10)
+            u = User(telegram_id=tg_id, started_at=now_utc(),
+                     trial_until=now_utc() + timedelta(days=trial_days),
+                     is_blocked=False)
+            db.add(u)
+            db.commit()
+            db.refresh(u)
+
+        added = []
+        for kw in kws:
+            exists = db.query(Keyword).filter_by(user_id=u.id, keyword=kw).first()
+            if not exists:
+                db.add(Keyword(user_id=u.id, keyword=kw, created_at=now_utc()))
+                added.append(kw)
+        db.commit()
+
+        if getattr(update, "message", None):
+            if added:
+                await update.message.reply_text(f"✅ Added keywords: {', '.join(added)}")
+            else:
+                await update.message.reply_text("No new keywords were added.")
+    except Exception as e:
+        db.rollback()
+        if getattr(update, "message", None):
+            await update.message.reply_text(f"⚠️ Error: {e}")
+    finally:
+        db.close()
+
 # CONTACT / ADMIN REPLY FLOW
 # ----------------------------------------------------------
 def _grant_days_in_db(tg_id: str, days: int) -> bool:
