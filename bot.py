@@ -1,8 +1,8 @@
 # bot.py
 # -*- coding: utf-8 -*-
-import os, logging, html
+import os, logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Tuple
+from typing import List
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder, Application,
@@ -11,6 +11,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
+# DB models
 SessionLocal=User=Keyword=Job=JobSent=JobAction=None
 try:
     from db import SessionLocal as _S, User as _U, Keyword as _K, Job as _J, JobSent as _JS, JobAction as _JA, init_db as _init_db
@@ -32,6 +33,7 @@ def _uid_field():
         if hasattr(User,c): return c
     raise RuntimeError("User id column not found")
 
+# ===== UI (classic) =====
 def main_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Keywords",callback_data="act:add"),
@@ -42,38 +44,20 @@ def main_kb():
          InlineKeyboardButton("Admin",callback_data="act:admin")],
     ])
 
-WELCOME_HEAD=(
-    "👋 <b>Welcome to Freelancer Alert Bot!</b>\n\n"
-    "🎁 <b>You have a 10-day free trial.</b>\n"
+WELCOME_CLASSIC=(
+    "👋 Welcome to Freelancer Alert Bot!\n\n"
+    "🎁 You have a 10-day free trial.\n"
     "Automatically finds matching freelance jobs from top platforms and sends you instant alerts.\n\n"
-    "Use <code>/help</code> to see how it works."
+    "Use /help to see how it works."
 )
-FEATURES_TEXT=(
-    "✨ <b>Features</b>\n"
-    "• Realtime job alerts (Freelancer API)\n"
-    "• Proposal & Original links (safe wrappers)\n"
-    "• Budget shown + USD conversion\n"
-    "• ⭐ Keep / 🗑️ Delete buttons\n"
-    "• 10-day free trial, extend via admin\n"
-    "• Multi-keyword search (single/all modes)\n"
-    "• Platforms by country (incl. GR boards)"
-)
+
 HELP_TEXT=(
-    "🧭 <b>Help / How it works</b>\n\n"
-    "1️⃣ Add keywords with <code>/addkeyword python, telegram</code> (comma-separated, English or Greek).\n"
-    "2️⃣ Set your countries with <code>/setcountry US,UK</code> (or <code>ALL</code>).\n"
-    "3️⃣ Save a proposal template with <code>/setproposal &lt;text&gt;</code> — Placeholders: "
-    "<code>{jobtitle}</code>, <code>{experience}</code>, <code>{stack}</code>, <code>{availability}</code>, "
-    "<code>{step1}</code>, <code>{step2}</code>, <code>{step3}</code>, <code>{budgettime}</code>, "
-    "<code>{portfolio}</code>, <code>{name}</code>.\n"
-    "4️⃣ When a job arrives you can:\n"
-    "   ⭐ Keep it\n"
-    "   🗑️ Delete it\n"
-    "   📨 Proposal → direct link to job\n"
-    "   🔗 Original → same wrapped job link\n\n"
-    "➤ Use <code>/mysettings</code> anytime.\n"
-    "➤ <code>/selftest</code> for a test job.\n"
-    "➤ <code>/platforms CC</code> (e.g., <code>/platforms GR</code>)."
+    "🧭 Help / How it works\n\n"
+    "1) Add keywords with /addkeyword python, telegram (comma-separated, English or Greek).\n"
+    "2) Set your countries with /setcountry US,UK (or ALL).\n"
+    "3) Save a proposal template with /setproposal <text> (placeholders: {jobtitle}, {experience}, {stack}, {availability}, {step1}, {step2}, {step3}, {budgettime}, {portfolio}, {name}).\n"
+    "4) When a job arrives you can: keep, delete, open Proposal or Original link.\n\n"
+    "Use /mysettings anytime. Try /selftest for a sample. /platforms CC (e.g., /platforms GR)."
 )
 
 def _collect_keywords(u) -> List[str]:
@@ -105,37 +89,26 @@ def settings_card(u, kws:List[str])->str:
     active="✅" if (not getattr(u,"is_blocked",False) and exp and exp>=now_utc()) else "❌"
     blocked="✅" if getattr(u,"is_blocked",False) else "❌"
     kw=", ".join(kws) if kws else "—"
-    return ("🛠️ <b>Your Settings</b>\n"
-            f"• Keywords: {kw}\n• Countries: ALL\n• Proposal template: (none)\n\n"
-            f"Trial start: {fmt(ts)}\nTrial ends: {fmt(te)}\nLicense until: {fmt(lu)}\n"
-            f"<b>Expires:</b> {fmt(exp)} ({left(exp)})\n"
-            f"Active: {active}   Blocked: {blocked}\n\n"
-            "Platforms monitored:\n"
-            "Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, "
-            "twago, freelancermap\n(* referral/curated)\n\n"
-            "Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
-            "When your trial ends, please contact the admin to extend your access.")
+    return (
+        "🛠️ Your Settings\n"
+        f"• Keywords: {kw}\n• Countries: ALL\n• Proposal template: (none)\n\n"
+        f"Trial start: {fmt(ts)}\nTrial ends: {fmt(te)}\nLicense until: {fmt(lu)}\n"
+        f"Expires: {fmt(exp)} ({left(exp)})\n"
+        f"Active: {active}   Blocked: {blocked}\n\n"
+        "Platforms monitored:\n"
+        "Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, "
+        "twago, freelancermap (*referral/curated)\n\n"
+        "Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
+        "When your trial ends, please contact the admin to extend your access."
+    )
 
-# ===== helpers =====
-async def _reply(update:Update, text:str):
+async def _reply(update:Update, text:str, kb:InlineKeyboardMarkup|None=None):
     msg = update.effective_message or update.message
-    return await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-
-def _saved_list(db, uid_internal:int)->str:
-    acts = db.query(JobAction).filter(JobAction.user_id==uid_internal, JobAction.action=="save")\
-            .order_by(JobAction.created_at.desc()).limit(10).all()
-    if not acts: return "No saved jobs yet."
-    lines = ["💾 <b>Saved jobs</b> (latest 10)"]
-    for a in acts:
-        j = db.query(Job).filter(Job.id==a.job_id).one_or_none()
-        if not j: continue
-        t = html.escape(j.title or "Untitled")
-        lines.append(f"• {t}\n  🔗 {j.original_url or j.url}")
-    return "\n".join(lines)
+    return await msg.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
 
 # ===== Commands =====
 async def start_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    await _reply(update, WELCOME_HEAD)
+    await _reply(update, WELCOME_CLASSIC, main_kb())
     if not (SessionLocal and User): return
     db=SessionLocal()
     try:
@@ -148,7 +121,6 @@ async def start_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             db.add(u); db.commit(); db.refresh(u)
         kws=_collect_keywords(u)
         await _reply(update, settings_card(u,kws))
-        await _reply(update, FEATURES_TEXT)
     finally:
         try: db.close()
         except Exception: pass
@@ -176,7 +148,16 @@ async def saved_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     db=SessionLocal()
     try:
         u=db.query(User).filter(getattr(User,_uid_field())==str(update.effective_user.id)).one()
-        await _reply(update, _saved_list(db, u.id))
+        acts = db.query(JobAction).filter(JobAction.user_id==u.id, JobAction.action=="save")\
+                .order_by(JobAction.created_at.desc()).limit(10).all()
+        if not acts:
+            await _reply(update, "No saved jobs yet."); return
+        lines=["💾 Saved jobs (latest 10)"]
+        for a in acts:
+            j = db.query(Job).filter(Job.id==a.job_id).one_or_none()
+            if j:
+                lines.append(f"• {j.title or 'Untitled'}\n  {j.original_url or j.url}")
+        await _reply(update, "\n".join(lines))
     finally:
         try: db.close()
         except Exception: pass
@@ -190,17 +171,14 @@ async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         q = db.execute(
             "SELECT j.source, COUNT(*) "
             "FROM job_sent s JOIN job j ON j.id=s.job_id "
-            "WHERE s.created_at >= :since "
-            "GROUP BY j.source ORDER BY j.source",
+            "WHERE s.created_at >= :since GROUP BY j.source ORDER BY j.source",
             {"since": since}
         )
         rows = list(q)
-        title = "📊 <b>Sent jobs by platform (last 24h)</b>"
+        title = "📊 Sent jobs by platform (last 24h)"
         if not rows:
             await _reply(update, f"{title}\n(0 results)"); return
-        lines=[title]
-        for src,cnt in rows:
-            lines.append(f"• {src}: {int(cnt)}")
+        lines=[title] + [f"• {src}: {int(cnt)}" for src,cnt in rows]
         await _reply(update, "\n".join(lines))
     finally:
         try: db.close()
@@ -231,7 +209,6 @@ async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
         if action=="delete":
             try:
                 await q.message.edit_reply_markup(reply_markup=None)
-                await q.message.edit_text(q.message.text_markdown + "\n\n~~deleted~~", parse_mode=None, disable_web_page_preview=True)
             except Exception:
                 pass
             await q.answer("Deleted")
@@ -249,28 +226,19 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
 
     if act=="add":
         await q.message.reply_text(
-            "Type keywords using:\n<code>/addkeyword python, telegram</code>\n\nTip: you can send English or Greek.",
-            parse_mode=ParseMode.HTML, disable_web_page_preview=True
+            "Type keywords using:\n/addkeyword python, telegram\n\nTip: you can send English or Greek.",
+            disable_web_page_preview=True
         ); await q.answer(); return
 
     if act=="settings":
         await mysettings_cmd(update, context); await q.answer(); return
 
     if act=="help":
-        await q.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        await q.message.reply_text(HELP_TEXT, disable_web_page_preview=True)
         await q.answer(); return
 
     if act=="saved":
-        if not (SessionLocal and User):
-            await q.answer("DB not available."); return
-        db=SessionLocal()
-        try:
-            u=db.query(User).filter(getattr(User,_uid_field())==str(q.from_user.id)).one()
-            await q.message.reply_text(_saved_list(db,u.id), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        finally:
-            try: db.close()
-            except Exception: pass
-        await q.answer(); return
+        await saved_cmd(update, context); await q.answer(); return
 
     if act=="contact":
         await q.message.reply_text("Send your message here and the admin will reply to you.")
@@ -285,7 +253,7 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
 
     await q.answer()
 
-# ===== Admin bits (όπως ήταν) =====
+# ===== Admin (όπως ήταν) =====
 async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if not is_admin_id(update.effective_user.id):
         await _reply(update, "Admin only."); return
@@ -328,14 +296,14 @@ async def selftest_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🗑️ Delete", callback_data="job:delete:999999")],
     ])
     await _reply(update,
-        "<b>Logo Reformatting to SVG</b>\n"
+        "Logo Reformatting to SVG\n"
         "🧾 Budget: 30.0–250.0 AUD (~$19.5–$162.5)\n"
         "📎 Source: Freelancer\n"
-        "🔍 Match: <b><u>logo</u></b>\n"
+        "🔍 Match: logo\n"
         "📝 I need my existing logo reformatted into SVG... (sample)\n"
-        "⏱️ 2m ago"
+        "⏱️ 2m ago",
+        kb
     )
-    await update.message.reply_text(" ", reply_markup=kb)
 
 def build_application()->Application:
     if '_init_db' in globals() and callable(_init_db):

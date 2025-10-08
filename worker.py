@@ -1,7 +1,7 @@
 # worker.py
 # -*- coding: utf-8 -*-
 import os, asyncio, logging, re, html, json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import List, Dict
 import httpx
 
@@ -56,13 +56,6 @@ def _kws(db,u):
                 if t: out.append(str(t))
             return out
     except Exception: pass
-    try:
-        uid=getattr(u,"id",None)
-        fld="keyword" if hasattr(Keyword,"keyword") else "text"
-        for k in db.query(Keyword).filter(Keyword.user_id==uid).all():
-            t=getattr(k,fld,None)
-            if t: out.append(str(t))
-    except Exception: pass
     return out
 
 def norm(s:str)->str:
@@ -81,8 +74,9 @@ def wrap(url:str)->str:
     import urllib.parse as up
     return f"{AFFILIATE_PREFIX}{up.quote(url, safe='')}"
 
-def usd_range(mn,mx,cur):
-    code=(cur or "USD").upper(); rate=float(FX_RATES.get(code,1.0))
+def usd_range(mn,mx,cur,fx= None):
+    rates=fx or FX_RATES
+    code=(cur or "USD").upper(); rate=float(rates.get(code,1.0))
     try:
         vmin=float(mn) if mn is not None else None
         vmax=float(mx) if mx is not None else None
@@ -91,9 +85,9 @@ def usd_range(mn,mx,cur):
     conv=lambda v: round(float(v)*rate,2) if v is not None else None
     umin,umax=conv(vmin),conv(vmax)
     if umin is None and umax is None: return None
-    if umin is None: return f"~${umax}"
-    if umax is None: return f"~${umin}"
-    return f"~${umin}–{umax}"
+    if umin is None: return f"(~${umax})"
+    if umax is None: return f"(~${umin})"
+    return f"(~${umin}–{umax})"
 
 def age(ts):
     if not ts: return "unknown"
@@ -105,24 +99,19 @@ def age(ts):
     if h<24: return f"{h}h ago"
     d=h//24; return f"{d}d ago"
 
-def _snippet(s, n=220):
-    s=(s or "").strip()
-    return (s[:n]+"…") if len(s)>n else s
-
 async def _send(bot_token, chat_id, text, url_btns, cb_btns):
     api=f"https://api.telegram.org/bot{bot_token}/sendMessage"
     kb={"inline_keyboard":[]}
-    if url_btns:
-        kb["inline_keyboard"].append([{"text":t,"url":u} for t,u in url_btns if u])
-    if cb_btns:
-        kb["inline_keyboard"].append([{"text":t,"callback_data":d} for t,d in cb_btns if d])
+    if url_btns: kb["inline_keyboard"].append([{"text":t,"url":u} for t,u in url_btns if u])
+    if cb_btns:  kb["inline_keyboard"].append([{"text":t,"callback_data":d} for t,d in cb_btns if d])
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         await client.post(api, json={
-            "chat_id": chat_id, "text": text, "parse_mode":"HTML",
+            "chat_id": chat_id, "text": text,
             "disable_web_page_preview": True, "reply_markup": kb
         })
 
 # ---------- DB helpers ----------
+from db import Job  # type: ignore
 def get_or_create_job(db, *, source, source_id, title, desc, url,
                       proposal_url, original_url, bmin, bmax, currency,
                       matched, posted_at) -> int:
@@ -167,25 +156,25 @@ def get_or_create_job(db, *, source, source_id, title, desc, url,
         raise
     return int(row.id)
 
+from db import JobSent  # type: ignore
 def add_jobsent(db, user_id:int, job_id:int):
     try: db.rollback()
     except Exception: pass
     try:
         js = JobSent(user_id=int(user_id), job_id=int(job_id))
         db.add(js); db.commit()
-    except Exception as e:
+    except Exception:
         try: db.rollback()
         except Exception: pass
-        log.warning("JobSent insert failed: %s", e)
 
-# ---------- Feeds ----------
+# ---------- Fetchers ----------
 async def fetch_skywalker()->List[Dict]:
     if not FEED_SKY: return []
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
             r=await client.get(SKY_FEED_URL); r.raise_for_status(); xml=r.text
-    except Exception as e:
-        log.warning("Skywalker fetch failed: %s", e); return []
+    except Exception:
+        return []
     items=re.findall(r"<item>(.*?)</item>", xml, flags=re.S)
     out=[]
     for it in items:
@@ -212,12 +201,11 @@ async def fetch_freelancer_for_queries(queries: List[str]) -> List[Dict]:
             try:
                 resp=await client.get(FREELANCER_API, params={**base,"query":q})
                 resp.raise_for_status(); data=resp.json()
-            except Exception as e:
-                log.warning("Freelancer fetch failed (%s): %s", q, e); continue
+            except Exception:
+                continue
             for p in (data.get("result") or {}).get("projects") or []:
                 pid = str(p.get("id") or "").strip()
-                raw_title = (p.get("title") or "").strip()
-                title = raw_title if raw_title else (f"Untitled Job #{pid}" if pid else "Untitled Job")
+                title = (p.get("title") or f"Untitled Job #{pid}").strip()
                 desc  = (p.get("description") or "").strip()
                 url   = f"https://www.freelancer.com/projects/{pid}" if pid else ""
                 if not url: continue
@@ -245,14 +233,31 @@ def dedup_prefer_affiliate(items: List[Dict]) -> List[Dict]:
             if a and not a0: seen[key]=it
     return list(seen.values())
 
+# ---------- Compose + send ----------
 async def process_user(db, user, items)->int:
-    kws=[k for k in _kws(db,user) if k]
+    # keywords
+    kws=[]
+    try:
+        for k in getattr(user,"keywords",[]) or []:
+            t=getattr(k,"keyword",None) or getattr(k,"text",None)
+            if t: kws.append(str(t))
+    except Exception:
+        pass
     if not kws: return 0
+
+    # match
     matches=[]
     for it in items:
-        mk=match_kw(f"{it.get('title','')} {it.get('desc','')}", kws)
-        if mk:
-            x=dict(it); x["_matched"]=mk; matches.append(x)
+        blob=f"{it.get('title','')} {it.get('desc','')}".lower()
+        hit=None
+        for w in kws:
+            ww=(w or "").strip().lower()
+            if ww and ww in blob:
+                hit=w; break
+        if hit:
+            x=dict(it); x["_matched"]=hit; matches.append(x)
+
+    # dedup
     matches=dedup_prefer_affiliate(matches)
 
     chat_id=getattr(user,_uid_field(),None)
@@ -262,7 +267,7 @@ async def process_user(db, user, items)->int:
     for it in matches:
         source = it.get("source") or "Unknown"
         source_id = str(it.get("source_id") or "").strip() or "unknown"
-        title = (it.get("title") or "").strip() or f"Untitled Job #{source_id}"
+        title = (it.get("title") or f"Untitled Job #{source_id}").strip()
         url = (it.get("url") or "").strip()
         if not url:
             if source.lower()=="freelancer" and source_id!="unknown":
@@ -277,7 +282,9 @@ async def process_user(db, user, items)->int:
         posted = it.get("posted_at") or now_utc()
         matched = it.get("_matched")
 
+        # upsert job (ensures feedstatus/saved work)
         try:
+            from db import Job  # type: ignore
             jid = get_or_create_job(
                 db,
                 source=source, source_id=source_id,
@@ -286,32 +293,26 @@ async def process_user(db, user, items)->int:
                 bmin=bmin, bmax=bmax, currency=cur,
                 matched=matched, posted_at=posted,
             )
-        except Exception as e:
-            log.warning("Job upsert failed: %s", e)
+        except Exception:
             try: db.rollback()
             except Exception: pass
             continue
 
-        try: db.rollback()
-        except Exception: pass
-        already = db.query(JobSent).filter(JobSent.user_id==getattr(user,"id"), JobSent.job_id==jid).first()
-        if already: continue
-
-        # compose message
-        raw=None; usd=None
+        # text (classic style, no HTML)
+        usd = usd_range(bmin,bmax,cur)
+        lines=[f"{title}"]
         if bmin is not None or bmax is not None:
-            raw=f"{'' if bmin is None else bmin}-{'' if bmax is None else bmax} {cur}".strip("- ")
-            usd=usd_range(bmin,bmax,cur)
-
-        lines=[f"<b>{html.escape(title)}</b>"]
-        if raw: lines.append(f"🧾 Budget: {html.escape(raw)}" + (f" ({usd})" if usd else ""))
+            rng=f"{'' if bmin is None else bmin}–{'' if bmax is None else bmax} {cur}".strip("– ")
+            lines.append(f"🧾 Budget: {rng}" + (f" {usd}" if usd else ""))
         lines.append(f"📎 Source: {source}")
-        if matched: lines.append(f"🔍 Match: <b><u>{html.escape(matched)}</u></b>")
-        sn=(desc[:220]+"…") if desc and len(desc)>220 else (desc or "")
-        if sn: lines.append(f"📝 {html.escape(sn)}")
+        if matched: lines.append(f"🔍 Match: {matched}")
+        if desc:
+            sn=desc if len(desc)<=220 else (desc[:220]+"…")
+            lines.append(f"📝 {sn}")
         lines.append(f"⏱️ {age(posted)}")
         text="\n".join(lines)
 
+        # buttons
         url_buttons=[("📨 Proposal", proposal), ("🔗 Original", original)]
         cb_buttons =[("⭐ Save", f"job:save:{jid}"), ("🗑️ Delete", f"job:delete:{jid}")]
 
@@ -319,8 +320,7 @@ async def process_user(db, user, items)->int:
             await _send(BOT_TOKEN, int(chat_id), text, url_buttons, cb_buttons)
             add_jobsent(db, getattr(user,"id"), jid)
             sent+=1
-        except Exception as e:
-            log.warning("Send failed: %s", e)
+        except Exception:
             try: db.rollback()
             except Exception: pass
 
@@ -328,23 +328,25 @@ async def process_user(db, user, items)->int:
 
 async def worker_cycle():
     if None in (SessionLocal, User, Job, JobSent):
-        log.warning("DB not available; skipping"); return
+        return
     try:
         if '_init_db' in globals() and callable(_init_db): _init_db()
     except Exception: pass
 
     db=SessionLocal()
     try: users=list(db.query(User).all())
-    except Exception as e:
-        log.warning("DB users read failed: %s", e); 
+    except Exception:
         try: db.close()
         except Exception: pass
         return
 
     items=[]
+    # Skywalker
     try:
-        sky = await fetch_skywalker() if FEED_SKY else []
-        fr=[]
+        if FEED_SKY: items += await fetch_skywalker()
+    except Exception: pass
+    # Freelancer (merge keywords από όλους τους active users)
+    try:
         if FEED_FREELANCER:
             allk=set()
             for u in users:
@@ -352,17 +354,14 @@ async def worker_cycle():
                     for k in _kws(db,u):
                         k=(k or "").strip()
                         if k: allk.add(k)
-            fr = await fetch_freelancer_for_queries(sorted(allk)[:20])
-        items = sky + fr
-    except Exception as e:
-        log.warning("Fetch error: %s", e)
+            items += await fetch_freelancer_for_queries(sorted(allk)[:20])
+    except Exception: pass
 
     total=0
     for u in users:
         if not user_active(u): continue
         try: total += await process_user(db,u,items)
-        except Exception as e:
-            log.warning("Process user failed: %s", e)
+        except Exception:
             try: db.rollback()
             except Exception: pass
 
@@ -371,10 +370,9 @@ async def worker_cycle():
     log.info("Worker cycle complete. Sent %d messages.", total)
 
 async def main():
-    log.info("Worker started. Cycle every %ss", CYCLE_SECONDS)
     while True:
         try: await worker_cycle()
-        except Exception as e: log.warning("Cycle error: %s", e)
+        except Exception: pass
         await asyncio.sleep(CYCLE_SECONDS)
 
 if __name__=="__main__":
