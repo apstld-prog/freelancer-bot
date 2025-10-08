@@ -5,12 +5,12 @@
 # ==========================================================
 import os, logging
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder, Application,
-    CommandHandler, CallbackQueryHandler,
-    ContextTypes
+    CommandHandler, CallbackQueryHandler, MessageHandler,
+    ContextTypes, filters
 )
 from telegram.constants import ParseMode
 
@@ -38,6 +38,9 @@ def now_utc(): return datetime.now(UTC)
 def is_admin_id(tg_id:int)->bool:
     adm=(os.getenv("ADMIN_ID") or "").strip()
     return str(tg_id)==str(adm) if adm else False
+def admin_chat_id() -> Optional[int]:
+    a=(os.getenv("ADMIN_ID") or "").strip()
+    return int(a) if a.isdigit() else None
 def _uid_field():
     for c in ("telegram_id","tg_id","chat_id","user_id","id"):
         if hasattr(User,c): return c
@@ -220,46 +223,41 @@ async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         except Exception: pass
 
 # ----------------------------------------------------------
-# CALLBACKS (Save/Delete)
+# CONTACT / ADMIN REPLY FLOW
 # ----------------------------------------------------------
-async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query
-    if not q or not (SessionLocal and JobAction and User):
-        if q: await q.answer()
-        return
-    data=q.data or ""
-    if not (data.startswith("job:save:") or data.startswith("job:delete:")):
-        await q.answer(); return
-    action, jid = ("save", data.split(":")[-1]) if "save" in data else ("delete", data.split(":")[-1])
-
+def _grant_days_in_db(tg_id: str, days: int) -> bool:
+    if not (SessionLocal and User): return False
+    ok=False
     db=SessionLocal()
     try:
-        u=db.query(User).filter(getattr(User,_uid_field())==str(q.from_user.id)).one_or_none()
-        if not u:
-            await q.answer("User not found."); return
+        u=db.query(User).filter(getattr(User,_uid_field())==str(tg_id)).one_or_none()
+        if not u: return False
+        base=getattr(u,"access_until",None) or now_utc()
+        new_until = (base if base>now_utc() else now_utc()) + timedelta(days=days)
         try:
-            ja = JobAction(user_id=u.id, job_id=int(jid), action=action)
-            db.add(ja); db.commit()
+            setattr(u,"access_until",new_until)
         except Exception:
-            db.rollback()
-
-        if action=="save":
-            try:
-                await q.message.delete()
-            except Exception:
-                try: await q.edit_message_reply_markup(reply_markup=None)
-                except Exception: pass
-            await q.answer("Saved")
-        else:
-            try:
-                await q.message.delete()
-            except Exception:
-                try: await q.edit_message_reply_markup(reply_markup=None)
-                except Exception: pass
-            await q.answer("Deleted")
+            # fallback to license_until legacy name
+            try: setattr(u,"license_until",new_until)
+            except Exception: pass
+        db.add(u); db.commit()
+        ok=True
+    except Exception:
+        db.rollback()
     finally:
         try: db.close()
         except Exception: pass
+    return ok
+
+def _admin_contact_kb(tg_id:int)->InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Reply",   callback_data=f"adm:reply:{tg_id}")],
+        [InlineKeyboardButton("❌ Decline", callback_data=f"adm:decline:{tg_id}")],
+        [InlineKeyboardButton("+30d",  callback_data=f"adm:grant:{tg_id}:30"),
+         InlineKeyboardButton("+90d",  callback_data=f"adm:grant:{tg_id}:90")],
+        [InlineKeyboardButton("+180d", callback_data=f"adm:grant:{tg_id}:180"),
+         InlineKeyboardButton("+365d", callback_data=f"adm:grant:{tg_id}:365")],
+    ])
 
 async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     q=update.callback_query
@@ -274,7 +272,8 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     elif act=="saved":
         await saved_cmd(update, context)
     elif act=="contact":
-        await q.message.reply_text("Send your message here and the admin will reply to you.")
+        context.user_data["contact_mode"]=True
+        await q.message.reply_text("✍️ Γράψε τώρα το μήνυμα που θέλεις να σταλεί στον διαχειριστή.")
     elif act=="admin":
         if is_admin_id(q.from_user.id):
             txt = (
@@ -289,6 +288,67 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
         else:
             await q.message.reply_text("Admin only.")
     await q.answer()
+
+async def inbound_text_handler(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    """Πιάνει ελεύθερα κείμενα για Contact και Admin Reply."""
+    msg=update.effective_message
+    user=update.effective_user
+    admin_id = admin_chat_id()
+
+    # 1) User contacting admin
+    if context.user_data.get("contact_mode"):
+        context.user_data["contact_mode"]=False
+        if not admin_id:
+            await msg.reply_text("Ο διαχειριστής δεν είναι διαθέσιμος αυτή τη στιγμή.")
+            return
+        text=f"📩 New message from user\nID: <code>{user.id}</code>\n\n{msg.text}"
+        await context.bot.send_message(chat_id=admin_id, text=text, parse_mode=ParseMode.HTML,
+                                       reply_markup=_admin_contact_kb(user.id))
+        await msg.reply_text("✅ Το μήνυμα στάλθηκε στον διαχειριστή. Θα λάβεις απάντηση εδώ.")
+        return
+
+    # 2) Admin typing a reply
+    if is_admin_id(user.id) and context.user_data.get("admin_reply_to"):
+        target_id=context.user_data.get("admin_reply_to")
+        await context.bot.send_message(chat_id=int(target_id), text=f"👑 Admin:\n{msg.text}")
+        await msg.reply_text("✅ Η απάντησή σου εστάλη στον χρήστη.")
+        context.user_data["admin_reply_to"]=None
+        return
+
+async def admin_actions_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    """Χειριστής κουμπιών Reply/Decline/Grant από το admin."""
+    q=update.callback_query
+    if not q: return
+    if not is_admin_id(q.from_user.id):
+        await q.answer("Admin only."); return
+    data=(q.data or "")
+    parts=data.split(":")
+    # patterns: adm:reply:<uid> | adm:decline:<uid> | adm:grant:<uid>:<days>
+    if len(parts)>=3 and parts[0]=="adm":
+        action=parts[1]
+        uid=parts[2]
+        if action=="reply":
+            context.user_data["admin_reply_to"]=uid
+            await q.message.reply_text(f"✍️ Γράψε την απάντησή σου για τον χρήστη {uid}…")
+            await q.answer("Reply mode on")
+        elif action=="decline":
+            try:
+                await context.bot.send_message(chat_id=int(uid), text="❌ Ο διαχειριστής απέρριψε το αίτημα. Μπορείς να ξαναστείλεις μήνυμα αργότερα.")
+            except Exception: pass
+            await q.answer("Declined")
+        elif action=="grant" and len(parts)==4:
+            days=int(parts[3])
+            ok=_grant_days_in_db(uid, days)
+            if ok:
+                await q.message.reply_text(f"✅ Προστέθηκαν {days} ημέρες πρόσβασης στον χρήστη {uid}.")
+                try:
+                    await context.bot.send_message(chat_id=int(uid), text=f"🎉 Ο διαχειριστής επέκτεινε την πρόσβασή σου κατά {days} ημέρες.")
+                except Exception: pass
+            else:
+                await q.message.reply_text(f"ℹ️ Δεν ήταν δυνατή η ενημέρωση στη βάση. Έγινε μόνο ειδοποίηση.")
+            await q.answer("OK")
+    else:
+        await q.answer()
 
 # ----------------------------------------------------------
 # ADMIN
@@ -315,7 +375,6 @@ async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         try: db.close()
         except Exception: pass
 
-# === CHANGED: platforms_cmd supports ALL ===
 async def platforms_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     arg=" ".join(context.args).strip().upper() if context.args else ""
     global_list = (
@@ -362,6 +421,7 @@ def build_application()->Application:
     token=(os.getenv("BOT_TOKEN") or "").strip()
     app=ApplicationBuilder().token(token).build()
 
+    # commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
@@ -371,6 +431,11 @@ def build_application()->Application:
     app.add_handler(CommandHandler("platforms", platforms_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
 
+    # callbacks
     app.add_handler(CallbackQueryHandler(job_buttons_cb, pattern=r"^job:(save|delete):"))
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))
+    app.add_handler(CallbackQueryHandler(admin_actions_cb, pattern=r"^adm:"))
+
+    # free text (for Contact and Admin replies)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, inbound_text_handler))
     return app
