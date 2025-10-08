@@ -1,379 +1,434 @@
 # worker.py
 # -*- coding: utf-8 -*-
-import os, asyncio, logging, re, html, json
-from datetime import datetime, timezone
-from typing import List, Dict
+# ==========================================================
+# ⚠️ UI_LOCKED: Message layout & buttons must match bot.py
+# ==========================================================
+import os, asyncio, logging, math, html, re
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Tuple
+
 import httpx
 
-SessionLocal=User=Keyword=Job=JobSent=None
-try:
-    from db import SessionLocal as _S, User as _U, Keyword as _K, Job as _J, JobSent as _JS, init_db as _init_db
-    SessionLocal, User, Keyword, Job, JobSent = _S, _U, _K, _J, _JS
-except Exception:
-    pass
+# SQLAlchemy / DB
+from sqlalchemy import text as sql_text, select
+from sqlalchemy.exc import SQLAlchemyError
 
-log = logging.getLogger("worker")
-logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"))
+from db import (
+    SessionLocal, init_db,
+    User, Keyword, Job, JobSent, JobAction
+)
+
 UTC = timezone.utc
+log = logging.getLogger("worker")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
-BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT","20"))
-CYCLE_SECONDS = int(os.getenv("WORKER_INTERVAL","60"))
+# -----------------------------------------------------------------------------
+# Config
+# -----------------------------------------------------------------------------
+BOT_TOKEN              = os.getenv("BOT_TOKEN", "").strip()
+AFFILIATE_PREFIX      = os.getenv("AFFILIATE_PREFIX", "").strip()  # e.g. https://go.example.com?url=
+CYCLE_SECONDS         = int(os.getenv("WORKER_INTERVAL", "60"))
+FREELANCER_LIMIT      = 30
+SKYWALKER_FEED_URL    = os.getenv("SKYWALKER_FEED", "https://www.skywalker.gr/jobs/feed")
+SEND_TIMEOUT_SECONDS  = 15
 
-FEED_FREELANCER = os.getenv("FEED_FREELANCER","1") == "1"
-FEED_SKY       = os.getenv("FEED_SKY","1") == "1"
+# Rough FX rates (no external calls) – only for display
+FX: Dict[str, float] = {
+    "USD": 1.0,
+    "EUR": 1.09,
+    "GBP": 1.27,
+    "AUD": 0.65,
+    "CAD": 0.73,
+    "TRY": 0.03,
+    "INR": 0.012,
+}
 
-FREELANCER_API = "https://www.freelancer.com/api/projects/0.1/projects/active/"
-SKY_FEED_URL   = os.getenv("SKY_FEED_URL", "https://www.skywalker.gr/jobs/feed")
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def now_utc() -> datetime:
+    return datetime.now(UTC)
 
-AFFILIATE_PREFIX = (os.getenv("AFFILIATE_PREFIX") or "").strip()
+def tg_api(url: str) -> str:
+    return f"https://api.telegram.org/bot{BOT_TOKEN}/{url}"
 
-_DEFAULT_FX = {"USD":1.0,"EUR":1.08,"GBP":1.27,"CAD":0.73,"AUD":0.65,"CHF":1.10,"JPY":0.0066,"NOK":0.091,"SEK":0.091,"DKK":0.145}
-try:
-    FX_RATES = json.loads(os.getenv("FX_RATES","")) if os.getenv("FX_RATES") else _DEFAULT_FX
-except Exception:
-    FX_RATES = _DEFAULT_FX
+def safe_rate(ccy: Optional[str]) -> float:
+    if not ccy: return 0.0
+    return FX.get(ccy.upper(), 0.0)
 
-def now_utc(): return datetime.now(UTC)
+def usd_range(min_amt: Optional[float], max_amt: Optional[float], ccy: Optional[str]) -> Optional[Tuple[float,float]]:
+    if min_amt is None and max_amt is None: return None
+    r = safe_rate(ccy)
+    if r <= 0: return None
+    lo = min_amt * r if isinstance(min_amt, (int,float)) else None
+    hi = max_amt * r if isinstance(max_amt, (int,float)) else None
+    return (lo or hi or 0.0, hi or lo or 0.0)
 
-def _uid_field():
-    for c in ("telegram_id","tg_id","chat_id","user_id","id"):
-        if hasattr(User,c): return c
-    raise RuntimeError("User id column not found")
+def pretty_usd(lo: float, hi: float) -> str:
+    if lo and hi:
+        return f"(${lo:,.0f}–${hi:,.0f})"
+    v = lo or hi
+    return f"(${v:,.0f})" if v else ""
 
-def user_active(u):
-    if getattr(u,"is_blocked",False): return False
-    exp = getattr(u,"access_until",None) or getattr(u,"license_until",None) or getattr(u,"trial_until",None)
-    return bool(exp and exp>=now_utc())
+def timeago(dt: Optional[datetime]) -> str:
+    if not dt: return ""
+    sec = max(0, int((now_utc() - dt).total_seconds()))
+    if sec < 60: return f"{sec}s ago"
+    m = sec // 60
+    if m < 60: return f"{m}m ago"
+    h = m // 60
+    if h < 24: return f"{h}h ago"
+    d = h // 24
+    return f"{d}d ago"
 
-def _kws(db,u):
-    out=[]
+def affiliate(url: Optional[str]) -> Optional[str]:
+    if not url: return None
+    if not AFFILIATE_PREFIX:
+        return url
+    # already wrapped?
+    if url.startswith(AFFILIATE_PREFIX):
+        return url
+    return f"{AFFILIATE_PREFIX}{url}"
+
+def norm_text(x: str) -> str:
+    x = html.unescape(x or "")
+    x = re.sub(r"\s+", " ", x).strip()
+    return x
+
+def ensure_job(db, source: str, source_id: str, *,
+               title: str,
+               description: str,
+               url: Optional[str],
+               proposal_url: Optional[str],
+               original_url: Optional[str],
+               budget_min: Optional[float],
+               budget_max: Optional[float],
+               budget_currency: Optional[str],
+               job_type: Optional[str],
+               bids_count: Optional[int],
+               matched_keyword: Optional[str],
+               posted_at: Optional[datetime]) -> Job:
+    """
+    Upsert σε (source, source_id). Τίτλος ΠΟΤΕ NULL.
+    """
+    j = db.query(Job).filter(Job.source==source, Job.source_id==str(source_id)).one_or_none()
+    if not j:
+        j = Job(source=source, source_id=str(source_id), created_at=now_utc())
+        db.add(j)
+
+    # Αποφεύγουμε NULLs στα required
+    j.title = title or "Untitled"
+    j.description = description or ""
+    j.url = url or original_url or proposal_url or ""
+    j.proposal_url = proposal_url or ""
+    j.original_url = original_url or url or ""
+    j.budget_min = budget_min
+    j.budget_max = budget_max
+    j.budget_currency = budget_currency
+    j.job_type = job_type
+    j.bids_count = bids_count
+    if matched_keyword: j.matched_keyword = matched_keyword
+    j.posted_at = posted_at or j.posted_at
+    j.updated_at = now_utc()
+    db.commit()
+    db.refresh(j)
+    return j
+
+def already_sent(db, user_id: int, job_id: int) -> bool:
+    hit = db.query(JobSent).filter(JobSent.user_id==user_id, JobSent.job_id==job_id).one_or_none()
+    return hit is not None
+
+def mark_sent(db, user_id: int, job_id: int):
     try:
-        rel=getattr(u,"keywords",None)
-        if rel is not None:
-            for k in list(rel):
-                t=getattr(k,"keyword",None) or getattr(k,"text",None)
-                if t: out.append(str(t))
-            return out
-    except Exception: pass
-    return out
-
-def norm(s:str)->str:
-    s=s or ""; s=html.unescape(s)
-    return re.sub(r"\s+"," ",s,flags=re.S).strip()
-
-def match_kw(blob:str,kws:List[str]):
-    t=(blob or "").lower()
-    for w in kws:
-        ww=(w or "").strip().lower()
-        if ww and ww in t: return w
-    return None
-
-def wrap(url:str)->str:
-    if not url or not AFFILIATE_PREFIX: return url
-    import urllib.parse as up
-    return f"{AFFILIATE_PREFIX}{up.quote(url, safe='')}"
-
-def usd_range(mn,mx,cur,fx= None):
-    rates=fx or FX_RATES
-    code=(cur or "USD").upper(); rate=float(rates.get(code,1.0))
-    try:
-        vmin=float(mn) if mn is not None else None
-        vmax=float(mx) if mx is not None else None
+        s = JobSent(user_id=user_id, job_id=job_id, created_at=now_utc())
+        db.add(s); db.commit()
     except Exception:
-        return None
-    conv=lambda v: round(float(v)*rate,2) if v is not None else None
-    umin,umax=conv(vmin),conv(vmax)
-    if umin is None and umax is None: return None
-    if umin is None: return f"(~${umax})"
-    if umax is None: return f"(~${umin})"
-    return f"(~${umin}–{umax})"
+        db.rollback()
 
-def age(ts):
-    if not ts: return "unknown"
-    s=max(0,int((now_utc()-ts).total_seconds()))
-    if s<60: return f"{s}s ago"
-    m=s//60
-    if m<60: return f"{m}m ago"
-    h=m//60
-    if h<24: return f"{h}h ago"
-    d=h//24; return f"{d}d ago"
+def user_keywords(db, u: User) -> List[str]:
+    kws = []
+    rel = getattr(u, "keywords", [])
+    for k in rel:
+        t = getattr(k, "keyword", None) or getattr(k, "text", None)
+        if t:
+            t = str(t).strip()
+            if t: kws.append(t)
+    return kws
 
-async def _send(bot_token, chat_id, text, url_btns, cb_btns):
-    api=f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    kb={"inline_keyboard":[]}
-    if url_btns: kb["inline_keyboard"].append([{"text":t,"url":u} for t,u in url_btns if u])
-    if cb_btns:  kb["inline_keyboard"].append([{"text":t,"callback_data":d} for t,d in cb_btns if d])
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        await client.post(api, json={
-            "chat_id": chat_id, "text": text,
-            "disable_web_page_preview": True, "reply_markup": kb
-        })
+def user_active(u: User) -> bool:
+    blocked = getattr(u, "is_blocked", False)
+    if blocked: return False
+    lic = getattr(u, "access_until", None) or getattr(u, "license_until", None)
+    tri = getattr(u, "trial_until", None) or getattr(u, "trial_ends", None)
+    exp = lic or tri
+    return bool(exp and exp >= now_utc())
 
-# ---------- DB helpers ----------
-from db import Job  # type: ignore
-def get_or_create_job(db, *, source, source_id, title, desc, url,
-                      proposal_url, original_url, bmin, bmax, currency,
-                      matched, posted_at) -> int:
-    title = (title or f"Untitled Job #{source_id}").strip()[:512]
-    url = (url or "").strip()
-    if not url:
-        if source.lower()=="freelancer" and str(source_id).strip():
-            url = f"https://www.freelancer.com/projects/{source_id}"
-    if not url:
-        raise ValueError("empty url")
-
-    desc = (desc or "").strip()
-    proposal_url = (proposal_url or url).strip()
-    original_url = (original_url or url).strip()
-    currency = (currency or "USD")[:16]
-    when = posted_at or now_utc()
-
-    try: db.rollback()
-    except Exception: pass
-
-    row = db.query(Job).filter(Job.source==source, Job.source_id==str(source_id)).one_or_none()
-    if not row:
-        row = Job(source=source, source_id=str(source_id))
-        db.add(row); db.flush()
-
-    row.title = title
-    row.description = desc
-    row.url = url
-    row.proposal_url = proposal_url
-    row.original_url = original_url
-    row.budget_min = bmin
-    row.budget_max = bmax
-    row.budget_currency = currency
-    row.matched_keyword = matched
-    row.posted_at = when
-
-    try:
-        db.commit()
-    except Exception:
-        try: db.rollback()
-        except Exception: pass
-        raise
-    return int(row.id)
-
-from db import JobSent  # type: ignore
-def add_jobsent(db, user_id:int, job_id:int):
-    try: db.rollback()
-    except Exception: pass
-    try:
-        js = JobSent(user_id=int(user_id), job_id=int(job_id))
-        db.add(js); db.commit()
-    except Exception:
-        try: db.rollback()
-        except Exception: pass
-
-# ---------- Fetchers ----------
-async def fetch_skywalker()->List[Dict]:
-    if not FEED_SKY: return []
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            r=await client.get(SKY_FEED_URL); r.raise_for_status(); xml=r.text
-    except Exception:
-        return []
-    items=re.findall(r"<item>(.*?)</item>", xml, flags=re.S)
-    out=[]
-    for it in items:
-        title=norm("".join(re.findall(r"<title>(.*?)</title>", it, flags=re.S))) or "Untitled Job"
-        link =norm("".join(re.findall(r"<link>(.*?)</link>", it, flags=re.S)))
-        if not link: continue
-        guid =norm("".join(re.findall(r"<guid.*?>(.*?)</guid>", it, flags=re.S))) or link
-        desc =norm("".join(re.findall(r"<description>(.*?)</description>", it, flags=re.S)))
-        out.append({
-            "source":"Skywalker","source_id":guid or link or title,
-            "title":title,"desc":desc,"url":link,
-            "proposal":link,"original":link,
-            "budget_min":None,"budget_max":None,"currency":None,
-            "posted_at": now_utc(),
-        })
-    return out
-
-async def fetch_freelancer_for_queries(queries: List[str]) -> List[Dict]:
-    if not FEED_FREELANCER or not queries: return []
-    out: List[Dict] = []
-    base={"limit":30,"compact":"true","user_details":"true","job_details":"true","full_description":"true"}
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        for q in queries:
-            try:
-                resp=await client.get(FREELANCER_API, params={**base,"query":q})
-                resp.raise_for_status(); data=resp.json()
-            except Exception:
-                continue
-            for p in (data.get("result") or {}).get("projects") or []:
-                pid = str(p.get("id") or "").strip()
-                title = (p.get("title") or f"Untitled Job #{pid}").strip()
-                desc  = (p.get("description") or "").strip()
-                url   = f"https://www.freelancer.com/projects/{pid}" if pid else ""
-                if not url: continue
-                cur   = ((p.get("currency") or {}).get("code") or "USD").upper()
-                bmin  = (p.get("budget") or {}).get("minimum")
-                bmax  = (p.get("budget") or {}).get("maximum")
-                out.append({
-                    "source":"Freelancer","source_id": pid or "unknown",
-                    "title":norm(title),"desc":norm(desc),"url":url,
-                    "proposal": wrap(url),"original":url,
-                    "budget_min":bmin,"budget_max":bmax,"currency":cur,
-                    "posted_at": now_utc(),
-                })
-    return out
-
-def dedup_prefer_affiliate(items: List[Dict]) -> List[Dict]:
-    seen={}
-    for it in items:
-        key=(it.get("title") or "").lower().strip() or (it.get("url") or "").lower().strip()
-        prev=seen.get(key)
-        if not prev: seen[key]=it
-        else:
-            a=bool(it.get("proposal")) and it["proposal"]!=it["url"]
-            a0=bool(prev.get("proposal")) and prev["proposal"]!=prev["url"]
-            if a and not a0: seen[key]=it
-    return list(seen.values())
-
-# ---------- Compose + send ----------
-async def process_user(db, user, items)->int:
-    # keywords
-    kws=[]
-    try:
-        for k in getattr(user,"keywords",[]) or []:
-            t=getattr(k,"keyword",None) or getattr(k,"text",None)
-            if t: kws.append(str(t))
-    except Exception:
-        pass
-    if not kws: return 0
-
-    # match
-    matches=[]
-    for it in items:
-        blob=f"{it.get('title','')} {it.get('desc','')}".lower()
-        hit=None
-        for w in kws:
-            ww=(w or "").strip().lower()
-            if ww and ww in blob:
-                hit=w; break
-        if hit:
-            x=dict(it); x["_matched"]=hit; matches.append(x)
-
-    # dedup
-    matches=dedup_prefer_affiliate(matches)
-
-    chat_id=getattr(user,_uid_field(),None)
-    if not chat_id: return 0
-
-    sent=0
-    for it in matches:
-        source = it.get("source") or "Unknown"
-        source_id = str(it.get("source_id") or "").strip() or "unknown"
-        title = (it.get("title") or f"Untitled Job #{source_id}").strip()
-        url = (it.get("url") or "").strip()
-        if not url:
-            if source.lower()=="freelancer" and source_id!="unknown":
-                url = f"https://www.freelancer.com/projects/{source_id}"
-        if not url: continue
-
-        desc = (it.get("desc") or "").strip()
-        proposal = (it.get("proposal") or url).strip()
-        original = (it.get("original") or url).strip()
-        bmin = it.get("budget_min"); bmax = it.get("budget_max")
-        cur  = (it.get("currency") or "USD").upper()
-        posted = it.get("posted_at") or now_utc()
-        matched = it.get("_matched")
-
-        # upsert job (ensures feedstatus/saved work)
-        try:
-            from db import Job  # type: ignore
-            jid = get_or_create_job(
-                db,
-                source=source, source_id=source_id,
-                title=title, desc=desc,
-                url=url, proposal_url=proposal, original_url=original,
-                bmin=bmin, bmax=bmax, currency=cur,
-                matched=matched, posted_at=posted,
-            )
-        except Exception:
-            try: db.rollback()
-            except Exception: pass
+# -----------------------------------------------------------------------------
+# Sources
+# -----------------------------------------------------------------------------
+async def fetch_freelancer_for_keyword(client: httpx.AsyncClient, kw: str) -> List[dict]:
+    url = (
+        "https://www.freelancer.com/api/projects/0.1/projects/active/"
+        f"?limit={FREELANCER_LIMIT}&compact=true&user_details=true&job_details=true&full_description=true"
+        f"&query={httpx.QueryParams({'q': kw}).get('q') or kw}"
+    )
+    r = await client.get(url, timeout=SEND_TIMEOUT_SECONDS)
+    r.raise_for_status()
+    data = r.json()
+    # data['result']['projects'] usually
+    projects = (data.get("result") or {}).get("projects") or []
+    out = []
+    for p in projects:
+        pid = p.get("id")
+        if not pid: continue
+        title = norm_text(p.get("title") or "")
+        if not title:  # skip empty
             continue
-
-        # text (classic style, no HTML)
-        usd = usd_range(bmin,bmax,cur)
-        lines=[f"{title}"]
-        if bmin is not None or bmax is not None:
-            rng=f"{'' if bmin is None else bmin}–{'' if bmax is None else bmax} {cur}".strip("– ")
-            lines.append(f"🧾 Budget: {rng}" + (f" {usd}" if usd else ""))
-        lines.append(f"📎 Source: {source}")
-        if matched: lines.append(f"🔍 Match: {matched}")
-        if desc:
-            sn=desc if len(desc)<=220 else (desc[:220]+"…")
-            lines.append(f"📝 {sn}")
-        lines.append(f"⏱️ {age(posted)}")
-        text="\n".join(lines)
-
-        # buttons
-        url_buttons=[("📨 Proposal", proposal), ("🔗 Original", original)]
-        cb_buttons =[("⭐ Save", f"job:save:{jid}"), ("🗑️ Delete", f"job:delete:{jid}")]
-
+        descr = norm_text((p.get("preview_description") or p.get("description") or "")[:800])
+        link = f"https://www.freelancer.com/projects/{pid}"
+        # budget
+        b = p.get("budget") or {}
+        curr = (b.get("currency") or {}).get("code")
+        mn = b.get("minimum")
+        mx = b.get("maximum")
+        posted = p.get("publish_time") or p.get("time_submitted")
+        posted_dt = None
         try:
-            await _send(BOT_TOKEN, int(chat_id), text, url_buttons, cb_buttons)
-            add_jobsent(db, getattr(user,"id"), jid)
-            sent+=1
+            if posted:
+                posted_dt = datetime.fromisoformat(str(posted).replace("Z","+00:00")).astimezone(UTC)
         except Exception:
-            try: db.rollback()
-            except Exception: pass
+            posted_dt = None
 
-    return sent
+        out.append({
+            "source": "Freelancer",
+            "source_id": str(pid),
+            "title": title,
+            "description": descr,
+            "url": link,
+            "proposal_url": affiliate(link),   # same link, just wrapped
+            "original_url": affiliate(link),   # both point to same page
+            "budget_min": float(mn) if mn is not None else None,
+            "budget_max": float(mx) if mx is not None else None,
+            "budget_currency": curr,
+            "job_type": None,
+            "bids_count": p.get("bid_stats", {}).get("bid_count"),
+            "matched_keyword": kw,
+            "posted_at": posted_dt,
+        })
+    return out
 
-async def worker_cycle():
-    if None in (SessionLocal, User, Job, JobSent):
-        return
+async def fetch_skywalker(client: httpx.AsyncClient) -> List[dict]:
+    # Basic RSS parser without external libs
+    out: List[dict] = []
     try:
-        if '_init_db' in globals() and callable(_init_db): _init_db()
-    except Exception: pass
+        r = await client.get(SKYWALKER_FEED_URL, timeout=SEND_TIMEOUT_SECONDS)
+        r.raise_for_status()
+        text = r.text
+        items = re.split(r"</item>", text, flags=re.I)
+        for raw in items:
+            if "<item>" not in raw.lower(): continue
+            def gx(tag):
+                m = re.search(fr"<{tag}>(.*?)</{tag}>", raw, flags=re.I|re.S)
+                return norm_text(html.unescape(m.group(1))) if m else ""
+            title = gx("title")
+            link  = gx("link")
+            descr = gx("description")
+            pub   = gx("pubDate")
+            if not title: continue
+            posted_dt=None
+            try:
+                # RFC822-ish → we fallback
+                posted_dt = now_utc()
+            except Exception:
+                posted_dt = now_utc()
+            out.append({
+                "source": "Skywalker",
+                "source_id": link or title[:100],
+                "title": title,
+                "description": descr[:800],
+                "url": link,
+                "proposal_url": affiliate(link),
+                "original_url": affiliate(link),
+                "budget_min": None,
+                "budget_max": None,
+                "budget_currency": None,
+                "job_type": None,
+                "bids_count": None,
+                "matched_keyword": None,
+                "posted_at": posted_dt,
+            })
+    except Exception as e:
+        log.warning("Skywalker fetch failed: %s", e)
+    return out
 
-    db=SessionLocal()
-    try: users=list(db.query(User).all())
-    except Exception:
+# -----------------------------------------------------------------------------
+# Compose message (classic card)
+# -----------------------------------------------------------------------------
+def compose_message(job: Job) -> str:
+    title = job.title or "Untitled"
+    # budget
+    bline = ""
+    if job.budget_min is not None or job.budget_max is not None or job.budget_currency:
+        rng = ""
+        if job.budget_min is not None and job.budget_max is not None:
+            rng = f"{job.budget_min:.1f}–{job.budget_max:.1f} {job.budget_currency or ''}".strip()
+        elif job.budget_min is not None:
+            rng = f"{job.budget_min:.1f} {job.budget_currency or ''}".strip()
+        elif job.budget_max is not None:
+            rng = f"{job.budget_max:.1f} {job.budget_currency or ''}".strip()
+        usd = usd_range(job.budget_min, job.budget_max, job.budget_currency)
+        usd_txt = f" (~{pretty_usd(usd[0], usd[1])})" if usd else ""
+        bline = f"🧾 Budget: {rng}{usd_txt}".rstrip()
+
+    src = f"📎 Source: {job.source}"
+    mk  = f"🔍 Match: {job.matched_keyword}" if getattr(job, "matched_keyword", None) else None
+    desc = (job.description or "").strip()
+    if len(desc) > 220:
+        desc = desc[:220].rstrip() + "…"
+
+    when = timeago(getattr(job, "posted_at", None))
+
+    parts = [title]
+    if bline: parts.append(bline)
+    parts.append(src)
+    if mk: parts.append(mk)
+    if desc: parts.append(f"📝 {desc}")
+    if when: parts.append(f"⏱️ {when}")
+    return "\n".join(parts)
+
+def compose_keyboard(job: Job):
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📨 Proposal", "url": job.proposal_url or job.original_url or job.url},
+                {"text": "🔗 Original", "url": job.original_url or job.url or job.proposal_url},
+            ],
+            [
+                {"text": "⭐ Save",   "callback_data": f"job:save:{job.id}"},
+                {"text": "🗑️ Delete","callback_data": f"job:delete:{job.id}"},
+            ]
+        ]
+    }
+
+# -----------------------------------------------------------------------------
+# Send flow
+# -----------------------------------------------------------------------------
+async def send_to_user(client: httpx.AsyncClient, u: User, job: Job) -> bool:
+    chat_id = getattr(u, "telegram_id", None) or getattr(u, "tg_id", None) or getattr(u,"chat_id",None)
+    if not chat_id: return False
+    text = compose_message(job)
+    kb = compose_keyboard(job)
+    payload = {"chat_id": str(chat_id), "text": text, "reply_markup": kb, "disable_web_page_preview": True}
+    try:
+        r = await client.post(tg_api("sendMessage"), json=payload, timeout=SEND_TIMEOUT_SECONDS)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        log.warning("send_to_user failed: %s", e)
+        return False
+
+# -----------------------------------------------------------------------------
+# Main cycle
+# -----------------------------------------------------------------------------
+async def cycle_once():
+    db = SessionLocal()
+    sent_count = 0
+    try:
+        users: List[User] = db.query(User).all()
+        if not users:
+            log.info("No users in DB.")
+            return
+
+        async with httpx.AsyncClient(follow_redirects=True, timeout=SEND_TIMEOUT_SECONDS) as client:
+            # Pre-fetch Skywalker once per cycle
+            sky_list = await fetch_skywalker(client)
+            # Build a map for dedup preference
+            # key = normalized(title)[:60]
+            def key_of(rec: dict) -> str:
+                t = norm_text(rec.get("title","")).lower()
+                return t[:60]
+
+            for u in users:
+                if not user_active(u):
+                    continue
+                kws = user_keywords(db, u)
+                if not kws:
+                    continue
+
+                # Fetch per keyword (Freelancer)
+                fl_all: List[dict] = []
+                for kw in kws:
+                    try:
+                        fl_all += await fetch_freelancer_for_keyword(client, kw)
+                    except Exception as e:
+                        log.warning("Freelancer fetch failed (%s): %s", kw, e)
+
+                # Merge + dedup with preference to Freelancer
+                pool: Dict[str, dict] = {}
+                for rec in sky_list + fl_all:  # later sources override earlier → prefer Freelancer by putting it last
+                    k = key_of(rec)
+                    pool[k] = rec
+
+                for rec in pool.values():
+                    # Match again for safety (some Skywalker items may not match)
+                    matched = False
+                    txt = (rec.get("title","") + " " + rec.get("description","")).lower()
+                    for kw in kws:
+                        if kw.lower() in txt:
+                            rec["matched_keyword"] = kw
+                            matched = True
+                            break
+                    if not matched:
+                        # Skip if no keyword match for this user
+                        continue
+
+                    # Upsert job safely
+                    try:
+                        j = ensure_job(
+                            db,
+                            rec["source"], str(rec["source_id"]),
+                            title = rec.get("title") or "Untitled",
+                            description = rec.get("description") or "",
+                            url = rec.get("url"),
+                            proposal_url = rec.get("proposal_url"),
+                            original_url = rec.get("original_url"),
+                            budget_min = rec.get("budget_min"),
+                            budget_max = rec.get("budget_max"),
+                            budget_currency = rec.get("budget_currency"),
+                            job_type = rec.get("job_type"),
+                            bids_count = rec.get("bids_count"),
+                            matched_keyword = rec.get("matched_keyword"),
+                            posted_at = rec.get("posted_at"),
+                        )
+                    except SQLAlchemyError as e:
+                        db.rollback()
+                        log.warning("Job upsert failed: %s", e)
+                        continue
+
+                    # Skip if sent already
+                    if already_sent(db, u.id, j.id):
+                        continue
+
+                    # Send
+                    ok = await send_to_user(client, u, j)
+                    if ok:
+                        mark_sent(db, u.id, j.id)
+                        sent_count += 1
+
+        log.info("Worker cycle complete. Sent %d messages.", sent_count)
+    finally:
         try: db.close()
         except Exception: pass
-        return
 
-    items=[]
-    # Skywalker
-    try:
-        if FEED_SKY: items += await fetch_skywalker()
-    except Exception: pass
-    # Freelancer (merge keywords από όλους τους active users)
-    try:
-        if FEED_FREELANCER:
-            allk=set()
-            for u in users:
-                if user_active(u):
-                    for k in _kws(db,u):
-                        k=(k or "").strip()
-                        if k: allk.add(k)
-            items += await fetch_freelancer_for_queries(sorted(allk)[:20])
-    except Exception: pass
-
-    total=0
-    for u in users:
-        if not user_active(u): continue
-        try: total += await process_user(db,u,items)
-        except Exception:
-            try: db.rollback()
-            except Exception: pass
-
-    try: db.close()
-    except Exception: pass
-    log.info("Worker cycle complete. Sent %d messages.", total)
-
-async def main():
+async def run_forever():
+    init_db()
+    log.info("Worker started. Cycle every %ss", CYCLE_SECONDS)
     while True:
-        try: await worker_cycle()
-        except Exception: pass
+        try:
+            await cycle_once()
+        except Exception as e:
+            log.warning("Cycle error: %s", e)
         await asyncio.sleep(CYCLE_SECONDS)
 
-if __name__=="__main__":
-    asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(run_forever())

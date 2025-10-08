@@ -1,5 +1,8 @@
 # bot.py
 # -*- coding: utf-8 -*-
+# ==========================================================
+# ⚠️ UI_LOCKED: DO NOT MODIFY any text layout, menu, or job card
+# ==========================================================
 import os, logging
 from datetime import datetime, timedelta, timezone
 from typing import List
@@ -11,7 +14,13 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-# DB models
+# 👉 Fix for textual SQL in /feedstatus
+try:
+    from sqlalchemy import text as sql_text  # type: ignore
+except Exception:
+    sql_text = None  # falls back to plain string if SQLA not present
+
+# === Database models import ===
 SessionLocal=User=Keyword=Job=JobSent=JobAction=None
 try:
     from db import SessionLocal as _S, User as _U, Keyword as _K, Job as _J, JobSent as _JS, JobAction as _JA, init_db as _init_db
@@ -23,6 +32,7 @@ log=logging.getLogger("bot")
 logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"))
 UTC=timezone.utc
 DEFAULT_TRIAL_DAYS=int(os.getenv("DEFAULT_TRIAL_DAYS","10"))
+UI_LOCKED = True  # <-- Do not modify appearance unless explicitly requested
 
 def now_utc(): return datetime.now(UTC)
 def is_admin_id(tg_id:int)->bool:
@@ -33,7 +43,9 @@ def _uid_field():
         if hasattr(User,c): return c
     raise RuntimeError("User id column not found")
 
-# ===== UI (classic) =====
+# ==========================================================
+# MAIN MENU (Classic style)
+# ==========================================================
 def main_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Keywords",callback_data="act:add"),
@@ -44,6 +56,9 @@ def main_kb():
          InlineKeyboardButton("Admin",callback_data="act:admin")],
     ])
 
+# ==========================================================
+# TEXTS (Classic UI)
+# ==========================================================
 WELCOME_CLASSIC=(
     "👋 Welcome to Freelancer Alert Bot!\n\n"
     "🎁 You have a 10-day free trial.\n"
@@ -60,6 +75,9 @@ HELP_TEXT=(
     "Use /mysettings anytime. Try /selftest for a sample. /platforms CC (e.g., /platforms GR)."
 )
 
+# ==========================================================
+# FUNCTIONS
+# ==========================================================
 def _collect_keywords(u) -> List[str]:
     kws=[]
     try:
@@ -106,7 +124,9 @@ async def _reply(update:Update, text:str, kb:InlineKeyboardMarkup|None=None):
     msg = update.effective_message or update.message
     return await msg.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
 
-# ===== Commands =====
+# ==========================================================
+# COMMANDS
+# ==========================================================
 async def start_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await _reply(update, WELCOME_CLASSIC, main_kb())
     if not (SessionLocal and User): return
@@ -168,12 +188,13 @@ async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     since = now_utc() - timedelta(days=1)
     db=SessionLocal()
     try:
-        q = db.execute(
+        sql = (
             "SELECT j.source, COUNT(*) "
             "FROM job_sent s JOIN job j ON j.id=s.job_id "
-            "WHERE s.created_at >= :since GROUP BY j.source ORDER BY j.source",
-            {"since": since}
+            "WHERE s.created_at >= :since GROUP BY j.source ORDER BY j.source"
         )
+        stmt = sql_text(sql) if sql_text else sql  # SQLAlchemy 2.x requires text()
+        q = db.execute(stmt, {"since": since})
         rows = list(q)
         title = "📊 Sent jobs by platform (last 24h)"
         if not rows:
@@ -184,7 +205,9 @@ async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         try: db.close()
         except Exception: pass
 
-# ===== Inline job buttons =====
+# ==========================================================
+# INLINE BUTTON CALLBACKS
+# ==========================================================
 async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     q=update.callback_query
     if not q or not (SessionLocal and JobAction and User): 
@@ -205,55 +228,35 @@ async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
             db.add(ja); db.commit()
         except Exception:
             db.rollback()
-
-        if action=="delete":
-            try:
-                await q.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-            await q.answer("Deleted")
-        else:
-            await q.answer("Saved")
+        await q.answer("Saved" if action=="save" else "Deleted")
     finally:
         try: db.close()
         except Exception: pass
 
-# ===== Menu buttons =====
 async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     q=update.callback_query
     if not q: return
     act=(q.data or "").split(":",1)[-1]
-
     if act=="add":
-        await q.message.reply_text(
-            "Type keywords using:\n/addkeyword python, telegram\n\nTip: you can send English or Greek.",
-            disable_web_page_preview=True
-        ); await q.answer(); return
-
-    if act=="settings":
-        await mysettings_cmd(update, context); await q.answer(); return
-
-    if act=="help":
+        await q.message.reply_text("Type keywords using:\n/addkeyword python, telegram", disable_web_page_preview=True)
+    elif act=="settings":
+        await mysettings_cmd(update, context)
+    elif act=="help":
         await q.message.reply_text(HELP_TEXT, disable_web_page_preview=True)
-        await q.answer(); return
-
-    if act=="saved":
-        await saved_cmd(update, context); await q.answer(); return
-
-    if act=="contact":
+    elif act=="saved":
+        await saved_cmd(update, context)
+    elif act=="contact":
         await q.message.reply_text("Send your message here and the admin will reply to you.")
-        await q.answer(); return
-
-    if act=="admin":
+    elif act=="admin":
         if is_admin_id(q.from_user.id):
             await q.message.reply_text("Admin panel: use /users, /grant <id> <days>, /block <id>, /unblock <id>, /feedstatus.")
         else:
             await q.message.reply_text("Admin only.")
-        await q.answer(); return
-
     await q.answer()
 
-# ===== Admin (όπως ήταν) =====
+# ==========================================================
+# ADMIN COMMANDS
+# ==========================================================
 async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if not is_admin_id(update.effective_user.id):
         await _reply(update, "Admin only."); return
@@ -305,6 +308,9 @@ async def selftest_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         kb
     )
 
+# ==========================================================
+# APPLICATION BUILDER
+# ==========================================================
 def build_application()->Application:
     if '_init_db' in globals() and callable(_init_db):
         try: _init_db()
