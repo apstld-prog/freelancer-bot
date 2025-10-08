@@ -1,7 +1,7 @@
 # worker.py
 # -*- coding: utf-8 -*-
 import os, asyncio, logging, re, html, json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict
 import httpx
 
@@ -178,7 +178,7 @@ def add_jobsent(db, user_id:int, job_id:int):
         except Exception: pass
         log.warning("JobSent insert failed: %s", e)
 
-# ---------- Feeds (Freelancer + Skywalker) ----------
+# ---------- Feeds ----------
 async def fetch_skywalker()->List[Dict]:
     if not FEED_SKY: return []
     try:
@@ -191,8 +191,7 @@ async def fetch_skywalker()->List[Dict]:
     for it in items:
         title=norm("".join(re.findall(r"<title>(.*?)</title>", it, flags=re.S))) or "Untitled Job"
         link =norm("".join(re.findall(r"<link>(.*?)</link>", it, flags=re.S)))
-        if not link:
-            continue
+        if not link: continue
         guid =norm("".join(re.findall(r"<guid.*?>(.*?)</guid>", it, flags=re.S))) or link
         desc =norm("".join(re.findall(r"<description>(.*?)</description>", it, flags=re.S)))
         out.append({
@@ -299,17 +298,6 @@ async def process_user(db, user, items)->int:
         if already: continue
 
         # compose message
-        def usd_range(mn,mx,cur):
-            code=(cur or "USD").upper(); rate=float(FX_RATES.get(code,1.0))
-            try: vmin=float(mn) if mn is not None else None; vmax=float(mx) if mx is not None else None
-            except Exception: return None
-            conv=lambda v: round(float(v)*rate,2) if v is not None else None
-            umin,umax=conv(vmin),conv(vmax)
-            if umin is None and umax is None: return None
-            if umin is None: return f"~${umax}"
-            if umax is None: return f"~${umin}"
-            return f"~${umin}–{umax}"
-
         raw=None; usd=None
         if bmin is not None or bmax is not None:
             raw=f"{'' if bmin is None else bmin}-{'' if bmax is None else bmax} {cur}".strip("- ")
@@ -321,7 +309,7 @@ async def process_user(db, user, items)->int:
         if matched: lines.append(f"🔍 Match: <b><u>{html.escape(matched)}</u></b>")
         sn=(desc[:220]+"…") if desc and len(desc)>220 else (desc or "")
         if sn: lines.append(f"📝 {html.escape(sn)}")
-        lines.append("⏱️ just now")
+        lines.append(f"⏱️ {age(posted)}")
         text="\n".join(lines)
 
         url_buttons=[("📨 Proposal", proposal), ("🔗 Original", original)]
@@ -348,7 +336,7 @@ async def worker_cycle():
     db=SessionLocal()
     try: users=list(db.query(User).all())
     except Exception as e:
-        log.warning("DB users read failed: %s", e)
+        log.warning("DB users read failed: %s", e); 
         try: db.close()
         except Exception: pass
         return

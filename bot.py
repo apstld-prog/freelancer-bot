@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import os, logging, html
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder, Application,
@@ -116,11 +116,27 @@ def settings_card(u, kws:List[str])->str:
             "Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
             "When your trial ends, please contact the admin to extend your access.")
 
+# ===== helpers =====
+async def _reply(update:Update, text:str):
+    msg = update.effective_message or update.message
+    return await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+def _saved_list(db, uid_internal:int)->str:
+    acts = db.query(JobAction).filter(JobAction.user_id==uid_internal, JobAction.action=="save")\
+            .order_by(JobAction.created_at.desc()).limit(10).all()
+    if not acts: return "No saved jobs yet."
+    lines = ["💾 <b>Saved jobs</b> (latest 10)"]
+    for a in acts:
+        j = db.query(Job).filter(Job.id==a.job_id).one_or_none()
+        if not j: continue
+        t = html.escape(j.title or "Untitled")
+        lines.append(f"• {t}\n  🔗 {j.original_url or j.url}")
+    return "\n".join(lines)
+
 # ===== Commands =====
 async def start_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(WELCOME_HEAD, reply_markup=main_kb(),
-                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    if not SessionLocal or not User: return
+    await _reply(update, WELCOME_HEAD)
+    if not (SessionLocal and User): return
     db=SessionLocal()
     try:
         u=db.query(User).filter(getattr(User,_uid_field())==str(update.effective_user.id)).one_or_none()
@@ -131,46 +147,61 @@ async def start_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
                    is_blocked=False)
             db.add(u); db.commit(); db.refresh(u)
         kws=_collect_keywords(u)
-        await update.message.reply_text(settings_card(u,kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        await update.message.reply_text(FEATURES_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        await _reply(update, settings_card(u,kws))
+        await _reply(update, FEATURES_TEXT)
     finally:
         try: db.close()
         except Exception: pass
 
 async def help_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    await _reply(update, HELP_TEXT)
 
 async def mysettings_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message or update.message
     if not (SessionLocal and User):
-        await msg.reply_text("DB not available."); return
+        await _reply(update, "DB not available."); return
     db=SessionLocal()
     try:
         u=db.query(User).filter(getattr(User,_uid_field())==str(update.effective_user.id)).one_or_none()
-        if not u: await msg.reply_text("User not found."); return
+        if not u: 
+            await _reply(update, "User not found."); return
         kws=_collect_keywords(u)
-        await msg.reply_text(settings_card(u,kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        await _reply(update, settings_card(u,kws))
     finally:
         try: db.close()
         except Exception: pass
 
 async def saved_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    """List saved jobs."""
-    if not all([SessionLocal, JobAction, Job]): 
-        await update.message.reply_text("DB not available."); return
+    if not all([SessionLocal, JobAction, Job, User]): 
+        await _reply(update, "DB not available."); return
     db=SessionLocal()
     try:
-        uid = db.query(User).filter(getattr(User,_uid_field())==str(update.effective_user.id)).one()
-        acts = db.query(JobAction).filter(JobAction.user_id==uid.id, JobAction.action=="save").order_by(JobAction.created_at.desc()).limit(10).all()
-        if not acts:
-            await update.message.reply_text("No saved jobs yet."); return
-        lines=["💾 <b>Saved jobs</b> (latest 10)"]
-        for a in acts:
-            j = db.query(Job).filter(Job.id==a.job_id).one_or_none()
-            if not j: continue
-            t = html.escape(j.title or "Untitled")
-            lines.append(f"• {t}\n  🔗 {j.original_url or j.url}")
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        u=db.query(User).filter(getattr(User,_uid_field())==str(update.effective_user.id)).one()
+        await _reply(update, _saved_list(db, u.id))
+    finally:
+        try: db.close()
+        except Exception: pass
+
+async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    if not (SessionLocal and JobSent and Job):
+        await _reply(update, "DB not available."); return
+    since = now_utc() - timedelta(days=1)
+    db=SessionLocal()
+    try:
+        q = db.execute(
+            "SELECT j.source, COUNT(*) "
+            "FROM job_sent s JOIN job j ON j.id=s.job_id "
+            "WHERE s.created_at >= :since "
+            "GROUP BY j.source ORDER BY j.source",
+            {"since": since}
+        )
+        rows = list(q)
+        title = "📊 <b>Sent jobs by platform (last 24h)</b>"
+        if not rows:
+            await _reply(update, f"{title}\n(0 results)"); return
+        lines=[title]
+        for src,cnt in rows:
+            lines.append(f"• {src}: {int(cnt)}")
+        await _reply(update, "\n".join(lines))
     finally:
         try: db.close()
         except Exception: pass
@@ -192,22 +223,20 @@ async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
         if not u:
             await q.answer("User not found."); return
         try:
-            # upsert unique per (user,job,action)
             ja = JobAction(user_id=u.id, job_id=int(jid), action=action)
             db.add(ja); db.commit()
         except Exception:
-            db.rollback()  # exists already
+            db.rollback()
 
         if action=="delete":
-            # Μικρό visual feedback: κάνουμε edit το μήνυμα για να φαίνεται ότι «σβήστηκε»
             try:
                 await q.message.edit_reply_markup(reply_markup=None)
                 await q.message.edit_text(q.message.text_markdown + "\n\n~~deleted~~", parse_mode=None, disable_web_page_preview=True)
             except Exception:
                 pass
-            await q.answer("Deleted 🗑️")
+            await q.answer("Deleted")
         else:
-            await q.answer("Saved ⭐")
+            await q.answer("Saved")
     finally:
         try: db.close()
         except Exception: pass
@@ -219,10 +248,10 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     act=(q.data or "").split(":",1)[-1]
 
     if act=="add":
-        msg=("Type keywords using:\n"
-             "<code>/addkeyword python, telegram</code>\n\n"
-             "Tip: you can send English or Greek.")
-        await q.message.reply_text(msg, parse_mode=ParseMode.HTML); await q.answer(); return
+        await q.message.reply_text(
+            "Type keywords using:\n<code>/addkeyword python, telegram</code>\n\nTip: you can send English or Greek.",
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        ); await q.answer(); return
 
     if act=="settings":
         await mysettings_cmd(update, context); await q.answer(); return
@@ -232,9 +261,16 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
         await q.answer(); return
 
     if act=="saved":
-        # ίδια λογική με /saved
-        fake = Update(update.update_id, message=None)
-        await saved_cmd(update, context); await q.answer(); return
+        if not (SessionLocal and User):
+            await q.answer("DB not available."); return
+        db=SessionLocal()
+        try:
+            u=db.query(User).filter(getattr(User,_uid_field())==str(q.from_user.id)).one()
+            await q.message.reply_text(_saved_list(db,u.id), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        finally:
+            try: db.close()
+            except Exception: pass
+        await q.answer(); return
 
     if act=="contact":
         await q.message.reply_text("Send your message here and the admin will reply to you.")
@@ -249,12 +285,12 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
 
     await q.answer()
 
-# ===== Admin bits kept minimal in this file =====
+# ===== Admin bits (όπως ήταν) =====
 async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if not is_admin_id(update.effective_user.id):
-        await update.message.reply_text("Admin only."); return
+        await _reply(update, "Admin only."); return
     if not (SessionLocal and User):
-        await update.message.reply_text("DB not available."); return
+        await _reply(update, "DB not available."); return
     db=SessionLocal()
     try:
         rows=db.query(User).all()
@@ -267,7 +303,7 @@ async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             act="✅" if (not getattr(u,"is_blocked",False) and (lic or trial) and (lic or trial)>=now_utc()) else "❌"
             blk="✅" if getattr(u,"is_blocked",False) else "❌"
             lines.append(f"• {tid} — kw:{len(kws)} | trial:{trial} | lic:{lic} | A:{act} B:{blk}")
-        await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
+        await _reply(update, "\n".join(lines))
     finally:
         try: db.close()
         except Exception: pass
@@ -275,14 +311,14 @@ async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
 async def platforms_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     cc=" ".join(context.args).strip().upper() if context.args else ""
     if not cc:
-        await update.message.reply_text("Usage: /platforms CC  (e.g., /platforms GR or /platforms ALL)")
+        await _reply(update, "Usage: /platforms CC  (e.g., /platforms GR or /platforms ALL)")
         return
     if cc=="GR":
         txt="Greece: JobFind.gr, Skywalker.gr, Kariera.gr"
     else:
         txt=("Global: Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, "
              "Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap (*referral/curated)")
-    await update.message.reply_text(txt)
+    await _reply(update, txt)
 
 async def selftest_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     kb=InlineKeyboardMarkup([
@@ -291,17 +327,16 @@ async def selftest_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⭐ Save", callback_data="job:save:999999"),
          InlineKeyboardButton("🗑️ Delete", callback_data="job:delete:999999")],
     ])
-    await update.message.reply_text(
+    await _reply(update,
         "<b>Logo Reformatting to SVG</b>\n"
         "🧾 Budget: 30.0–250.0 AUD (~$19.5–$162.5)\n"
         "📎 Source: Freelancer\n"
         "🔍 Match: <b><u>logo</u></b>\n"
         "📝 I need my existing logo reformatted into SVG... (sample)\n"
-        "⏱️ 2m ago",
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb
+        "⏱️ 2m ago"
     )
+    await update.message.reply_text(" ", reply_markup=kb)
 
-# ===== Build app =====
 def build_application()->Application:
     if '_init_db' in globals() and callable(_init_db):
         try: _init_db()
@@ -314,6 +349,7 @@ def build_application()->Application:
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("saved", saved_cmd))
+    app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
     app.add_handler(CommandHandler("users", users_cmd))
     app.add_handler(CommandHandler("platforms", platforms_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))

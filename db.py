@@ -4,12 +4,13 @@ import os
 import logging
 from datetime import datetime, timezone
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Boolean, DateTime, Text, Float, UniqueConstraint, ForeignKey, Index
+    create_engine, Column, Integer, String, Boolean, DateTime, Text, Float,
+    UniqueConstraint, ForeignKey, Index
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 log = logging.getLogger("db")
-logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"))
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 UTC = timezone.utc
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or ""
@@ -20,17 +21,14 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else No
 SessionLocal = sessionmaker(bind=engine) if engine else None
 Base = declarative_base()
 
-# --- Models you already had (kept same names/columns) ---
 class User(Base):
     __tablename__ = "user"
     id = Column(Integer, primary_key=True)
     telegram_id = Column(String(64), unique=True, index=True, nullable=False)
     started_at = Column(DateTime(timezone=True))
     trial_until = Column(DateTime(timezone=True))
-    access_until = Column(DateTime(timezone=True))   # aka license_until
+    access_until = Column(DateTime(timezone=True))
     is_blocked = Column(Boolean, default=False)
-
-    # relationships (optional)
     keywords = relationship("Keyword", back_populates="user", lazy="selectin")
 
 class Keyword(Base):
@@ -60,7 +58,6 @@ class Job(Base):
     posted_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-
     __table_args__ = (
         UniqueConstraint("source", "source_id", name="uq_job_source_sourceid"),
         Index("ix_job_posted_at", "posted_at"),
@@ -73,7 +70,6 @@ class JobSent(Base):
     job_id = Column(Integer, ForeignKey("job.id"), index=True, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
-# NEW: actions per user/job (save/delete)
 class JobAction(Base):
     __tablename__ = "job_action"
     id = Column(Integer, primary_key=True)
@@ -81,7 +77,6 @@ class JobAction(Base):
     job_id = Column(Integer, ForeignKey("job.id"), index=True, nullable=False)
     action = Column(String(16), nullable=False)  # "save" | "delete"
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-
     __table_args__ = (Index("ix_job_action_user_job", "user_id", "job_id", "action", unique=True),)
 
 def init_db():
