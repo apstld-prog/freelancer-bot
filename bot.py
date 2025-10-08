@@ -11,6 +11,7 @@ python-telegram-bot v20+
 - Quick grant buttons: +30d, +90d, +180d, +365d
 - Daily reminder 24h before expiration
 - Works with your db.py schema (telegram_id, started_at, trial_until, access_until, is_blocked)
+- NEW: /selftest, /mysettings, /platforms CC
 """
 
 import os
@@ -184,17 +185,7 @@ HELP_TEXT = (
     "   🔗 Original → same wrapped job link\n\n"
     "➤ Use <code>/mysettings</code> anytime to check your filters and proposal.\n"
     "➤ <code>/selftest</code> for a test job.\n"
-    "➤ <code>/platforms CC</code> to see platforms by country (e.g., <code>/platforms GR</code>).\n\n"
-    "📋 <b>Platforms monitored</b>:\n"
-    "• Global: Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, "
-    "Worksome*, twago, freelancermap (* referral/curated platforms)\n"
-    "• Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
-    "👑 <b>Admin commands</b>\n"
-    "<code>/users</code> — list users\n"
-    "<code>/grant &lt;telegram_id&gt; &lt;days&gt;</code> — extend license\n"
-    "<code>/block &lt;telegram_id&gt;</code> / <code>/unblock &lt;telegram_id&gt;</code>\n"
-    "<code>/broadcast &lt;text&gt;</code> — send message to all active\n"
-    "<code>/feedstatus</code> — per-platform counters (24h)\n"
+    "➤ <code>/platforms CC</code> to see platforms by country (e.g., <code>/platforms GR</code>)."
 )
 
 def settings_card_text(u, kws: List[str]) -> str:
@@ -253,6 +244,50 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"🆔 Your ID: <code>{uid}</code>\nRole: <b>{role}</b>"
     if uname: text += f"\n@{uname}"
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+# NEW: /mysettings
+async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db_available():
+        await update.message.reply_text("(demo) DB is not available here."); return
+    db = SessionLocal()
+    try:
+        u = _get_or_create_user(db, update.effective_user.id)
+        kws = [getattr(k, "keyword", None) or getattr(k, "text", None) or "" for k in _list_keywords(db, u)]
+        await update.message.reply_text(settings_card_text(u, kws), parse_mode=ParseMode.HTML,
+                                        disable_web_page_preview=True)
+    finally:
+        db.close()
+
+# NEW: /selftest (δοκιμαστικό alert)
+async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🧪 <b>Test job</b>\n"
+        "Title: Senior Logo Designer\n"
+        "Budget: $250 – $500\n"
+        "Source: Demo\n"
+        "Link: https://example.com/job/123\n\n"
+        "If you can read this, your bot can deliver job alerts."
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+# NEW: /platforms CC
+_PLATFORMS = {
+    "GLOBAL": [
+        "Freelancer.com", "PeoplePerHour", "Malt", "Workana", "Guru", "99designs",
+        "Toptal*", "Codeable*", "YunoJuno*", "Worksome*", "twago", "freelancermap", "Wripple"
+    ],
+    "GR": ["JobFind.gr", "Skywalker.gr", "Kariera.gr"]
+}
+async def platforms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    code = (context.args[0] if context.args else "ALL").upper()
+    if code == "ALL":
+        lines = ["🌍 <b>Platforms monitored</b>:", "• Global: " + ", ".join(_PLATFORMS["GLOBAL"]),
+                 "• Greece: " + ", ".join(_PLATFORMS["GR"])]
+    elif code in ("GR","EL"):
+        lines = ["🇬🇷 <b>Greece</b>:", "• " + ", ".join(_PLATFORMS["GR"])]
+    else:
+        lines = ["🌍 <b>Global</b>:", "• " + ", ".join(_PLATFORMS["GLOBAL"])]
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -533,22 +568,16 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows = db.query(JobSent).filter(JobSent.created_at >= since).all()
             for r in rows:
                 label = None
-
-                # 1) αν υπάρχει explicit source
                 src = getattr(r, "source", None)
                 if src:
                     lbl = prefix_map.get(str(src).strip().lower())
                     if lbl: label = lbl
-
-                # 2) αλλιώς από job_id prefix (CAST σε str -> strip)
                 if not label:
                     jid = str(getattr(r, "job_id", "") or "").strip()
                     pref = jid.split("-", 1)[0].lower() if "-" in jid else jid.lower()
                     label = prefix_map.get(pref)
-
                 if label:
                     counters[label] = counters.get(label, 0) + 1
-
             used_db = True
         except Exception as e:
             log.warning("feedstatus query failed: %s", e)
@@ -559,7 +588,6 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = "📊 <b>Sent jobs by platform (last 24h)</b>"
     if not used_db:
         title += "\n<i>(DB not available — showing zeros)</i>"
-
     lines = [title] + [f"• {src}: {counters.get(src,0)}" for src in known]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
@@ -676,6 +704,9 @@ def build_application() -> Application:
     app_.add_handler(CommandHandler("start", start_cmd))
     app_.add_handler(CommandHandler("help", help_cmd))
     app_.add_handler(CommandHandler("whoami", whoami_cmd))
+    app_.add_handler(CommandHandler("mysettings", mysettings_cmd))   # NEW
+    app_.add_handler(CommandHandler("selftest", selftest_cmd))       # NEW
+    app_.add_handler(CommandHandler("platforms", platforms_cmd))     # NEW
     app_.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app_.add_handler(CommandHandler("keywords", keywords_cmd))
     app_.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
