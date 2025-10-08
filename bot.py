@@ -418,6 +418,28 @@ async def capture_text_messages(update: Update, context: ContextTypes.DEFAULT_TY
         finally:
             pass
 
+# ---------- Job Save/Delete (lightweight) ----------
+async def job_save_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q: return
+    await q.answer("Saved ✅")
+    try:
+        await q.message.reply_text("⭐ Saved.")
+    except Exception:
+        pass
+
+async def job_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q: return
+    await q.answer("Deleted 🗑️")
+    try:
+        await q.message.delete()
+    except Exception:
+        try:
+            await q.message.reply_text("🗑️ Deleted.")
+        except Exception:
+            pass
+
 # ---------- Admin & Grants ----------
 def _list_all_users(db) -> List[User]:
     try: return list(db.query(User).all())
@@ -646,6 +668,12 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if admin_id:
             context.application.bot_data.get("admin_reply_target", {}).pop(admin_id, None)
         await q.message.reply_text("✅ Conversation closed.")
+
+    # --- NEW: Save/Delete job actions ---
+    elif data.startswith("job:save:"):
+        await job_save_cb(update, context)
+    elif data.startswith("job:delete:"):
+        await job_delete_cb(update, context)
 
 # ---------- Reminder job ----------
 async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
