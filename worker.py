@@ -6,7 +6,7 @@ FREELANCER_API = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 async def fetch_jobs(query: str):
     params = {
         "query": query, "limit": 10, "compact": "true",
-        "user_details": "true", "job_details": "true"
+        "user_details": "true", "job_details": "true", "full_description": "true"
     }
     async with httpx.AsyncClient(timeout=20) as c:
         r = await c.get(FREELANCER_API, params=params)
@@ -21,15 +21,19 @@ async def cycle_once():
             if not u.is_active or u.is_blocked:
                 continue
             for kw in db.query(Keyword).filter(Keyword.user_id == u.id):
-                await fetch_jobs(kw.value)
+                try:
+                    _ = await fetch_jobs(kw.value)
+                except Exception:
+                    pass
     finally:
         db.close()
 
 async def main():
     init_db()
+    interval = int(os.getenv("WORKER_INTERVAL", "120"))
     while True:
         await cycle_once()
-        await asyncio.sleep(120)
+        await asyncio.sleep(interval)
 
 if __name__ == "__main__":
     asyncio.run(main())

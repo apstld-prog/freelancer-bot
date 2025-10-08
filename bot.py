@@ -10,7 +10,7 @@ from telegram.ext import (
 from db import SessionLocal, User, Keyword, init_db
 
 
-def now_utc():
+def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
@@ -27,14 +27,22 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def iso_or_dash(dt: datetime | None) -> str:
+    if not dt:
+        return "—"
+    s = dt.astimezone(timezone.utc).isoformat()
+    return s.replace("+00:00", "Z")
+
+
 def settings_card(u: User, kws: List[Keyword]) -> str:
     kws_txt = ", ".join(sorted([k.value for k in kws])) or "—"
     return (
         "⚙️ <b>Your Settings</b>\n\n"
         f"Keywords: {kws_txt}\n"
         f"Countries: {u.countries or 'ALL'}\n"
-        f"Trial ends: {u.trial_end or '—'}\n"
-        f"License until: {u.license_until or '—'}\n"
+        f"Trial start: {iso_or_dash(u.trial_start)}\n"
+        f"Trial ends: {iso_or_dash(u.trial_end)}\n"
+        f"License until: {iso_or_dash(u.license_until)}\n"
         f"Active: {'✅' if u.is_active else '❌'}  "
         f"Blocked: {'🚫' if u.is_blocked else '✅'}"
     )
@@ -46,10 +54,20 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = db.query(User).filter(User.telegram_id == tg_id).one_or_none()
         if not user:
-            user = User(telegram_id=tg_id, is_active=True)
+            now = now_utc()
+            user = User(
+                telegram_id=tg_id,
+                is_active=True,
+                is_blocked=False,
+                is_admin=False,
+                trial_start=now,
+                trial_end=None,
+                license_until=None,
+            )
             db.add(user)
             db.commit()
-        kb = main_menu_kb(user.is_admin)
+            db.refresh(user)
+        kb = main_menu_kb(bool(user.is_admin))
         await update.message.reply_text(
             "👋 Welcome to Freelancer Alert Bot!\n"
             "You can add keywords using /addkeyword python, design, marketing ...",
@@ -72,7 +90,11 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     added = 0
     try:
-        user = db.query(User).filter(User.telegram_id == tg_id).one()
+        user = db.query(User).filter(User.telegram_id == tg_id).one_or_none()
+        if not user:
+            user = User(telegram_id=tg_id, is_active=True, is_blocked=False, is_admin=False)
+            db.add(user)
+            db.flush()
         for kw in keywords:
             if not db.query(Keyword).filter_by(user_id=user.id, value=kw).first():
                 db.add(Keyword(user_id=user.id, value=kw))
@@ -91,7 +113,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         u = db.query(User).filter(User.telegram_id == tg_id).one()
-        kws = db.query(Keyword).filter(Keyword.user_id == u.id).all()
+        kws = db.query(Keyword).filter(Keyword.user_id == u.id).order_by(Keyword.value).all()
         await update.message.reply_text(settings_card(u, kws), parse_mode="HTML")
     finally:
         db.close()
@@ -102,8 +124,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ℹ️ <b>How it works</b>\n\n"
         "• Add keywords: /addkeyword python, telegram\n"
         "• View settings: /mysettings\n"
-        "• Edit settings: /setcountry, /setproposal\n"
-        "• To contact admin: /contact"
+        "• Set countries: /setcountry US,UK (or ALL)\n"
+        "• Proposal template: /setproposal <text>\n"
+        "• Contact admin: /contact"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -130,7 +153,7 @@ def build_application() -> Application:
     init_db()
     token = os.getenv("TELEGRAM_TOKEN", "").strip()
     if not token or ":" not in token:
-        raise RuntimeError("❌ TELEGRAM_TOKEN missing or invalid in environment.")
+        raise RuntimeError("❌ TELEGRAM_TOKEN missing/invalid. Set it in Render → Environment.")
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
