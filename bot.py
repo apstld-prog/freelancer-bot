@@ -11,8 +11,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-# ===== DB wiring =====
-SessionLocal=None; User=None; Keyword=None; Job=None; JobSent=None
+SessionLocal=User=Keyword=Job=JobSent=None
 try:
     from db import SessionLocal as _S, User as _U, Keyword as _K, Job as _J, JobSent as _JS, init_db as _init_db
     SessionLocal, User, Keyword, Job, JobSent = _S, _U, _K, _J, _JS
@@ -33,7 +32,6 @@ def _uid_field():
         if hasattr(User,c): return c
     raise RuntimeError("User id column not found")
 
-# ===== UI text =====
 def main_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Keywords",callback_data="act:add"),
@@ -41,7 +39,7 @@ def main_kb():
         [InlineKeyboardButton("🆘 Help",callback_data="act:help"),
          InlineKeyboardButton("💾 Saved",callback_data="act:saved")],
         [InlineKeyboardButton("📞 Contact",callback_data="act:contact"),
-         InlineKeyboardButton("Admin",callback_data="act:admin")],  # χωρίς emoji
+         InlineKeyboardButton("Admin",callback_data="act:admin")],
     ])
 
 WELCOME_HEAD=(
@@ -78,7 +76,6 @@ HELP_TEXT=(
     "➤ <code>/platforms CC</code> (e.g., <code>/platforms GR</code>)."
 )
 
-# ===== helpers =====
 def _collect_keywords(u) -> List[str]:
     kws=[]
     try:
@@ -119,7 +116,6 @@ def settings_card(u, kws:List[str])->str:
             "Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
             "When your trial ends, please contact the admin to extend your access.")
 
-# ===== commands =====
 async def start_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(WELCOME_HEAD, reply_markup=main_kb(),
                                     parse_mode=ParseMode.HTML, disable_web_page_preview=True)
@@ -144,20 +140,16 @@ async def help_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def mysettings_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    """Works for both /mysettings AND Settings button (callback)."""
+    msg = update.effective_message or update.message  # δουλεύει και σε callback
     if not (SessionLocal and User):
-        await (update.effective_message or update.message).reply_text("DB not available.")
-        return
+        await msg.reply_text("DB not available."); return
     db=SessionLocal()
     try:
         u=db.query(User).filter(getattr(User,_uid_field())==str(update.effective_user.id)).one_or_none()
         if not u:
-            await (update.effective_message or update.message).reply_text("User not found.")
-            return
+            await msg.reply_text("User not found."); return
         kws=_collect_keywords(u)
-        await (update.effective_message or update.message).reply_text(
-            settings_card(u,kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True
-        )
+        await msg.reply_text(settings_card(u,kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     finally:
         try: db.close()
         except Exception: pass
@@ -213,7 +205,6 @@ async def selftest_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb
     )
 
-# ===== inline buttons (jobs) =====
 async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     q=update.callback_query
     if not q: return
@@ -225,7 +216,6 @@ async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     else:
         await q.answer()
 
-# ===== inline buttons (menu) =====
 async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     q=update.callback_query
     if not q: return
@@ -261,7 +251,6 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
 
     await q.answer()
 
-# ===== /feedstatus =====
 def now(): return datetime.now(UTC)
 async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if not is_admin_id(update.effective_user.id):
@@ -290,12 +279,10 @@ async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         try: db.close()
         except Exception: pass
 
-# ===== build app =====
 def build_application()->Application:
     token=(os.getenv("BOT_TOKEN") or "").strip()
     app=ApplicationBuilder().token(token).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
@@ -304,8 +291,6 @@ def build_application()->Application:
     app.add_handler(CommandHandler("selftest", selftest_cmd))
     app.add_handler(CommandHandler(["feedstatus","feedstats"], feedstatus_cmd))
 
-    # Callback buttons
     app.add_handler(CallbackQueryHandler(job_buttons_cb, pattern=r"^job:(save|delete):"))
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))
-
     return app
