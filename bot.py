@@ -237,7 +237,6 @@ def _grant_days_in_db(tg_id: str, days: int) -> bool:
         try:
             setattr(u,"access_until",new_until)
         except Exception:
-            # fallback to license_until legacy name
             try: setattr(u,"license_until",new_until)
             except Exception: pass
         db.add(u); db.commit()
@@ -290,7 +289,6 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 async def inbound_text_handler(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    """Πιάνει ελεύθερα κείμενα για Contact και Admin Reply."""
     msg=update.effective_message
     user=update.effective_user
     admin_id = admin_chat_id()
@@ -316,7 +314,6 @@ async def inbound_text_handler(update:Update, context:ContextTypes.DEFAULT_TYPE)
         return
 
 async def admin_actions_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    """Χειριστής κουμπιών Reply/Decline/Grant από το admin."""
     q=update.callback_query
     if not q: return
     if not is_admin_id(q.from_user.id):
@@ -349,6 +346,73 @@ async def admin_actions_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
             await q.answer("OK")
     else:
         await q.answer()
+
+# ----------------------------------------------------------
+# JOB BUTTONS (Save/Delete)
+# ----------------------------------------------------------
+def _find_or_create_user(db, tg_id:str):
+    u=db.query(User).filter(getattr(User,_uid_field())==str(tg_id)).one_or_none()
+    if not u:
+        u=User(telegram_id=str(tg_id), started_at=now_utc(),
+               trial_until=now_utc()+timedelta(days=DEFAULT_TRIAL_DAYS),
+               is_blocked=False)
+        db.add(u); db.commit(); db.refresh(u)
+    return u
+
+async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    """Callback για κουμπιά αγγελίας: Save / Delete."""
+    q=update.callback_query
+    if not q: return
+    data=q.data or ""
+    # pattern: job:save:<job_id> or job:delete:<job_id>
+    parts=data.split(":")
+    if len(parts)!=3:
+        await q.answer(); return
+    action, job_id = parts[1], parts[2]
+
+    if not all([SessionLocal, User, JobAction]):
+        # DB not available -> μόνο UI feedback
+        if action=="delete":
+            try: await context.bot.delete_message(chat_id=q.message.chat_id, message_id=q.message.message_id)
+            except Exception: pass
+        else:
+            await q.answer("Saved (no DB)")
+        return
+
+    db=SessionLocal()
+    try:
+        u=_find_or_create_user(db, str(q.from_user.id))
+
+        # καταχώριση action
+        try:
+            ja=JobAction(user_id=u.id, job_id=int(job_id) if job_id.isdigit() else job_id,
+                         action=("save" if action=="save" else "delete"),
+                         created_at=now_utc())
+            db.add(ja); db.commit()
+        except Exception:
+            db.rollback()
+
+        if action=="delete":
+            # αφαιρούμε το μήνυμα από το chat
+            try:
+                await context.bot.delete_message(chat_id=q.message.chat_id, message_id=q.message.message_id)
+            except Exception:
+                # fallback: απενεργοποίηση κουμπιών
+                try: await q.edit_message_reply_markup(reply_markup=None)
+                except Exception: pass
+            await q.answer("Deleted")
+        else:
+            # Save: ενημέρωση UI και απόκρυψη κάρτας (όπως ζήτησες)
+            try:
+                await context.bot.delete_message(chat_id=q.message.chat_id, message_id=q.message.message_id)
+            except Exception:
+                try: await q.edit_message_reply_markup(reply_markup=None)
+                except Exception: pass
+            await _reply(update, "⭐ Saved.")
+            await q.answer("Saved")
+    finally:
+        try: db.close()
+        except Exception: pass
 
 # ----------------------------------------------------------
 # ADMIN
