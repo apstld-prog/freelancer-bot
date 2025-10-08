@@ -362,3 +362,7 @@ async def run_forever():
 
 if __name__ == "__main__":
     asyncio.run(run_forever())
+
+if __name__ == "__main__":
+    run()  # ή main(), ανάλογα πώς λέγεται η συνάρτηση εκκίνησης του worker
+

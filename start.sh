@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 export PYTHONUNBUFFERED=1
+export PORT="${PORT:-10000}"
 
 echo "==> launching web(server) + worker..."
-# web (FastAPI + PTB webhook)
-uvicorn server:app --host 0.0.0.0 --port 10000 &
-WEB_PID=$!
 
-# worker (scraper loop)
-python -u worker.py &
-W_PID=$!
+# --- Web (Telegram webhook server)
+python -u server.py & WEB_PID=$!
 
-wait $WEB_PID
-kill $W_PID || true
+# --- Worker (fetches jobs from platforms + sends alerts)
+python -u worker.py & WORKER_PID=$!
+
+# Μείνε ζωντανός όσο ζει ένα από τα δύο και βγες αν πεθάνει κάποιο
+wait -n "$WEB_PID" "$WORKER_PID"
+EXIT_CODE=$?
+
+# Αν πέσει κάτι, σκότωσε το άλλο για καθαρό restart από το Render
+kill 0 || true
+exit "$EXIT_CODE"
