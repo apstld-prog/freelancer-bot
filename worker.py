@@ -1,9 +1,9 @@
 # worker.py
 # -*- coding: utf-8 -*-
 """
-Worker: Fetch feeds (Freelancer + Skywalker), match per-user keywords,
-upsert into 'job', log into 'job_sent', and send cards with 2x2 buttons.
-Robust to missing title/url/description (safe defaults); full rollback guards.
+Worker: fetch Freelancer + Skywalker, match keywords per user,
+upsert into 'job', log 'job_sent', send Telegram cards (Proposal/Original + Save/Delete).
+Robust: never writes NULL to NOT NULL fields. Rollback guards everywhere.
 """
 
 import os, asyncio, logging, re, html, json
@@ -106,7 +106,7 @@ def _snippet(s, n=220):
     s=(s or "").strip()
     return (s[:n]+"…") if len(s)>n else s
 
-# === Telegram send (2 buttons ανά σειρά) ===
+# === Telegram send (2-per-row) ===
 async def _send(bot_token, chat_id, text, url_btns, cb_btns):
     api=f"https://api.telegram.org/bot{bot_token}/sendMessage"
     kb={"inline_keyboard":[]}
@@ -120,17 +120,14 @@ async def _send(bot_token, chat_id, text, url_btns, cb_btns):
             "disable_web_page_preview": True, "reply_markup": kb
         })
 
-# === DB helpers (SAFE defaults) ===
+# === DB helpers (strict safe defaults) ===
 def get_or_create_job(db, *, source:str, source_id:str, title:str, desc:str,
                       url:str, proposal_url:str, original_url:str,
                       bmin:Optional[float], bmax:Optional[float], currency:Optional[str],
                       matched:Optional[str], posted_at:Optional[datetime]) -> int:
-    """Upsert σε job(source, source_id). Επιστρέφει int job.id. Ποτέ NULL σε NOT NULL πεδία."""
-    # SAFE defaults
     title = (title or f"Untitled Job #{source_id}").strip()[:512]
     url = (url or "").strip()
     if not url:
-        # τελευταίο fallback για Freelancer
         if source.lower()=="freelancer" and str(source_id).strip():
             url = f"https://www.freelancer.com/projects/{source_id}"
         if not url:
@@ -162,7 +159,7 @@ def get_or_create_job(db, *, source:str, source_id:str, title:str, desc:str,
 
     try:
         db.commit()
-    except Exception as e:
+    except Exception:
         try: db.rollback()
         except Exception: pass
         raise
@@ -179,7 +176,7 @@ def add_jobsent(db, user_id:int, job_id:int):
         except Exception: pass
         log.warning("JobSent insert failed: %s", e)
 
-# === Feeds ===
+# === feeds ===
 async def fetch_skywalker()->List[Dict]:
     if not FEED_SKY: return []
     try:
@@ -192,7 +189,7 @@ async def fetch_skywalker()->List[Dict]:
     for it in items:
         title=norm("".join(re.findall(r"<title>(.*?)</title>", it, flags=re.S))) or "Untitled Job"
         link =norm("".join(re.findall(r"<link>(.*?)</link>", it, flags=re.S)))
-        if not link:  # χωρίς URL δεν βάζουμε στη DB
+        if not link:  # never insert without URL
             continue
         guid =norm("".join(re.findall(r"<guid.*?>(.*?)</guid>", it, flags=re.S))) or link
         desc =norm("".join(re.findall(r"<description>(.*?)</description>", it, flags=re.S)))
@@ -231,7 +228,7 @@ async def fetch_freelancer_for_queries(queries: List[str]) -> List[Dict]:
                 desc  = (p.get("description") or "").strip()
                 url   = f"https://www.freelancer.com/projects/{pid}" if pid else ""
                 if not url:
-                    continue  # ποτέ insert χωρίς URL
+                    continue
                 cur   = ((p.get("currency") or {}).get("code") or "USD").upper()
                 bmin  = (p.get("budget") or {}).get("minimum")
                 bmax  = (p.get("budget") or {}).get("maximum")
@@ -250,7 +247,7 @@ async def fetch_freelancer_for_queries(queries: List[str]) -> List[Dict]:
     log.info("Freelancer fetched ~%d items (merged)", len(out))
     return out
 
-# === Matching & send ===
+# === matching & send ===
 def dedup_prefer_affiliate(items: List[Dict]) -> List[Dict]:
     seen={}
     for it in items:
@@ -264,11 +261,12 @@ def dedup_prefer_affiliate(items: List[Dict]) -> List[Dict]:
     return list(seen.values())
 
 async def process_user(db, user, items)->int:
-    kws=[k for k in _kws(db,user) if k]; 
+    kws=[k for k in _kws(db,user) if k]
     if not kws: return 0
+
     matches=[]
     for it in items:
-        mk=match_kw(f"{it['title']} {it['desc']}", kws)
+        mk=match_kw(f"{it.get('title','')} {it.get('desc','')}", kws)
         if mk: x=dict(it); x["_matched"]=mk; matches.append(x)
     matches=dedup_prefer_affiliate(matches)
 
@@ -277,15 +275,31 @@ async def process_user(db, user, items)->int:
 
     sent=0
     for it in matches:
-        # Upsert job → id (SAFE defaults ήδη μέσα)
+        # === EXTRA GUARDS: create local safe defaults BEFORE DB call ===
+        source = it.get("source") or "Unknown"
+        source_id = str(it.get("source_id") or "").strip() or "unknown"
+        title = it.get("title") or (f"Untitled Job #{source_id}" if source_id else "Untitled Job")
+        url = it.get("url") or (f"https://www.freelancer.com/projects/{source_id}" if source.lower()=="freelancer" and source_id!="unknown" else "")
+        if not url:
+            # δεν προσπαθούμε καν για job χωρίς URL
+            continue
+        desc = it.get("desc") or ""
+        proposal = it.get("proposal") or url
+        original = it.get("original") or url
+        bmin = it.get("budget_min")
+        bmax = it.get("budget_max")
+        cur  = it.get("currency") or "USD"
+        posted = it.get("posted_at") or it.get("posted") or now_utc()
+        matched = it.get("_matched")
+
         try:
             jid = get_or_create_job(
                 db,
-                source=it["source"], source_id=str(it["source_id"]),
-                title=it.get("title"), desc=it.get("desc"),
-                url=it.get("url"), proposal_url=it.get("proposal"), original_url=it.get("original"),
-                bmin=it.get("budget_min"), bmax=it.get("budget_max"), currency=it.get("currency"),
-                matched=it.get("_matched"), posted_at=it.get("posted_at"),
+                source=source, source_id=source_id,
+                title=title, desc=desc,
+                url=url, proposal_url=proposal, original_url=original,
+                bmin=bmin, bmax=bmax, currency=cur,
+                matched=matched, posted_at=posted,
             )
         except Exception as e:
             log.warning("Job upsert failed: %s", e)
@@ -293,34 +307,29 @@ async def process_user(db, user, items)->int:
             except Exception: pass
             continue
 
-        # Skip if already sent
+        # avoid duplicate per user
         try: db.rollback()
         except Exception: pass
-        already = db.query(JobSent).filter(
-            JobSent.user_id==getattr(user,"id"), JobSent.job_id==jid
-        ).first()
+        already = db.query(JobSent).filter(JobSent.user_id==getattr(user,"id"), JobSent.job_id==jid).first()
         if already: continue
 
-        # Build message
         raw=None; usd=None
-        if it.get("budget_min") is not None or it.get("budget_max") is not None:
-            bmin="" if it.get("budget_min") is None else str(it.get("budget_min"))
-            bmax="" if it.get("budget_max") is None else str(it.get("budget_max"))
-            raw=f"{bmin}-{bmax} {it.get('currency')}".strip("- ")
-            usd=usd_range(it.get("budget_min"), it.get("budget_max"), it.get("currency"))
-        match_disp = f"<b><u>{html.escape(it.get('_matched') or '')}</u></b>" if it.get("_matched") else None
+        if bmin is not None or bmax is not None:
+            bmin_s="" if bmin is None else str(bmin)
+            bmax_s="" if bmax is None else str(bmax)
+            raw=f"{bmin_s}-{bmax_s} {cur}".strip("- ")
+            usd=usd_range(bmin,bmax,cur)
 
-        lines=[f"<b>{html.escape(it.get('title') or '')}</b>"]
+        lines=[f"<b>{html.escape(title)}</b>"]
         if raw: lines.append(f"🧾 Budget: {html.escape(raw)}" + (f" ({usd})" if usd else ""))
-        lines.append(f"📎 Source: {it['source']}")
-        if match_disp: lines.append(f"🔍 Match: {match_disp}")
-        sn=_snippet(it.get("desc") or "")
+        lines.append(f"📎 Source: {source}")
+        if matched: lines.append(f"🔍 Match: <b><u>{html.escape(matched)}</u></b>")
+        sn=_snippet(desc)
         if sn: lines.append(f"📝 {html.escape(sn)}")
-        lines.append(f"⏱️ {age(it.get('posted_at'))}")
+        lines.append(f"⏱️ {age(posted)}")
         text="\n".join(lines)
 
-        url_buttons=[("📨 Proposal", it.get("proposal") or it.get("url")),
-                     ("🔗 Original",  it.get("proposal") or it.get("url"))]
+        url_buttons=[("📨 Proposal", proposal), ("🔗 Original", original)]
         cb_buttons =[("⭐ Save", f"job:save:{jid}"), ("🗑️ Delete", f"job:delete:{jid}")]
 
         try:
@@ -349,11 +358,10 @@ async def worker_cycle():
         except Exception: pass
         return
 
-    # Fetch feeds
     items=[]
     try:
         sky = await fetch_skywalker() if FEED_SKY else []
-        fr = []
+        fr=[]
         if FEED_FREELANCER:
             allk=set()
             for u in users:
