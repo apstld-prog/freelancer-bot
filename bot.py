@@ -78,8 +78,8 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not u:
             u = User(
                 telegram_id=tg_id,
-                started_at=now_utc(),
-                trial_until=now_utc() + timedelta(days=DEFAULT_TRIAL_DAYS),
+                trial_start=now_utc(),
+                trial_end=now_utc() + timedelta(days=DEFAULT_TRIAL_DAYS),
                 is_blocked=False,
             )
             db.add(u)
@@ -88,9 +88,9 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         added = []
         for kw in kws:
-            exists = db.query(Keyword).filter_by(user_id=u.id, keyword=kw).first()
+            exists = db.query(Keyword).filter_by(user_id=u.id, term=kw).first()
             if not exists:
-                db.add(Keyword(user_id=u.id, keyword=kw, created_at=now_utc()))
+                db.add(Keyword(user_id=u.id, term=kw))
                 added.append(kw)
         db.commit()
 
@@ -113,7 +113,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = str(update.effective_user.id)
     try:
         u = db.query(User).filter(User.telegram_id == tg_id).one_or_none()
-        kws = db.query(Keyword.keyword).filter(Keyword.user_id == u.id).all() if u else []
+        kws = db.query(Keyword.term).filter(Keyword.user_id == u.id).all() if u else []
         kws_list = ", ".join([k[0] for k in kws]) if kws else "(none)"
         txt = (
             "🛠 <b>Your Settings</b>\n"
@@ -123,8 +123,8 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if u:
             txt += (
-                f"Trial start: {u.started_at}\n"
-                f"Trial end: {u.trial_until}\n"
+                f"Trial start: {u.trial_start}\n"
+                f"Trial end: {u.trial_end}\n"
                 f"License until: {u.license_until}\n"
                 f"Active: {'✅' if not u.is_blocked else '❌'}\n\n"
             )
@@ -164,7 +164,7 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 # ----------------------------------------------------------
-# CONTACT / ADMIN REPLY FLOW (stub)
+# CONTACT / ADMIN REPLY FLOW
 # ----------------------------------------------------------
 async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✉️ Type your message and it will be sent to the admin.")
