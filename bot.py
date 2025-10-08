@@ -272,7 +272,7 @@ async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
         await saved_cmd(update, context)
     elif act=="contact":
         context.user_data["contact_mode"]=True
-        await q.message.reply_text("✍️ Γράψε τώρα το μήνυμα που θέλεις να σταλεί στον διαχειριστή.")
+        await q.message.reply_text("✍️ Type your message for the admin now. It will be forwarded.")
     elif act=="admin":
         if is_admin_id(q.from_user.id):
             txt = (
@@ -297,19 +297,19 @@ async def inbound_text_handler(update:Update, context:ContextTypes.DEFAULT_TYPE)
     if context.user_data.get("contact_mode"):
         context.user_data["contact_mode"]=False
         if not admin_id:
-            await msg.reply_text("Ο διαχειριστής δεν είναι διαθέσιμος αυτή τη στιγμή.")
+            await msg.reply_text("Admin is not available right now.")
             return
         text=f"📩 New message from user\nID: <code>{user.id}</code>\n\n{msg.text}"
         await context.bot.send_message(chat_id=admin_id, text=text, parse_mode=ParseMode.HTML,
                                        reply_markup=_admin_contact_kb(user.id))
-        await msg.reply_text("✅ Το μήνυμα στάλθηκε στον διαχειριστή. Θα λάβεις απάντηση εδώ.")
+        await msg.reply_text("✅ Your message was sent to the admin. You'll receive the reply here.")
         return
 
     # 2) Admin typing a reply
     if is_admin_id(user.id) and context.user_data.get("admin_reply_to"):
         target_id=context.user_data.get("admin_reply_to")
         await context.bot.send_message(chat_id=int(target_id), text=f"👑 Admin:\n{msg.text}")
-        await msg.reply_text("✅ Η απάντησή σου εστάλη στον χρήστη.")
+        await msg.reply_text("✅ Your reply was sent to the user.")
         context.user_data["admin_reply_to"]=None
         return
 
@@ -326,23 +326,23 @@ async def admin_actions_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
         uid=parts[2]
         if action=="reply":
             context.user_data["admin_reply_to"]=uid
-            await q.message.reply_text(f"✍️ Γράψε την απάντησή σου για τον χρήστη {uid}…")
+            await q.message.reply_text(f"✍️ Type your reply for user {uid}…")
             await q.answer("Reply mode on")
         elif action=="decline":
             try:
-                await context.bot.send_message(chat_id=int(uid), text="❌ Ο διαχειριστής απέρριψε το αίτημα. Μπορείς να ξαναστείλεις μήνυμα αργότερα.")
+                await context.bot.send_message(chat_id=int(uid), text="❌ The admin declined the request. You may contact again later.")
             except Exception: pass
             await q.answer("Declined")
         elif action=="grant" and len(parts)==4:
             days=int(parts[3])
             ok=_grant_days_in_db(uid, days)
             if ok:
-                await q.message.reply_text(f"✅ Προστέθηκαν {days} ημέρες πρόσβασης στον χρήστη {uid}.")
+                await q.message.reply_text(f"✅ Added {days} days of access for user {uid}.")
                 try:
-                    await context.bot.send_message(chat_id=int(uid), text=f"🎉 Ο διαχειριστής επέκτεινε την πρόσβασή σου κατά {days} ημέρες.")
+                    await context.bot.send_message(chat_id=int(uid), text=f"🎉 Your access has been extended by {days} days.")
                 except Exception: pass
             else:
-                await q.message.reply_text(f"ℹ️ Δεν ήταν δυνατή η ενημέρωση στη βάση. Έγινε μόνο ειδοποίηση.")
+                await q.message.reply_text(f"ℹ️ DB update failed. Only a notification was sent.")
             await q.answer("OK")
     else:
         await q.answer()
@@ -360,7 +360,7 @@ def _find_or_create_user(db, tg_id:str):
     return u
 
 async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    """Callback για κουμπιά αγγελίας: Save / Delete."""
+    """Callback for job card buttons: Save / Delete."""
     q=update.callback_query
     if not q: return
     data=q.data or ""
@@ -371,7 +371,7 @@ async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     action, job_id = parts[1], parts[2]
 
     if not all([SessionLocal, User, JobAction]):
-        # DB not available -> μόνο UI feedback
+        # DB not available -> UI-only feedback
         if action=="delete":
             try: await context.bot.delete_message(chat_id=q.message.chat_id, message_id=q.message.message_id)
             except Exception: pass
@@ -383,7 +383,7 @@ async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
     try:
         u=_find_or_create_user(db, str(q.from_user.id))
 
-        # καταχώριση action
+        # store action
         try:
             ja=JobAction(user_id=u.id, job_id=int(job_id) if job_id.isdigit() else job_id,
                          action=("save" if action=="save" else "delete"),
@@ -393,16 +393,15 @@ async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
             db.rollback()
 
         if action=="delete":
-            # αφαιρούμε το μήνυμα από το chat
+            # remove card from chat
             try:
                 await context.bot.delete_message(chat_id=q.message.chat_id, message_id=q.message.message_id)
             except Exception:
-                # fallback: απενεργοποίηση κουμπιών
                 try: await q.edit_message_reply_markup(reply_markup=None)
                 except Exception: pass
             await q.answer("Deleted")
         else:
-            # Save: ενημέρωση UI και απόκρυψη κάρτας (όπως ζήτησες)
+            # Save: notify + hide card (as requested)
             try:
                 await context.bot.delete_message(chat_id=q.message.chat_id, message_id=q.message.message_id)
             except Exception:
