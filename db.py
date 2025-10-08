@@ -1,209 +1,194 @@
-# db.py
-from __future__ import annotations
-
+import os
 import logging
-from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    DateTime,
-    Boolean,
-    Text,
-    Float,
-    func,
-    text,
-    UniqueConstraint,
+    create_engine, Column, Integer, String, Text, Boolean, DateTime, Float,
+    ForeignKey, UniqueConstraint, Index, func
 )
-from sqlalchemy.engine import Engine
-from sqlalchemy.exc import ProgrammingError, OperationalError
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker, relationship, declarative_base
 
-logger = logging.getLogger("db")
-logging.basicConfig(level=logging.INFO)
-
-# ---------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------
-# Περιμένουμε το DATABASE_URL από το περιβάλλον (Render).
-import os
+log = logging.getLogger("db")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    # τοπικό fallback (προαιρετικό)
-    DATABASE_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/postgres"
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-engine: Engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else None
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
 Base = declarative_base()
 
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+# -----------------
+# MODELS
+# -----------------
 
-@contextmanager
-def session_scope():
-    """Provide a transactional scope around a series of operations."""
-    db = SessionLocal()
-    try:
-        yield db
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-
-# ---------------------------------------------------------------------
-# ORM Models
-# ---------------------------------------------------------------------
 class User(Base):
     __tablename__ = "user"
-
     id = Column(Integer, primary_key=True)
-    telegram_id = Column(String, unique=True, nullable=False, index=True)
+    telegram_id = Column(String, unique=True, index=True, nullable=False)
+    is_admin = Column(Boolean, nullable=False, server_default="false")  # <— ΝΕΟ
+    is_active = Column(Boolean, nullable=False, server_default="true")
+    is_blocked = Column(Boolean, nullable=False, server_default="false")
 
-    is_admin = Column(Boolean, default=False, nullable=False)
-    is_active = Column(Boolean, default=True, nullable=False)
-    is_blocked = Column(Boolean, default=False, nullable=False)
+    trial_start = Column(DateTime(timezone=True))
+    trial_end = Column(DateTime(timezone=True))
+    license_until = Column(DateTime(timezone=True))
+    countries = Column(String)                 # π.χ. "ALL" ή "US,UK"
+    proposal_template = Column(Text)
 
-    trial_start = Column(DateTime(timezone=True), nullable=True)
-    trial_end = Column(DateTime(timezone=True), nullable=True)
-    license_until = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
-    countries = Column(String, nullable=True)         # π.χ. "ALL" ή "US,UK"
-    proposal_template = Column(Text, nullable=True)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    keywords = relationship("Keyword", back_populates="user", cascade="all,delete-orphan")
+    saved = relationship("SavedJob", back_populates="user", cascade="all,delete-orphan")
 
 
 class Keyword(Base):
     __tablename__ = "keyword"
-
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, nullable=False, index=True)
-    term = Column(String, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    value = Column(String, nullable=False)
 
-    # >>> προσθήκη timestamps ώστε το /addkeyword να δέχεται created_at <<<
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())   # <— ΝΕΟ
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())  # <— ΝΕΟ
+
+    user = relationship("User", back_populates="keywords")
 
     __table_args__ = (
-        UniqueConstraint("user_id", "term", name="uq_keyword_user_term"),
+        UniqueConstraint("user_id", "value", name="uq_keyword_user_value"),
+        Index("ix_keyword_user", "user_id"),
     )
 
 
 class Job(Base):
     __tablename__ = "job"
-
     id = Column(Integer, primary_key=True)
-    source = Column(String, nullable=False, index=True)          # π.χ. "Freelancer"
-    source_id = Column(String, nullable=False, index=True)       # το id στη πλατφόρμα
-    external_id = Column(String, nullable=True)                   # optional stable id
 
-    title = Column(Text, nullable=True)
-    description = Column(Text, nullable=True)
-    url = Column(Text, nullable=True)
-    proposal_url = Column(Text, nullable=True)
-    original_url = Column(Text, nullable=True)
+    # Πηγή + ID από την πηγή (μοναδικός συνδυασμός)
+    source = Column(String, nullable=False)            # π.χ. "Freelancer", "Skywalker"
+    source_id = Column(String, nullable=False)         # π.χ. "39861162"
+    external_id = Column(String)                       # optional, παλαιό πεδίο
 
-    budget_min = Column(Float, nullable=True)
-    budget_max = Column(Float, nullable=True)
-    budget_currency = Column(String, nullable=True)
-    job_type = Column(String, nullable=True)
-    bids_count = Column(Integer, nullable=True)
+    title = Column(Text)
+    description = Column(Text)
+    url = Column(Text)
+    proposal_url = Column(Text)
+    original_url = Column(Text)
 
-    matched_keyword = Column(String, nullable=True)
-    posted_at = Column(DateTime(timezone=True), nullable=True)
+    budget_min = Column(Float)
+    budget_max = Column(Float)
+    budget_currency = Column(String)                   # "USD", "EUR", κλπ
+    job_type = Column(String)
+    bids_count = Column(Integer)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    matched_keyword = Column(String)
+    posted_at = Column(DateTime(timezone=True))
+
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        UniqueConstraint("source", "source_id", name="uq_job_source_sourceid"),
+        UniqueConstraint("source", "source_id", name="uq_job_source_source_id"),
+        Index("ix_job_source", "source"),
+    )
+
+
+class SavedJob(Base):
+    __tablename__ = "saved_job"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    job_id = Column(Integer, ForeignKey("job.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    user = relationship("User", back_populates="saved")
+    job = relationship("Job")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "job_id", name="uq_saved_job_user_job"),
+        Index("ix_saved_user", "user_id"),
     )
 
 
 class JobSent(Base):
     __tablename__ = "job_sent"
-
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, nullable=False, index=True)
-    job_id = Column(Integer, nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    job_id = Column(Integer, ForeignKey("job.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
-
-class SavedJob(Base):
-    __tablename__ = "saved_job"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, nullable=False, index=True)
-    job_id = Column(Integer, nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-
-class AdminMessage(Base):
-    __tablename__ = "admin_message"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, nullable=False, index=True)
-    admin_id = Column(Integer, nullable=False, index=True)
-    direction = Column(String, nullable=False)  # 'user_to_admin' | 'admin_to_user'
-    text = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-# ---------------------------------------------------------------------
-# Schema ensure / lightweight migrations
-# ---------------------------------------------------------------------
-def _column_exists(table: str, column: str) -> bool:
-    sql = text("""
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = :t AND column_name = :c
-        LIMIT 1
-    """)
-    with engine.connect() as conn:
-        res = conn.execute(sql, {"t": table, "c": column}).first()
-        return bool(res)
-
-def _safe_exec(sql_stmt: str, log_ok: str):
-    with engine.begin() as conn:
-        try:
-            conn.execute(text(sql_stmt))
-            logger.info("migrate ok: %s", log_ok)
-        except (ProgrammingError, OperationalError) as e:
-            # αν υπάρχει ήδη/ασυμβατότητα, το αγνοούμε
-            logger.warning("migrate skip (%s): %s", log_ok, e)
-
-def ensure_schema() -> None:
-    """Δημιουργεί πίνακες & εφαρμόζει μικρο-migrations αν λείπουν στήλες."""
-    Base.metadata.create_all(bind=engine)
-
-    # --- Keyword.created_at / updated_at ---
-    if not _column_exists("keyword", "created_at"):
-        _safe_exec(
-            "ALTER TABLE keyword ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT now();",
-            "keyword.created_at"
-        )
-    if not _column_exists("keyword", "updated_at"):
-        _safe_exec(
-            "ALTER TABLE keyword ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();",
-            "keyword.updated_at"
-        )
-
-    # --- Job unique index ασφάλεια (αν δεν υπάρχει ήδη) ---
-    _safe_exec(
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_sourceid_idx ON job (source, source_id);",
-        "job uq(source,source_id) index"
+    __table_args__ = (
+        UniqueConstraint("user_id", "job_id", name="uq_job_sent_user_job"),
+        Index("ix_jobsent_user", "user_id"),
     )
 
-    logger.info("DB schema ensured.")
+# -----------------
+# INIT / MIGRATIONS
+# -----------------
 
-# Καλείται από server/worker στην εκκίνηση
-ensure_schema()
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def ensure_schema():
+    """Δημιουργεί πίνακες & εκτελεί ασφαλείς ‘μικρο-μεταναστεύσεις’ (IF NOT EXISTS)."""
+    Base.metadata.create_all(bind=engine)
+
+    with engine.begin() as conn:
+        # User.is_admin (αν λείπει)
+        conn.exec_driver_sql("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='user' AND column_name='is_admin'
+                ) THEN
+                    ALTER TABLE "user" ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT false;
+                END IF;
+            END $$;
+        """)
+
+        # Keyword.created_at / updated_at (αν λείπουν)
+        conn.exec_driver_sql("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='keyword' AND column_name='created_at'
+                ) THEN
+                    ALTER TABLE keyword ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='keyword' AND column_name='updated_at'
+                ) THEN
+                    ALTER TABLE keyword ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+                END IF;
+            END $$;
+        """)
+
+        # Unique index για job (source, source_id)
+        conn.exec_driver_sql("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_indexes WHERE indexname = 'uq_job_source_source_id'
+                ) THEN
+                    CREATE UNIQUE INDEX uq_job_source_source_id
+                    ON job (source, source_id);
+                END IF;
+            END $$;
+        """)
+
+    log.info("DB schema ensured.")
+
+
+def init_db():
+    if not engine:
+        raise RuntimeError("DATABASE_URL is not configured")
+    ensure_schema()
+    return engine
