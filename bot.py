@@ -1,8 +1,9 @@
 import os, asyncio, logging, httpx
 from datetime import datetime, timedelta, timezone
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     ContextTypes
@@ -11,9 +12,6 @@ from sqlalchemy import text
 from db import SessionLocal, User, Keyword, Job
 from utils import now_utc, _uid_field, DEFAULT_TRIAL_DAYS
 
-# ----------------------------------------------------------
-# LOGGER
-# ----------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
 
@@ -27,7 +25,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Automatically finds matching freelance jobs and sends instant alerts.\n\n"
         "Use /help to see how it works."
     )
-
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -187,9 +184,6 @@ def build_application():
 
     return app
 
-# ----------------------------------------------------------
-# MAIN
-# ----------------------------------------------------------
 if __name__ == "__main__":
     app = build_application()
     log.info("Starting bot...")
