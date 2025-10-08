@@ -1,6 +1,6 @@
 # bot.py
 # -*- coding: utf-8 -*-
-import os, logging
+import os, logging, html
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -11,10 +11,10 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-SessionLocal=User=Keyword=Job=JobSent=None
+SessionLocal=User=Keyword=Job=JobSent=JobAction=None
 try:
-    from db import SessionLocal as _S, User as _U, Keyword as _K, Job as _J, JobSent as _JS, init_db as _init_db
-    SessionLocal, User, Keyword, Job, JobSent = _S, _U, _K, _J, _JS
+    from db import SessionLocal as _S, User as _U, Keyword as _K, Job as _J, JobSent as _JS, JobAction as _JA, init_db as _init_db
+    SessionLocal, User, Keyword, Job, JobSent, JobAction = _S, _U, _K, _J, _JS, _JA
 except Exception:
     pass
 
@@ -116,6 +116,7 @@ def settings_card(u, kws:List[str])->str:
             "Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
             "When your trial ends, please contact the admin to extend your access.")
 
+# ===== Commands =====
 async def start_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(WELCOME_HEAD, reply_markup=main_kb(),
                                     parse_mode=ParseMode.HTML, disable_web_page_preview=True)
@@ -140,20 +141,115 @@ async def help_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def mysettings_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message or update.message  # δουλεύει και σε callback
+    msg = update.effective_message or update.message
     if not (SessionLocal and User):
         await msg.reply_text("DB not available."); return
     db=SessionLocal()
     try:
         u=db.query(User).filter(getattr(User,_uid_field())==str(update.effective_user.id)).one_or_none()
-        if not u:
-            await msg.reply_text("User not found."); return
+        if not u: await msg.reply_text("User not found."); return
         kws=_collect_keywords(u)
         await msg.reply_text(settings_card(u,kws), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     finally:
         try: db.close()
         except Exception: pass
 
+async def saved_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    """List saved jobs."""
+    if not all([SessionLocal, JobAction, Job]): 
+        await update.message.reply_text("DB not available."); return
+    db=SessionLocal()
+    try:
+        uid = db.query(User).filter(getattr(User,_uid_field())==str(update.effective_user.id)).one()
+        acts = db.query(JobAction).filter(JobAction.user_id==uid.id, JobAction.action=="save").order_by(JobAction.created_at.desc()).limit(10).all()
+        if not acts:
+            await update.message.reply_text("No saved jobs yet."); return
+        lines=["💾 <b>Saved jobs</b> (latest 10)"]
+        for a in acts:
+            j = db.query(Job).filter(Job.id==a.job_id).one_or_none()
+            if not j: continue
+            t = html.escape(j.title or "Untitled")
+            lines.append(f"• {t}\n  🔗 {j.original_url or j.url}")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    finally:
+        try: db.close()
+        except Exception: pass
+
+# ===== Inline job buttons =====
+async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query
+    if not q or not (SessionLocal and JobAction and User): 
+        if q: await q.answer()
+        return
+    data=q.data or ""
+    if not (data.startswith("job:save:") or data.startswith("job:delete:")):
+        await q.answer(); return
+    action, jid = ("save", data.split(":")[-1]) if "save" in data else ("delete", data.split(":")[-1])
+
+    db=SessionLocal()
+    try:
+        u=db.query(User).filter(getattr(User,_uid_field())==str(q.from_user.id)).one_or_none()
+        if not u:
+            await q.answer("User not found."); return
+        try:
+            # upsert unique per (user,job,action)
+            ja = JobAction(user_id=u.id, job_id=int(jid), action=action)
+            db.add(ja); db.commit()
+        except Exception:
+            db.rollback()  # exists already
+
+        if action=="delete":
+            # Μικρό visual feedback: κάνουμε edit το μήνυμα για να φαίνεται ότι «σβήστηκε»
+            try:
+                await q.message.edit_reply_markup(reply_markup=None)
+                await q.message.edit_text(q.message.text_markdown + "\n\n~~deleted~~", parse_mode=None, disable_web_page_preview=True)
+            except Exception:
+                pass
+            await q.answer("Deleted 🗑️")
+        else:
+            await q.answer("Saved ⭐")
+    finally:
+        try: db.close()
+        except Exception: pass
+
+# ===== Menu buttons =====
+async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query
+    if not q: return
+    act=(q.data or "").split(":",1)[-1]
+
+    if act=="add":
+        msg=("Type keywords using:\n"
+             "<code>/addkeyword python, telegram</code>\n\n"
+             "Tip: you can send English or Greek.")
+        await q.message.reply_text(msg, parse_mode=ParseMode.HTML); await q.answer(); return
+
+    if act=="settings":
+        await mysettings_cmd(update, context); await q.answer(); return
+
+    if act=="help":
+        await q.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        await q.answer(); return
+
+    if act=="saved":
+        # ίδια λογική με /saved
+        fake = Update(update.update_id, message=None)
+        await saved_cmd(update, context); await q.answer(); return
+
+    if act=="contact":
+        await q.message.reply_text("Send your message here and the admin will reply to you.")
+        await q.answer(); return
+
+    if act=="admin":
+        if is_admin_id(q.from_user.id):
+            await q.message.reply_text("Admin panel: use /users, /grant <id> <days>, /block <id>, /unblock <id>, /feedstatus.")
+        else:
+            await q.message.reply_text("Admin only.")
+        await q.answer(); return
+
+    await q.answer()
+
+# ===== Admin bits kept minimal in this file =====
 async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if not is_admin_id(update.effective_user.id):
         await update.message.reply_text("Admin only."); return
@@ -167,7 +263,7 @@ async def users_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             tid=getattr(u,_uid_field(),None)
             kws=_collect_keywords(u)
             trial=getattr(u,"trial_until",None)
-            lic  =getattr(u,"access_until",None) or getattr(u,"license_until",None)
+            lic  =getattr(u,"access_until",None)
             act="✅" if (not getattr(u,"is_blocked",False) and (lic or trial) and (lic or trial)>=now_utc()) else "❌"
             blk="✅" if getattr(u,"is_blocked",False) else "❌"
             lines.append(f"• {tid} — kw:{len(kws)} | trial:{trial} | lic:{lic} | A:{act} B:{blk}")
@@ -192,8 +288,8 @@ async def selftest_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     kb=InlineKeyboardMarkup([
         [InlineKeyboardButton("📨 Proposal", url="https://www.freelancer.com"),
          InlineKeyboardButton("🔗 Original", url="https://www.freelancer.com")],
-        [InlineKeyboardButton("⭐ Save", callback_data="job:save:selftest"),
-         InlineKeyboardButton("🗑️ Delete", callback_data="job:delete:selftest")],
+        [InlineKeyboardButton("⭐ Save", callback_data="job:save:999999"),
+         InlineKeyboardButton("🗑️ Delete", callback_data="job:delete:999999")],
     ])
     await update.message.reply_text(
         "<b>Logo Reformatting to SVG</b>\n"
@@ -205,91 +301,22 @@ async def selftest_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb
     )
 
-async def job_buttons_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query
-    if not q: return
-    data=q.data or ""
-    if data.startswith("job:save:"):
-        await q.answer("Saved ⭐", show_alert=False)
-    elif data.startswith("job:delete:"):
-        await q.answer("Deleted 🗑️", show_alert=False)
-    else:
-        await q.answer()
-
-async def menu_action_cb(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query
-    if not q: return
-    act=(q.data or "").split(":",1)[-1]
-
-    if act=="add":
-        msg=("Type keywords using:\n"
-             "<code>/addkeyword python, telegram</code>\n\n"
-             "Tip: you can send English or Greek.")
-        await q.message.reply_text(msg, parse_mode=ParseMode.HTML); await q.answer(); return
-
-    if act=="settings":
-        await mysettings_cmd(update, context); await q.answer(); return
-
-    if act=="help":
-        await q.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        await q.answer(); return
-
-    if act=="saved":
-        await q.message.reply_text("Saved jobs list will appear here soon.")
-        await q.answer(); return
-
-    if act=="contact":
-        await q.message.reply_text("Send your message here and the admin will reply to you.")
-        await q.answer(); return
-
-    if act=="admin":
-        if is_admin_id(q.from_user.id):
-            await q.message.reply_text("Admin panel: use /users, /grant <id> <days>, /block <id>, /unblock <id>, /feedstatus.")
-        else:
-            await q.message.reply_text("Admin only.")
-        await q.answer(); return
-
-    await q.answer()
-
-def now(): return datetime.now(UTC)
-async def feedstatus_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    if not is_admin_id(update.effective_user.id):
-        await update.message.reply_text("Admin only."); return
-    if not all([SessionLocal, Job, JobSent]):
-        await update.message.reply_text("DB not available."); return
-    db=SessionLocal()
-    try:
-        since=now()-timedelta(hours=24)
-        rows=(db.query(Job.source)
-                .join(JobSent, JobSent.job_id==Job.id)
-                .filter(JobSent.created_at>=since)
-                .all())
-        counts:Dict[str,int]={}
-        for (src,) in rows: counts[src]=counts.get(src,0)+1
-        ordered=["99designs","Careerjet","Codeable","Freelancer","Guru","JobFind","Kariera","Malt",
-                 "PeoplePerHour","Skywalker","Toptal","Workana","Worksome","Wripple","YunoJuno",
-                 "freelancermap","twago"]
-        lines=["📊 <b>Sent jobs by platform (last 24h)</b>"]
-        for name in ordered: lines.append(f"• {name}: {counts.get(name,0)}")
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
-    except Exception as e:
-        log.warning("feedstatus failed: %s", e)
-        await update.message.reply_text("feedstatus error.")
-    finally:
-        try: db.close()
+# ===== Build app =====
+def build_application()->Application:
+    if '_init_db' in globals() and callable(_init_db):
+        try: _init_db()
         except Exception: pass
 
-def build_application()->Application:
     token=(os.getenv("BOT_TOKEN") or "").strip()
     app=ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
+    app.add_handler(CommandHandler("saved", saved_cmd))
     app.add_handler(CommandHandler("users", users_cmd))
     app.add_handler(CommandHandler("platforms", platforms_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
-    app.add_handler(CommandHandler(["feedstatus","feedstats"], feedstatus_cmd))
 
     app.add_handler(CallbackQueryHandler(job_buttons_cb, pattern=r"^job:(save|delete):"))
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))

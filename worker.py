@@ -2,10 +2,9 @@
 # -*- coding: utf-8 -*-
 import os, asyncio, logging, re, html, json
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from typing import List, Dict
 import httpx
 
-# ===== DB wiring =====
 SessionLocal=User=Keyword=Job=JobSent=None
 try:
     from db import SessionLocal as _S, User as _U, Keyword as _K, Job as _J, JobSent as _JS, init_db as _init_db
@@ -123,11 +122,10 @@ async def _send(bot_token, chat_id, text, url_btns, cb_btns):
             "disable_web_page_preview": True, "reply_markup": kb
         })
 
-# ---------- DB ----------
+# ---------- DB helpers ----------
 def get_or_create_job(db, *, source, source_id, title, desc, url,
                       proposal_url, original_url, bmin, bmax, currency,
                       matched, posted_at) -> int:
-    """ΠΟΤΕ δεν γράφουμε null title/url. Default τίτλος + skip χωρίς URL."""
     title = (title or f"Untitled Job #{source_id}").strip()[:512]
     url = (url or "").strip()
     if not url:
@@ -180,7 +178,7 @@ def add_jobsent(db, user_id:int, job_id:int):
         except Exception: pass
         log.warning("JobSent insert failed: %s", e)
 
-# ---------- feeds ----------
+# ---------- Feeds (Freelancer + Skywalker) ----------
 async def fetch_skywalker()->List[Dict]:
     if not FEED_SKY: return []
     try:
@@ -197,20 +195,12 @@ async def fetch_skywalker()->List[Dict]:
             continue
         guid =norm("".join(re.findall(r"<guid.*?>(.*?)</guid>", it, flags=re.S))) or link
         desc =norm("".join(re.findall(r"<description>(.*?)</description>", it, flags=re.S)))
-        pub  =norm("".join(re.findall(r"<pubDate>(.*?)</pubDate>", it, flags=re.S)))
-        when=None
-        if pub:
-            try:
-                from email.utils import parsedate_to_datetime
-                when=parsedate_to_datetime(pub)
-                if when.tzinfo is None: when=when.replace(tzinfo=UTC)
-            except Exception: when=now_utc()
         out.append({
             "source":"Skywalker","source_id":guid or link or title,
             "title":title,"desc":desc,"url":link,
             "proposal":link,"original":link,
             "budget_min":None,"budget_max":None,"currency":None,
-            "posted_at": when or now_utc(),
+            "posted_at": now_utc(),
         })
     return out
 
@@ -231,24 +221,17 @@ async def fetch_freelancer_for_queries(queries: List[str]) -> List[Dict]:
                 title = raw_title if raw_title else (f"Untitled Job #{pid}" if pid else "Untitled Job")
                 desc  = (p.get("description") or "").strip()
                 url   = f"https://www.freelancer.com/projects/{pid}" if pid else ""
-                if not url:
-                    continue
+                if not url: continue
                 cur   = ((p.get("currency") or {}).get("code") or "USD").upper()
                 bmin  = (p.get("budget") or {}).get("minimum")
                 bmax  = (p.get("budget") or {}).get("maximum")
-                ts    = p.get("time_submitted") or p.get("submitdate")
-                when  = None
-                if ts:
-                    try: when = datetime.fromtimestamp(int(ts), tz=UTC)
-                    except Exception: when = now_utc()
                 out.append({
                     "source":"Freelancer","source_id": pid or "unknown",
                     "title":norm(title),"desc":norm(desc),"url":url,
                     "proposal": wrap(url),"original":url,
                     "budget_min":bmin,"budget_max":bmax,"currency":cur,
-                    "posted_at": when or now_utc(),
+                    "posted_at": now_utc(),
                 })
-    log.info("Freelancer fetched ~%d items (merged)", len(out))
     return out
 
 def dedup_prefer_affiliate(items: List[Dict]) -> List[Dict]:
@@ -285,8 +268,7 @@ async def process_user(db, user, items)->int:
         if not url:
             if source.lower()=="freelancer" and source_id!="unknown":
                 url = f"https://www.freelancer.com/projects/{source_id}"
-        if not url:
-            continue  # ποτέ χωρίς URL
+        if not url: continue
 
         desc = (it.get("desc") or "").strip()
         proposal = (it.get("proposal") or url).strip()
@@ -296,7 +278,6 @@ async def process_user(db, user, items)->int:
         posted = it.get("posted_at") or now_utc()
         matched = it.get("_matched")
 
-        # DB upsert (ασφαλής)
         try:
             jid = get_or_create_job(
                 db,
@@ -312,11 +293,22 @@ async def process_user(db, user, items)->int:
             except Exception: pass
             continue
 
-        # skip duplicates per user
         try: db.rollback()
         except Exception: pass
         already = db.query(JobSent).filter(JobSent.user_id==getattr(user,"id"), JobSent.job_id==jid).first()
         if already: continue
+
+        # compose message
+        def usd_range(mn,mx,cur):
+            code=(cur or "USD").upper(); rate=float(FX_RATES.get(code,1.0))
+            try: vmin=float(mn) if mn is not None else None; vmax=float(mx) if mx is not None else None
+            except Exception: return None
+            conv=lambda v: round(float(v)*rate,2) if v is not None else None
+            umin,umax=conv(vmin),conv(vmax)
+            if umin is None and umax is None: return None
+            if umin is None: return f"~${umax}"
+            if umax is None: return f"~${umin}"
+            return f"~${umin}–{umax}"
 
         raw=None; usd=None
         if bmin is not None or bmax is not None:
@@ -327,9 +319,9 @@ async def process_user(db, user, items)->int:
         if raw: lines.append(f"🧾 Budget: {html.escape(raw)}" + (f" ({usd})" if usd else ""))
         lines.append(f"📎 Source: {source}")
         if matched: lines.append(f"🔍 Match: <b><u>{html.escape(matched)}</u></b>")
-        sn=_snippet(desc)
+        sn=(desc[:220]+"…") if desc and len(desc)>220 else (desc or "")
         if sn: lines.append(f"📝 {html.escape(sn)}")
-        lines.append(f"⏱️ {age(posted)}")
+        lines.append("⏱️ just now")
         text="\n".join(lines)
 
         url_buttons=[("📨 Proposal", proposal), ("🔗 Original", original)]
