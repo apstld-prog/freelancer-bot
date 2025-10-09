@@ -12,30 +12,14 @@ from db_events import ensure_feed_events_schema, upsert_events
 from fetchers import ALL_FETCHERS
 from config import FETCH_INTERVAL_SEC, BOT_TOKEN, DELIVERY_WINDOW_HOURS
 
-# PTB Bot (standalone)
+# PTB Bot (standalone when no Application provided)
 from telegram import Bot
 
 log = logging.getLogger("worker")
 logging.basicConfig(level=logging.INFO)
 
-def _normalize_kw(s: str) -> List[str]:
-    parts = []
-    for chunk in s.split(","):
-        for p in chunk.split():
-            p = p.strip()
-            if p:
-                parts.append(p.lower())
-    seen, out = set(), []
-    for p in parts:
-        if p not in seen:
-            seen.add(p); out.append(p)
-    return out
-
 def _load_all_user_keywords() -> List[Tuple[int, int, List[str]]]:
-    """
-    Return list of (user_id, telegram_id, keywords_lower[]).
-    Only active & not blocked users are returned.
-    """
+    """Return list of (user_id, telegram_id, keywords_lower[])."""
     with get_session() as s:
         rows = s.execute(text('SELECT id, telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
         out: List[Tuple[int, int, List[str]]] = []
@@ -43,8 +27,7 @@ def _load_all_user_keywords() -> List[Tuple[int, int, List[str]]]:
             kws = s.execute(text("""
                 SELECT COALESCE(keyword, value) AS k FROM keyword WHERE user_id=:uid ORDER BY id
             """), {"uid": uid}).fetchall()
-            norm = [x[0].lower() for x in kws if x and x[0]]
-            out.append((int(uid), int(tid), norm))
+            out.append((int(uid), int(tid), [x[0].lower() for x in kws if x and x[0]]))
         return out
 
 def _match_keywords(title: str, description: str, kws: List[str]) -> List[str]:
@@ -59,22 +42,28 @@ async def _send_job_card(tg_bot, chat_id: int, ev: Dict[str, Any], matched: List
     url = aff or ev.get("original_url")
     budget = ev.get("budget_amount")
     bcur = ev.get("budget_currency")
-    budget_line = f"<b>Budget:</b> {budget} {bcur}" if budget and bcur else ""
+    budget_line = f"<b>Budget:</b> {budget} {bcur}\n" if budget and bcur else ""
+
     matched_line = ", ".join(matched) if matched else ""
     txt = (
         f"<b>{title}</b>\n"
+        f"{budget_line}"
         f"<b>Source:</b> {platform}\n"
-        f"{budget_line}\n"
         f"<b>Match:</b> {matched_line}\n"
     ).strip()
+
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Proposal", url=url),
          InlineKeyboardButton("🔗 Original", url=url)],
         [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
          InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
     ])
+
     try:
-        await tg_bot.send_message(chat_id=chat_id, text=txt, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+        await tg_bot.send_message(
+            chat_id=chat_id, text=txt, parse_mode="HTML",
+            reply_markup=kb, disable_web_page_preview=True
+        )
     except Exception as e:
         log.warning("send_message failed: %s", e)
 
@@ -87,23 +76,21 @@ async def run_once(app=None) -> int:
     """Fetch all sources, upsert, then deliver to matching users across a configurable window."""
     ensure_feed_events_schema()
 
-    # 1) Fetch from all adapters concurrently
+    # 1) Fetch
     results = await asyncio.gather(*(f() for f in ALL_FETCHERS), return_exceptions=False)
     all_events: List[Dict[str, Any]] = [e for sub in results for e in sub]
 
     # 2) Upsert
-    new_count = 0
-    if all_events:
-        new_count = upsert_events(all_events)
+    new_count = upsert_events(all_events) if all_events else 0
     log.info("Upserted events: new=%d total_in_batch=%d", new_count, len(all_events))
 
-    # 3) Load users & keywords
+    # 3) Users + keywords
     users = _load_all_user_keywords()
     if not users:
         log.info("No active users to notify.")
         return new_count
 
-    # 4) Fetch recent events within DELIVERY_WINDOW_HOURS (wider than fetch interval)
+    # 4) Recent events (wider window so matches δεν χάνονται)
     since = datetime.now(timezone.utc) - timedelta(hours=DELIVERY_WINDOW_HOURS)
     with get_session() as s:
         rows = s.execute(text("""
@@ -116,12 +103,17 @@ async def run_once(app=None) -> int:
     fresh_events: List[Dict[str, Any]] = []
     for r in rows:
         fresh_events.append({
-            "platform": r[0], "title": r[1], "description": r[2] or "",
-            "original_url": r[3], "affiliate_url": r[4],
-            "country": r[5], "budget_amount": r[6], "budget_currency": r[7],
+            "platform": r[0],
+            "title": r[1],
+            "description": r[2] or "",
+            "original_url": r[3],
+            "affiliate_url": r[4],
+            "country": r[5],
+            "budget_amount": r[6],
+            "budget_currency": r[7],
         })
 
-    # 5) Notify users
+    # 5) Notify
     tg_bot = _get_bot(app)
     notified = 0
     for uid, tid, kws in users:

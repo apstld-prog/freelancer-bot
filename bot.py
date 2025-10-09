@@ -1,5 +1,5 @@
-# bot.py — EN-only, add via /addkeyword only, robust keywords, admin panel, selftest
-import os, logging, asyncio
+# bot.py — EN-only, keywords, admin panel, selftest, saved jobs
+import os, logging, asyncio, re
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import List, Set, Optional
@@ -32,7 +32,6 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
-ADMIN_ELEVATE_SECRET = os.getenv("ADMIN_ELEVATE_SECRET", "")
 
 # ---------- Admin helpers ----------
 def get_db_admin_ids() -> Set[int]:
@@ -44,7 +43,8 @@ def get_db_admin_ids() -> Set[int]:
         return set()
 
 def all_admin_ids() -> Set[int]:
-    return set(int(x) for x in (ADMIN_IDS or [])) | get_db_admin_ids()
+    base = set(int(x) for x in (ADMIN_IDS or []))
+    return base | get_db_admin_ids()
 
 def is_admin_user(tid: int) -> bool:
     return tid in all_admin_ids()
@@ -148,16 +148,6 @@ def unpair(app: Application, admin_id: Optional[int]=None, user_id: Optional[int
         if aid is not None: pairs["admin_to_user"].pop(aid, None)
 
 # ---------- Commands ----------
-def _parse_keywords(raw: str) -> List[str]:
-    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
-    seen, out = set(), []
-    for p in parts:
-        lp = p.lower()
-        if lp not in seen:
-            seen.add(lp); out.append(p)
-    return out
-
-# <<< UPDATED: /whoami shows role Admin/User >>>
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     role = "🧩 Admin" if is_admin_user(tid) else "👤 User"
@@ -171,10 +161,8 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_blocked = bool(row[1]) if row else False
     created_at = row[2] if row else None
     expires_at = row[3] if row else None
-
     created_str = created_at.strftime("%Y-%m-%d %H:%M") if isinstance(created_at, datetime) else "—"
     expires_str = expires_at.strftime("%Y-%m-%d %H:%M UTC") if isinstance(expires_at, datetime) else "—"
-
     msg = (
         "<b>Account Info</b>\n"
         f"<b>Role:</b> {role}\n"
@@ -210,6 +198,15 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6])),
         parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+def _parse_keywords(raw: str) -> List[str]:
+    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
+    seen, out = set(), []
+    for p in parts:
+        lp = p.lower()
+        if lp not in seen:
+            seen.add(lp); out.append(p)
+    return out
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -306,8 +303,7 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def block_cmd(update: Update, Context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id): return
-    if not update.message or not update.message.text: return
-    parts = update.message.text.split()
+    parts = (update.message.text or "").split()
     if len(parts) < 2:
         await update.effective_chat.send_message("Usage: /block <id>"); return
     tid = int(parts[1])
@@ -317,8 +313,7 @@ async def block_cmd(update: Update, Context: ContextTypes.DEFAULT_TYPE):
 
 async def unblock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id): return
-    if not update.message or not update.message.text: return
-    parts = update.message.text.split()
+    parts = (update.message.text or "").split()
     if len(parts) < 2:
         await update.effective_chat.send_message("Usage: /unblock <id>"); return
     tid = int(parts[1])
@@ -356,9 +351,28 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(HELP_EN + help_footer(STATS_WINDOW_HOURS),
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
-        await q.message.reply_text("Saved list: (demo)"); await q.answer(); return
-    if data == "act:contact":
-        await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.")
+        # list saved jobs of current user
+        with get_session() as s:
+            rows = s.execute(text("""
+                CREATE TABLE IF NOT EXISTS saved_job (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    title TEXT,
+                    url TEXT,
+                    platform TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                SELECT title, url, platform, created_at
+                FROM saved_job WHERE user_id=:uid
+                ORDER BY created_at DESC LIMIT 20
+            """), {"uid": q.from_user.id}).fetchall()
+        if not rows:
+            await q.message.reply_text("No saved jobs yet."); await q.answer(); return
+        lines = ["<b>⭐ Saved jobs</b>"]
+        for t, u, p, dt in rows:
+            safe_t = (t or "(no title)").strip()
+            lines.append(f"• <a href=\"{u}\">{safe_t}</a> — {p or 'Unknown'}")
+        await q.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         await q.answer(); return
     if data == "act:admin":
         if not is_admin_user(q.from_user.id):
@@ -375,8 +389,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def kw_clear_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q.data.startswith("kw:clear:"): return await q.answer()
-    agree = q.data.split(":")[-1] == "yes"
-    if not agree:
+    if q.data.endswith(":no"):
         await q.message.reply_text("Cancelled."); return await q.answer()
     with get_session() as s:
         u = get_or_create_user_by_tid(s, q.from_user.id)
@@ -407,48 +420,88 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save/Delete on job cards: Save -> DB + delete message; Delete -> delete message."""
     q = update.callback_query
-    if q.data == "job:save":   await q.message.reply_text("Saved ⭐");  return await q.answer()
-    if q.data == "job:delete": await q.message.reply_text("Deleted 🗑"); return await q.answer()
+    data = q.data or ""
+    # extract quick facts from the message
+    title = ""
+    platform = ""
+    try:
+        text_lines = (q.message.text or "").splitlines()
+        title = re.sub(r"^\*+|\*+$", "", text_lines[0]).strip() if text_lines else ""
+        # if HTML used, better try to pull from caption entities not needed here
+        for line in text_lines:
+            if line.lower().startswith("source:"):
+                platform = line.split(":", 1)[1].strip()
+                break
+    except Exception:
+        pass
+    # read URL from first button
+    url = None
+    try:
+        url = q.message.reply_markup.inline_keyboard[0][0].url
+    except Exception:
+        url = None
+
+    if data == "job:save":
+        # ensure table + insert
+        with get_session() as s:
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS saved_job (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    title TEXT,
+                    url TEXT,
+                    platform TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+            s.execute(text("""
+                INSERT INTO saved_job (user_id, title, url, platform)
+                VALUES (:uid, :title, :url, :platform)
+            """), {"uid": q.from_user.id, "title": title or "(no title)", "url": url or "", "platform": platform or ""})
+            s.commit()
+        # delete the message from chat
+        try: await q.message.delete()
+        except Exception: pass
+        await q.answer("Saved ⭐")
+        return
+
+    if data == "job:delete":
+        try: await q.message.delete()
+        except Exception: pass
+        await q.answer("Deleted 🗑")
+        return
+
     await q.answer()
 
 # ---------- Router (continuous admin-user chat) ----------
 async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Non-command messages:
-    - If ADMIN is paired → send to that paired USER.
-    - Else if USER is paired → forward to their ADMIN.
-    - Else (first contact) → forward to all admins.
-    """
     if not update.message or not update.message.text or update.message.text.startswith("/"):
         return
-
     text_msg = update.message.text.strip()
     sender_id = update.effective_user.id
     app = context.application
 
-    # 1) ADMIN sending while paired -> deliver to the paired user
+    # Admin replying (paired)
     if is_admin_user(sender_id):
         paired_user = get_paired_user(app, sender_id)
         if paired_user:
-            try:
-                await context.bot.send_message(chat_id=paired_user, text=text_msg)
-            except Exception:
-                pass
-            return  # do not echo back to admin
+            try: await context.bot.send_message(chat_id=paired_user, text=text_msg)
+            except Exception: pass
+            return
 
-    # 2) USER paired -> forward to their assigned admin
+    # User paired
     paired_admin = get_paired_admin(app, sender_id)
     if paired_admin:
         try:
             await context.bot.send_message(chat_id=paired_admin,
                                            text=f"✉️ From {sender_id}:\n\n{text_msg}",
                                            reply_markup=admin_contact_kb(sender_id))
-        except Exception:
-            pass
+        except Exception: pass
         return
 
-    # 3) First contact -> forward to all admins
+    # First contact -> to all admins
     for aid in all_admin_ids():
         try:
             await context.bot.send_message(
@@ -457,8 +510,7 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode=ParseMode.HTML,
                 reply_markup=admin_contact_kb(sender_id),
             )
-        except Exception:
-            pass
+        except Exception: pass
     await update.message.reply_text("Thanks! Your message was forwarded to the admin 👌")
 
 # ---------- Expiry reminders ----------
@@ -485,14 +537,6 @@ async def _background_expiry_loop(app: Application):
             log.exception("expiry loop error: %s", e)
         await asyncio.sleep(3600)
 
-async def _ensure_fallback_running(app: Application):
-    if app.bot_data.get("expiry_task"): return
-    try:
-        app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
-        log.info("Fallback expiry loop started (immediate).")
-    except Exception as e:
-        log.warning("Could not start fallback loop immediately: %s", e)
-
 # ---------- Build app ----------
 def build_application() -> Application:
     ensure_schema()
@@ -510,6 +554,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
+    app.add_handler(CommandHandler("saved", lambda u,c: u.effective_chat.send_message("Use the 'Saved' button from the menu.")))  # hint
 
     # admin
     app.add_handler(CommandHandler("users", users_cmd))
@@ -529,7 +574,7 @@ def build_application() -> Application:
     # text router (continuous chat)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, incoming_message_router))
 
-    # scheduler
+    # scheduler (fallback loop if no PTB job-queue extra)
     try:
         if JobQueue is not None:
             jq = app.job_queue or JobQueue()
