@@ -1,6 +1,8 @@
 # bot.py — full replacement (English-only UX + code, admin + contact + trial/licensing + keywords)
 import os
 import logging
+import asyncio
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Set
 
@@ -13,9 +15,16 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
-    JobQueue,   # <-- ensure JobQueue import
     filters,
 )
+
+# Try to import JobQueue (may be missing if PTB installed without extra)
+try:
+    from telegram.ext import JobQueue  # type: ignore
+    HAS_PTB_JOBQUEUE = True
+except Exception:  # ModuleNotFoundError / RuntimeError cases
+    JobQueue = None  # type: ignore
+    HAS_PTB_JOBQUEUE = False
 
 # --- Project-local modules expected in your repo ---
 from db import (
@@ -432,6 +441,11 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # Contact flow (user ↔ admin)
 # =========================
+async def contact_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["awaiting_contact"] = True
+    await update.callback_query.message.reply_text(user_contact_hint())
+    await update.callback_query.answer()
+
 def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -443,11 +457,6 @@ def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
              InlineKeyboardButton("+365d", callback_data=f"adm:grant:{user_id}:365")],
         ]
     )
-
-async def contact_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["awaiting_contact"] = True
-    await update.callback_query.message.reply_text(user_contact_hint())
-    await update.callback_query.answer()
 
 async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -550,6 +559,18 @@ async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
+async def _background_expiry_loop(app: Application):
+    """Fallback scheduler if JobQueue extra isn't installed."""
+    # tiny delay so bot is fully started
+    await asyncio.sleep(5)
+    while True:
+        try:
+            ctx = SimpleNamespace(bot=app.bot)
+            await notify_expiring_job(ctx)  # type: ignore[arg-type]
+        except Exception as e:
+            log.exception("expiry loop error: %s", e)
+        await asyncio.sleep(3600)
+
 
 # =========================
 # Menu callbacks
@@ -588,7 +609,9 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("💾 Saved (coming soon)."); await q.answer(); return
 
     if data == "act:contact":
-        await contact_start_cb(update, context); return
+        context.user_data["awaiting_contact"] = True
+        await q.message.reply_text(user_contact_hint())
+        await q.answer(); return
 
     if data == "act:admin":
         if not is_admin_user(q.from_user.id):
@@ -608,7 +631,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# App factory (with robust JobQueue init)
+# App factory (with JobQueue OR fallback loop)
 # =========================
 def build_application() -> Application:
     ensure_schema()
@@ -639,12 +662,20 @@ def build_application() -> Application:
     # Plain-text router (for contact and admin replies)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, incoming_message_router))
 
-    # ---- Robust JobQueue setup (fixes AttributeError: job_queue is None) ----
-    jq = app.job_queue
-    if jq is None:
-        jq = JobQueue()
-        jq.set_application(app)
-    jq.run_repeating(notify_expiring_job, interval=3600, first=60)
+    # --- Scheduling: PTB JobQueue if available, else background loop
+    if HAS_PTB_JOBQUEUE:
+        jq = app.job_queue  # type: ignore[attr-defined]
+        if jq is None and JobQueue is not None:
+            jq = JobQueue()
+            jq.set_application(app)
+        if jq is not None:
+            jq.run_repeating(notify_expiring_job, interval=3600, first=60)  # type: ignore[arg-type]
+    else:
+        # Fallback background task; starts after app initialization
+        async def _post_init(_: Application) -> None:
+            app.bot_data["expiry_task"] = asyncio.create_task(_background_expiry_loop(app))
+        app.post_init.append(_post_init)  # PTB runs this when starting the application
 
-    log.info("Handlers ready: public, admin, contact, notifications.")
+    log.info("Handlers ready: public, admin, contact, notifications (scheduler=%s).",
+             "jobqueue" if HAS_PTB_JOBQUEUE else "loop")
     return app
