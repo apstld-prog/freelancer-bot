@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Set
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
@@ -13,6 +13,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
+    JobQueue,   # <-- ensure JobQueue import
     filters,
 )
 
@@ -221,10 +222,7 @@ def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
     )
 
 def user_contact_hint() -> str:
-    return (
-        "Send me a message for the admin. I'll forward it.\n"
-        "Type your message now (or /cancel)."
-    )
+    return "Send a message for the admin. I'll forward it.\nType your message now (or /cancel)."
 
 
 # =========================
@@ -262,8 +260,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
-            "Add keywords separated by commas. Example:\n"
-            "<code>/addkeyword logo, lighting</code>",
+            "Add keywords separated by commas. Example:\n<code>/addkeyword logo, lighting</code>",
             parse_mode=ParseMode.HTML,
         ); return
     kws = parse_keywords_input(" ".join(context.args))
@@ -435,23 +432,30 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # Contact flow (user ↔ admin)
 # =========================
+def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💬 Reply", callback_data=f"adm:reply:{user_id}"),
+             InlineKeyboardButton("❌ Decline", callback_data=f"adm:decline:{user_id}")],
+            [InlineKeyboardButton("+30d", callback_data=f"adm:grant:{user_id}:30"),
+             InlineKeyboardButton("+90d", callback_data=f"adm:grant:{user_id}:90"),
+             InlineKeyboardButton("+180d", callback_data=f"adm:grant:{user_id}:180"),
+             InlineKeyboardButton("+365d", callback_data=f"adm:grant:{user_id}:365")],
+        ]
+    )
+
 async def contact_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Triggered from menu button
     context.user_data["awaiting_contact"] = True
     await update.callback_query.message.reply_text(user_contact_hint())
     await update.callback_query.answer()
 
 async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Route plain text messages:
-       - If admin has pending reply state -> deliver to target user.
-       - Else, if regular user (or contact mode) -> forward to admins with action buttons.
-    """
     uid = update.effective_user.id
-    text = (update.message.text or "").strip()
-    if not text or text.startswith("/"):
+    if not update.message or not update.message.text or update.message.text.startswith("/"):
         return
+    text = update.message.text.strip()
 
-    # 1) Admin replying?
+    # Admin replying?
     pending: Dict[int, int] = context.bot_data.setdefault("pending_replies", {})
     if is_admin_user(uid) and uid in pending:
         target_id = pending.pop(uid, None)
@@ -463,20 +467,12 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
                 await update.message.reply_text("Failed to deliver.")
         return
 
-    # 2) Regular user message → forward to admins
+    # Regular user → forward to admins
     if is_admin_user(uid):
-        return  # admins' casual texts are ignored unless in reply mode
-
-    # optionally require they pressed Contact first:
-    waiting = context.user_data.pop("awaiting_contact", False)
-    if not waiting:
-        # still forward; keep chat flowing
-        pass
-
+        return
     admins = all_admin_ids()
     if not admins:
-        await update.message.reply_text("No admin is available at the moment.")
-        return
+        await update.message.reply_text("No admin is available at the moment."); return
 
     for aid in admins:
         try:
@@ -488,7 +484,6 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
             )
         except Exception:
             pass
-
     await update.message.reply_text("Thanks! Your message was forwarded to the admin 👌")
 
 async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -502,7 +497,6 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[1]; target = int(parts[2])
 
     if action == "reply":
-        # set pending reply state for this admin
         pending: Dict[int, int] = context.bot_data.setdefault("pending_replies", {})
         pending[q.from_user.id] = target
         await q.message.reply_text(f"Reply to <code>{target}</code>: type your message now.", parse_mode=ParseMode.HTML)
@@ -535,7 +529,6 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Expiry notifications
 # =========================
 async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
-    """Runs hourly; notifies users whose license/trial expires in <= 24h."""
     now = datetime.now(timezone.utc)
     soon = now + timedelta(hours=24)
     with get_session() as db:
@@ -544,7 +537,6 @@ async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
         expiry = getattr(u, "license_until", None) or getattr(u, "trial_end", None)
         if not expiry:
             continue
-        # normalize timezone-naive to UTC
         if expiry.tzinfo is None:
             expiry = expiry.replace(tzinfo=timezone.utc)
         if now < expiry <= soon:
@@ -582,8 +574,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             trial_start=getattr(u, "trial_start", None),
             trial_end=getattr(u, "trial_end", None),
             license_until=getattr(u, "license_until", None),
-            active=bool(getattr(u, "is_active", True)),
-            blocked=bool(getattr(u, "is_blocked", False)),
+            active=bool(getattr(u, "is_active", True)), blocked=bool(getattr(u, "is_blocked", False)),
         )
         await q.message.reply_text(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         await q.answer(); return
@@ -617,7 +608,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# App factory
+# App factory (with robust JobQueue init)
 # =========================
 def build_application() -> Application:
     ensure_schema()
@@ -648,8 +639,12 @@ def build_application() -> Application:
     # Plain-text router (for contact and admin replies)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, incoming_message_router))
 
-    # Hourly expiry notifications
-    app.job_queue.run_repeating(notify_expiring_job, interval=3600, first=60)
+    # ---- Robust JobQueue setup (fixes AttributeError: job_queue is None) ----
+    jq = app.job_queue
+    if jq is None:
+        jq = JobQueue()
+        jq.set_application(app)
+    jq.run_repeating(notify_expiring_job, interval=3600, first=60)
 
     log.info("Handlers ready: public, admin, contact, notifications.")
     return app
