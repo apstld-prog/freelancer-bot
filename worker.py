@@ -2,20 +2,22 @@
 from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any, Tuple, Set
+from typing import List, Dict, Any, Tuple
 
 import logging
-import httpx
 from sqlalchemy import text
 
-from db import get_session, get_or_create_user_by_tid
-from db_events import ensure_feed_events_schema, upsert_events, AFFILIATE_PLATFORMS
+from db import get_session
+from db_events import ensure_feed_events_schema, upsert_events
 from fetchers import ALL_FETCHERS
+from config import FETCH_INTERVAL_SEC, BOT_TOKEN
+
+# PTB Bot (only when app is None)
+from telegram import Bot
 
 log = logging.getLogger("worker")
 logging.basicConfig(level=logging.INFO)
 
-FETCH_INTERVAL_SEC = 15 * 60  # 15 minutes
 MATCH_LOWERCASE = True
 
 def _normalize_kw(s: str) -> List[str]:
@@ -38,9 +40,8 @@ def _load_all_user_keywords() -> List[Tuple[int, int, List[str]]]:
     """
     with get_session() as s:
         rows = s.execute(text('SELECT id, telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
-        out = []
+        out: List[Tuple[int, int, List[str]]] = []
         for uid, tid in rows:
-            # keyword table may have 'keyword' and/or 'value'
             kws = s.execute(text("""
                 SELECT COALESCE(keyword, value) AS k FROM keyword WHERE user_id=:uid ORDER BY id
             """), {"uid": uid}).fetchall()
@@ -53,7 +54,7 @@ def _match_keywords(title: str, description: str, kws: List[str]) -> List[str]:
     return [k for k in kws if k in hay]
 
 async def _send_job_card(tg_bot, chat_id: int, ev: Dict[str, Any], matched: List[str]) -> None:
-    # Build a minimal card — respects your existing bot styling (no layout changes)
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     title = ev.get("title") or "(no title)"
     platform = ev.get("platform") or "Unknown"
     aff = ev.get("affiliate_url")
@@ -68,7 +69,6 @@ async def _send_job_card(tg_bot, chat_id: int, ev: Dict[str, Any], matched: List
         f"{budget_line}\n"
         f"<b>Match:</b> {matched_line}\n"
     ).strip()
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Proposal", url=url),
          InlineKeyboardButton("🔗 Original", url=url)],
@@ -80,13 +80,19 @@ async def _send_job_card(tg_bot, chat_id: int, ev: Dict[str, Any], matched: List
     except Exception as e:
         log.warning("send_message failed: %s", e)
 
-async def run_once(app) -> int:
+def _get_bot(app) -> Bot:
+    """Return a telegram.Bot whether we run with Application or standalone."""
+    if app is not None and getattr(app, "bot", None) is not None:
+        return app.bot  # type: ignore[return-value]
+    return Bot(BOT_TOKEN)
+
+async def run_once(app=None) -> int:
     """Fetch all sources, upsert, then deliver to matching users."""
     ensure_feed_events_schema()
 
     # 1) Fetch from all adapters concurrently
-    results: List[List[Dict[str, Any]]] = await asyncio.gather(*(f() for f in ALL_FETCHERS), return_exceptions=False)
-    all_events = [e for sub in results for e in sub]
+    results = await asyncio.gather(*(f() for f in ALL_FETCHERS), return_exceptions=False)
+    all_events: List[Dict[str, Any]] = [e for sub in results for e in sub]
 
     if not all_events:
         log.info("No events fetched this round.")
@@ -102,7 +108,7 @@ async def run_once(app) -> int:
         log.info("No active users to notify.")
         return new_count
 
-    # 4) Decide which events are new from this round (rough heuristic: last FETCH_INTERVAL_SEC window)
+    # 4) Pull fresh events from the window of this cycle
     since = datetime.now(timezone.utc) - timedelta(seconds=FETCH_INTERVAL_SEC + 60)
     with get_session() as s:
         rows = s.execute(text("""
@@ -120,13 +126,14 @@ async def run_once(app) -> int:
             "country": r[5], "budget_amount": r[6], "budget_currency": r[7],
         })
 
-    # 5) For each user, match title+description with their keywords and notify
+    # 5) Notify users
+    tg_bot = _get_bot(app)
     notified = 0
     for uid, tid, kws in users:
         for ev in fresh_events:
             matched = _match_keywords(ev["title"], ev["description"], kws)
             if matched:
-                await _send_job_card(app.bot, tid, ev, matched)
+                await _send_job_card(tg_bot, tid, ev, matched)
                 notified += 1
     log.info("Delivered %d job cards to users.", notified)
     return new_count
@@ -141,5 +148,4 @@ async def main(app=None):
         await asyncio.sleep(FETCH_INTERVAL_SEC)
 
 if __name__ == "__main__":
-    # Local test (without FastAPI/app). In Render, start.sh should import and create a task.
     asyncio.run(main())
