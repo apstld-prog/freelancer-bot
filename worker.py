@@ -1,4 +1,4 @@
-
+# worker.py
 from typing import List, Dict
 from config import (
     PLATFORMS, SKYWALKER_RSS, FX_USD_RATES,
@@ -17,16 +17,16 @@ ensure_schema()
 def match_keywords(item: Dict, keywords: List[str]) -> bool:
     if not keywords:
         return True
-    hay = f"{item.get('title','')}
-{item.get('description','')}".lower()
-    return any(kw.strip().lower() in hay for kw in keywords if kw.strip())
+    title = item.get("title", "") or ""
+    desc = item.get("description", "") or ""
+    hay = f"{title}\n{desc}".lower()
+    return any((kw or "").strip().lower() in hay for kw in keywords if (kw or "").strip())
 
 def fetch_all(keywords_query: str = None) -> List[Dict]:
     out: List[Dict] = []
 
     # Freelancer.com — affiliate-capable
     if PLATFORMS.get("freelancer"):
-        # Join keywords with comma for the API query
         query = keywords_query or None
         out += fr.fetch(query=query)
 
@@ -36,7 +36,7 @@ def fetch_all(keywords_query: str = None) -> List[Dict]:
             i["affiliate"] = False
             out.append(i)
 
-    # Placeholders (return [] for now)
+    # Placeholders (currently return [])
     if PLATFORMS.get("peopleperhour"): out += ph.fetch_peopleperhour()
     if PLATFORMS.get("malt"): out += ph.fetch_malt()
     if PLATFORMS.get("workana"): out += ph.fetch_workana()
@@ -73,7 +73,7 @@ def prepare_display(item: Dict, rates: dict) -> Dict:
 
 def run_pipeline(keywords: List[str]) -> List[Dict]:
     rates = load_fx_rates(FX_USD_RATES)
-    query = ",".join([k.strip() for k in keywords if k.strip()]) if keywords else None
+    query = ",".join([k.strip() for k in keywords if k and k.strip()]) if keywords else None
     items = fetch_all(keywords_query=query)
     items = [i for i in items if match_keywords(i, keywords)]
     items = deduplicate(items)
