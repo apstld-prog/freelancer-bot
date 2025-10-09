@@ -1,45 +1,51 @@
+
 import os
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_URL = os.getenv("DB_URL")
+# --- Core env ---
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///freelancer.db")
 
-UPWORK_AFFILIATE_ID = os.getenv("UPWORK_AFFILIATE_ID")
-FREELANCER_AFFILIATE_ID = os.getenv("FREELANCER_AFFILIATE_ID")
-FIVERR_AFFILIATE_ID = os.getenv("FIVERR_AFFILIATE_ID")
+# Trial window (days)
+TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "10"))
 
-PPH_AFFILIATE_BASE = os.getenv('PPH_AFFILIATE_BASE')
+# Admins (comma-separated ids)
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "5254014824").split(",") if x.strip().isdigit()}
 
+# Affiliate prefixes / ids
+AFFILIATE_PREFIX_FREELANCER = os.getenv("AFFILIATE_PREFIX_FREELANCER", "https://www.freelancer.com/get/apstld?f=give")
+AFFILIATE_PREFIX_GENERIC = os.getenv("AFFILIATE_PREFIX_GENERIC", "")
 
-# Optional affiliate placeholders (set later if you join programs)
-MALT_AFFILIATE_BASE = os.getenv("MALT_AFFILIATE_BASE")  # e.g., deep link base ending with 'ued='
-WORKANA_AFFILIATE_BASE = os.getenv("WORKANA_AFFILIATE_BASE")
-TWAGO_AFFILIATE_BASE = os.getenv("TWAGO_AFFILIATE_BASE")
-FREELANCERMAP_AFFILIATE_BASE = os.getenv("FREELANCERMAP_AFFILIATE_BASE")
-YUNOJUNO_AFFILIATE_BASE = os.getenv("YUNOJUNO_AFFILIATE_BASE")
-WORKSOME_AFFILIATE_BASE = os.getenv("WORKSOME_AFFILIATE_BASE")
-CODEABLE_AFFILIATE_BASE = os.getenv("CODEABLE_AFFILIATE_BASE")
-GURU_AFFILIATE_BASE = os.getenv("GURU_AFFILIATE_BASE")
-NINETY9_AFFILIATE_BASE = os.getenv("NINETY9_AFFILIATE_BASE")  # 99designs
-WRIPPLE_AFFILIATE_BASE = os.getenv("WRIPPLE_AFFILIATE_BASE")
-TOPTAL_AFFILIATE_BASE = os.getenv("TOPTAL_AFFILIATE_BASE")
+# FX rates JSON string: {"EUR":1.08, "GBP":1.26, "USD":1.0}
+FX_USD_RATES = os.getenv("FX_USD_RATES", "")
 
-# Enable/disable sources (default: all enabled)
-ENABLE_FREELANCER = (os.getenv("ENABLE_FREELANCER","true").lower() != "false")
-ENABLE_PPH = (os.getenv("ENABLE_PPH","true").lower() != "false")
-ENABLE_KARIERA = (os.getenv("ENABLE_KARIERA","true").lower() != "false")
-ENABLE_JOBFIND = (os.getenv("ENABLE_JOBFIND","true").lower() != "false")
-ENABLE_SKYWALKER = (os.getenv("ENABLE_SKYWALKER","true").lower() != "false")
-ENABLE_CAREERJET = (os.getenv("ENABLE_CAREERJET","true").lower() != "false")
-ENABLE_MALT = (os.getenv("ENABLE_MALT","true").lower() != "false")
-ENABLE_WORKANA = (os.getenv("ENABLE_WORKANA","true").lower() != "false")
-ENABLE_TWAGO = (os.getenv("ENABLE_TWAGO","true").lower() != "false")
-ENABLE_FREELANCERMAP = (os.getenv("ENABLE_FREELANCERMAP","true").lower() != "false")
-ENABLE_YUNOJUNO = (os.getenv("ENABLE_YUNOJUNO","true").lower() != "false")
-ENABLE_WORKSOME = (os.getenv("ENABLE_WORKSOME","true").lower() != "false")
-ENABLE_CODEABLE = (os.getenv("ENABLE_CODEABLE","true").lower() != "false")
-ENABLE_GURU = (os.getenv("ENABLE_GURU","true").lower() != "false")
-ENABLE_99DESIGNS = (os.getenv("ENABLE_99DESIGNS","true").lower() != "false")
-ENABLE_WRIPPLE = (os.getenv("ENABLE_WRIPPLE","true").lower() != "false")
-ENABLE_TOPTAL = (os.getenv("ENABLE_TOPTAL","true").lower() != "false")
-ADMIN_STATS_NOTIFY = (os.getenv('ADMIN_STATS_NOTIFY','false').lower() == 'true')
+# Platforms toggles (all on by default)
+PLATFORMS = {
+    "freelancer": os.getenv("P_FREELANCER", "1") == "1",
+    "peopleperhour": os.getenv("P_PPH", "1") == "1",
+    "malt": os.getenv("P_MALT", "1") == "1",
+    "workana": os.getenv("P_WORKANA", "1") == "1",
+    "wripple": os.getenv("P_WRIPPLE", "1") == "1",
+    "toptal": os.getenv("P_TOPTAL", "1") == "1",
+    "twago": os.getenv("P_TWAGO", "1") == "1",
+    "freelancermap": os.getenv("P_FREELANCERMAP", "1") == "1",
+    "yunoJuno": os.getenv("P_YUNOJUNO", "1") == "1",
+    "worksome": os.getenv("P_WORKSOME", "1") == "1",
+    "codeable": os.getenv("P_CODEABLE", "1") == "1",
+    "guru": os.getenv("P_GURU", "1") == "1",
+    "99designs": os.getenv("P_99DESIGNS", "1") == "1",
+    # Greece
+    "jobfind": os.getenv("P_JOBFIND", "1") == "1",
+    "skywalker": os.getenv("P_SKYWALKER", "1") == "1",
+    "kariera": os.getenv("P_KARIERA", "1") == "1",
+    "careerjet": os.getenv("P_CAREERJET", "1") == "1",
+}
 
+# Feeds and endpoints
+SKYWALKER_RSS = os.getenv("SKYWALKER_RSS", "https://www.skywalker.gr/jobs/feed")
+CAREERJET_RSS = os.getenv("CAREERJET_RSS", "https://www.careerjet.gr/search/rss?l=Greece")  # placeholder
+KARIERA_RSS = os.getenv("KARIERA_RSS", "")  # placeholder
+
+# Platform stats window
+STATS_WINDOW_HOURS = int(os.getenv("STATS_WINDOW_HOURS", "24"))
