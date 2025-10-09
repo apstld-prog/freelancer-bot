@@ -157,8 +157,34 @@ def _parse_keywords(raw: str) -> List[str]:
             seen.add(lp); out.append(p)
     return out
 
+# <<< UPDATED: /whoami shows role Admin/User >>>
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Your Telegram ID: <code>{update.effective_user.id}</code>", parse_mode=ParseMode.HTML)
+    tid = update.effective_user.id
+    role = "🧩 Admin" if is_admin_user(tid) else "👤 User"
+    with get_session() as s:
+        u = get_or_create_user_by_tid(s, tid)
+        row = s.execute(text(
+            'SELECT is_active, is_blocked, created_at, COALESCE(license_until, trial_end) '
+            'FROM "user" WHERE id=:id'
+        ), {"id": u.id}).fetchone()
+    is_active = bool(row[0]) if row else False
+    is_blocked = bool(row[1]) if row else False
+    created_at = row[2] if row else None
+    expires_at = row[3] if row else None
+
+    created_str = created_at.strftime("%Y-%m-%d %H:%M") if isinstance(created_at, datetime) else "—"
+    expires_str = expires_at.strftime("%Y-%m-%d %H:%M UTC") if isinstance(expires_at, datetime) else "—"
+
+    msg = (
+        "<b>Account Info</b>\n"
+        f"<b>Role:</b> {role}\n"
+        f"<b>Telegram ID:</b> <code>{tid}</code>\n"
+        f"<b>Active:</b> {'✅' if is_active else '❌'}   "
+        f"<b>Blocked:</b> {'🚫' if is_blocked else '❌'}\n"
+        f"<b>Created:</b> {created_str}\n"
+        f"<b>Access until:</b> {expires_str}"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
