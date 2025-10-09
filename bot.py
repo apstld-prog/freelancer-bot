@@ -49,6 +49,24 @@ def all_admin_ids() -> Set[int]:
 def is_admin_user(tid: int) -> bool:
     return tid in all_admin_ids()
 
+# ---------- Saved jobs schema ----------
+def ensure_saved_schema():
+    with get_session() as s:
+        s.execute(text("""
+            CREATE TABLE IF NOT EXISTS saved_job (
+                id BIGSERIAL PRIMARY KEY,
+                user_tid BIGINT NOT NULL,
+                url TEXT,
+                card_html TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """))
+        # για συμβατότητα με παλιότερο πίνακα (αν υπήρχε)
+        s.execute(text("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS user_tid BIGINT"))
+        s.execute(text("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
+        s.execute(text("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS card_html TEXT"))
+        s.commit()
+
 # ---------- UI ----------
 def main_menu_kb(is_admin: bool=False) -> InlineKeyboardMarkup:
     kb = [
@@ -351,28 +369,28 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(HELP_EN + help_footer(STATS_WINDOW_HOURS),
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
-        # list saved jobs of current user
+        ensure_saved_schema()
+        # δείξε τις τελευταίες 10 αποθηκευμένες ως «κάρτες»
         with get_session() as s:
             rows = s.execute(text("""
-                CREATE TABLE IF NOT EXISTS saved_job (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    title TEXT,
-                    url TEXT,
-                    platform TEXT,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
-                SELECT title, url, platform, created_at
-                FROM saved_job WHERE user_id=:uid
-                ORDER BY created_at DESC LIMIT 20
-            """), {"uid": q.from_user.id}).fetchall()
+                SELECT card_html, url FROM saved_job
+                WHERE user_tid=:tid
+                ORDER BY created_at DESC
+                LIMIT 10
+            """), {"tid": q.from_user.id}).fetchall()
         if not rows:
             await q.message.reply_text("No saved jobs yet."); await q.answer(); return
-        lines = ["<b>⭐ Saved jobs</b>"]
-        for t, u, p, dt in rows:
-            safe_t = (t or "(no title)").strip()
-            lines.append(f"• <a href=\"{u}\">{safe_t}</a> — {p or 'Unknown'}")
-        await q.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        for card_html, url in rows:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📄 Proposal", url=url),
+                 InlineKeyboardButton("🔗 Original", url=url)],
+                [InlineKeyboardButton("🗑️ Delete", callback_data="saved:delete")]  # προαιρετικό
+            ])
+            try:
+                await q.message.chat.send_message(card_html, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+            except Exception:
+                # fallback ως απλό κείμενο
+                await q.message.chat.send_message(card_html, disable_web_page_preview=True)
         await q.answer(); return
     if data == "act:admin":
         if not is_admin_user(q.from_user.id):
@@ -420,23 +438,15 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save/Delete on job cards: Save -> DB + delete message; Delete -> delete message."""
+    """
+    Save/Delete on job cards:
+    - Save: insert (user_tid, url, card_html) then delete message
+    - Delete: delete message
+    """
     q = update.callback_query
     data = q.data or ""
-    # extract quick facts from the message
-    title = ""
-    platform = ""
-    try:
-        text_lines = (q.message.text or "").splitlines()
-        title = re.sub(r"^\*+|\*+$", "", text_lines[0]).strip() if text_lines else ""
-        # if HTML used, better try to pull from caption entities not needed here
-        for line in text_lines:
-            if line.lower().startswith("source:"):
-                platform = line.split(":", 1)[1].strip()
-                break
-    except Exception:
-        pass
-    # read URL from first button
+
+    # URL = πρώτο κουμπί
     url = None
     try:
         url = q.message.reply_markup.inline_keyboard[0][0].url
@@ -444,26 +454,21 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = None
 
     if data == "job:save":
-        # ensure table + insert
+        ensure_saved_schema()
+        card_html = q.message.text_html or q.message.text or ""
         with get_session() as s:
             s.execute(text("""
-                CREATE TABLE IF NOT EXISTS saved_job (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    title TEXT,
-                    url TEXT,
-                    platform TEXT,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """))
-            s.execute(text("""
-                INSERT INTO saved_job (user_id, title, url, platform)
-                VALUES (:uid, :title, :url, :platform)
-            """), {"uid": q.from_user.id, "title": title or "(no title)", "url": url or "", "platform": platform or ""})
+                INSERT INTO saved_job (user_tid, url, card_html)
+                VALUES (:tid, :url, :html)
+            """), {"tid": q.from_user.id, "url": url or "", "html": card_html})
             s.commit()
-        # delete the message from chat
-        try: await q.message.delete()
-        except Exception: pass
+        # σβήσε την κάρτα
+        try:
+            await q.message.delete()
+        except Exception:
+            # αν δεν μπορεί να σβηστεί, κάνε edit
+            try: await q.message.edit_text("⭐ Saved to your list.", parse_mode=ParseMode.HTML)
+            except Exception: pass
         await q.answer("Saved ⭐")
         return
 
@@ -542,6 +547,7 @@ def build_application() -> Application:
     ensure_schema()
     ensure_feed_events_schema()
     ensure_keyword_unique()
+    ensure_saved_schema()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 

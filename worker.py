@@ -34,22 +34,31 @@ def _match_keywords(title: str, description: str, kws: List[str]) -> List[str]:
     hay = f"{title}\n{description}".lower()
     return [k for k in kws if k in hay]
 
+def _short(desc: str, n: int = 140) -> str:
+    d = (desc or "").strip().replace("\n", " ")
+    if len(d) <= n:
+        return d
+    return d[: n - 1].rstrip() + "…"
+
 async def _send_job_card(tg_bot, chat_id: int, ev: Dict[str, Any], matched: List[str]) -> None:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     title = ev.get("title") or "(no title)"
-    platform = ev.get("platform") or "Unknown"
+    platform = ev.get("platform") or "Freelancer"
     aff = ev.get("affiliate_url")
     url = aff or ev.get("original_url")
     budget = ev.get("budget_amount")
     bcur = ev.get("budget_currency")
     budget_line = f"<b>Budget:</b> {budget} {bcur}\n" if budget and bcur else ""
-
     matched_line = ", ".join(matched) if matched else ""
+    desc_line = _short(ev.get("description", ""))
+
+    # Μορφή «φωτογραφίας 4»
     txt = (
         f"<b>{title}</b>\n"
         f"{budget_line}"
         f"<b>Source:</b> {platform}\n"
         f"<b>Match:</b> {matched_line}\n"
+        f"✏️ {desc_line}"
     ).strip()
 
     kb = InlineKeyboardMarkup([
