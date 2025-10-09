@@ -1,15 +1,24 @@
 """
-config.py — Global configuration for Freelancer Alert Bot
-Environment-safe for both local and Render deployments.
+config.py — Global configuration for Freelancer Alert Jobs Bot
+Loads environment variables automatically from .env (for local use)
 """
 
 import os
 from datetime import timedelta
+from dotenv import load_dotenv
+
+# --------------------------------------------------
+# Load environment variables from .env (local dev)
+# --------------------------------------------------
+load_dotenv()
 
 # --------------------------------------------------
 # Basic Telegram bot configuration
 # --------------------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN env var is required")
+
 ADMIN_IDS = [
     int(x) for x in os.getenv("ADMIN_IDS", "5254014824").split(",") if x.strip().isdigit()
 ]
@@ -20,10 +29,9 @@ BOT_NAME = os.getenv("BOT_NAME", "Freelancer Alert Jobs Bot")
 # --------------------------------------------------
 # Database configuration
 # --------------------------------------------------
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg2://postgres:postgres@localhost:5432/freelancer_bot"
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL env var is required")
 
 # --------------------------------------------------
 # Webhook / Server configuration
@@ -54,7 +62,7 @@ AFFILIATE_PREFIX = os.getenv(
     "https://www.freelancer.com/get/apstld?f=give&dl="
 )
 
-# List of supported job platforms (placeholders + live)
+# List of supported job platforms
 JOB_PLATFORMS = [
     "Skywalker",
     "Kariera",
@@ -105,7 +113,7 @@ STATIC_DIR = os.path.join(ROOT_DIR, "static")
 BACKUP_DIR = os.path.join(ROOT_DIR, "backups")
 
 # --------------------------------------------------
-# Safe helper: ensure directories
+# Safe helper: ensure directories exist
 # --------------------------------------------------
 for path in (STATIC_DIR, BACKUP_DIR):
     os.makedirs(path, exist_ok=True)

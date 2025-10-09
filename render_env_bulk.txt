@@ -1,0 +1,58 @@
+# ====================================================
+#  FREELANCER ALERT JOBS BOT - RENDER ENVIRONMENT
+#  (paste this directly into Render > Environment > Bulk Edit)
+# ====================================================
+
+# ----------------------------------------------------
+# 🔐 TELEGRAM BOT SETTINGS
+# ----------------------------------------------------
+BOT_TOKEN=1234567890:ABCDEF_your_actual_telegram_bot_token_here
+BOT_USERNAME=@Freelancer_Alert_Jobs_bot
+BOT_NAME=Freelancer Alert Jobs Bot
+
+# Comma-separated list of Telegram user IDs with admin rights
+ADMIN_IDS=5254014824
+
+# ----------------------------------------------------
+# 🗄️ DATABASE CONFIGURATION
+# ----------------------------------------------------
+# Use the "Internal Database URL" from your Render Postgres dashboard
+DATABASE_URL=postgresql+psycopg2://your_user:your_password@your_host:5432/your_database
+
+# ----------------------------------------------------
+# 🌐 WEBHOOK / SERVER SETTINGS
+# ----------------------------------------------------
+# Replace this with your actual Render service URL
+WEBHOOK_URL=https://freelancer-bot-ns7s.onrender.com
+WEBHOOK_PATH=/bot${BOT_TOKEN}
+WEBAPP_HOST=0.0.0.0
+WEBAPP_PORT=10000
+
+# ----------------------------------------------------
+# 💰 TRIAL / PREMIUM SETTINGS
+# ----------------------------------------------------
+TRIAL_DAYS=10
+TRIAL_MESSAGE=🎉 You have a 10-day free trial of Freelancer Alert Jobs Bot Premium!
+
+# ----------------------------------------------------
+# 📰 JOB FEED CONFIGURATION
+# ----------------------------------------------------
+FETCH_INTERVAL_SEC=900
+STATS_WINDOW_HOURS=24
+
+# Affiliate prefix for Freelancer or others (keeps your referral ID)
+AFFILIATE_PREFIX=https://www.freelancer.com/get/apstld?f=give&dl=
+
+# ----------------------------------------------------
+# 🗂️ LOGGING / DEBUG SETTINGS
+# ----------------------------------------------------
+DEBUG=1
+LOG_LEVEL=INFO
+
+# ----------------------------------------------------
+# 🕓 GENERAL SETTINGS
+# ----------------------------------------------------
+DEFAULT_TIMEZONE=UTC
+
+BOT_START_MESSAGE=👋 Welcome to Freelancer Alert Jobs Bot! Set your keywords to start receiving job matches.
+HELP_TEXT=💡 Use /addkeyword to add new keywords separated by commas. Example: /addkeyword python, sales, logo
