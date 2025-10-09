@@ -1,4 +1,4 @@
-# bot.py — EN-only, add via /addkeyword only, robust keywords across schemas, admin panel, selftest
+# bot.py — EN-only, add via /addkeyword only, robust keywords, admin panel, selftest
 import os, logging, asyncio
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -278,18 +278,24 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try: await context.bot.send_message(chat_id=tid, text=f"🔑 Your access is extended until {until.strftime('%Y-%m-%d %H:%M UTC')}.")
     except Exception: pass
 
-async def block_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def block_cmd(update: Update, Context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id): return
-    if not context.args: await update.effective_chat.send_message("Usage: /block <id>"); return
-    tid = int(context.args[0])
+    if not update.message or not update.message.text: return
+    parts = update.message.text.split()
+    if len(parts) < 2:
+        await update.effective_chat.send_message("Usage: /block <id>"); return
+    tid = int(parts[1])
     with get_session() as s:
         s.execute(text('UPDATE "user" SET is_blocked=TRUE WHERE telegram_id=:tid'), {"tid": tid}); s.commit()
     await update.effective_chat.send_message(f"⛔ Blocked {tid}.")
 
 async def unblock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id): return
-    if not context.args: await update.effective_chat.send_message("Usage: /unblock <id>"); return
-    tid = int(context.args[0])
+    if not update.message or not update.message.text: return
+    parts = update.message.text.split()
+    if len(parts) < 2:
+        await update.effective_chat.send_message("Usage: /unblock <id>"); return
+    tid = int(parts[1])
     with get_session() as s:
         s.execute(text('UPDATE "user" SET is_blocked=FALSE WHERE telegram_id=:tid'), {"tid": tid}); s.commit()
     await update.effective_chat.send_message(f"✅ Unblocked {tid}.")
@@ -380,31 +386,53 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "job:delete": await q.message.reply_text("Deleted 🗑"); return await q.answer()
     await q.answer()
 
-# ---------- Router (continuous admin-user chat, no keyword-mode) ----------
+# ---------- Router (continuous admin-user chat) ----------
 async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Non-command messages:
+    - If ADMIN is paired → send to that paired USER.
+    - Else if USER is paired → forward to their ADMIN.
+    - Else (first contact) → forward to all admins.
+    """
     if not update.message or not update.message.text or update.message.text.startswith("/"):
         return
+
     text_msg = update.message.text.strip()
-    uid = update.effective_user.id
+    sender_id = update.effective_user.id
     app = context.application
 
-    # If user already paired → forward
-    adm = get_paired_admin(app, uid)
-    if adm:
+    # 1) ADMIN sending while paired -> deliver to the paired user
+    if is_admin_user(sender_id):
+        paired_user = get_paired_user(app, sender_id)
+        if paired_user:
+            try:
+                await context.bot.send_message(chat_id=paired_user, text=text_msg)
+            except Exception:
+                pass
+            return  # do not echo back to admin
+
+    # 2) USER paired -> forward to their assigned admin
+    paired_admin = get_paired_admin(app, sender_id)
+    if paired_admin:
         try:
-            await context.bot.send_message(chat_id=adm, text=f"✉️ From {uid}:\n\n{text_msg}", reply_markup=admin_contact_kb(uid))
-        except Exception: pass
+            await context.bot.send_message(chat_id=paired_admin,
+                                           text=f"✉️ From {sender_id}:\n\n{text_msg}",
+                                           reply_markup=admin_contact_kb(sender_id))
+        except Exception:
+            pass
         return
 
-    # First contact → forward to all admins
+    # 3) First contact -> forward to all admins
     for aid in all_admin_ids():
         try:
             await context.bot.send_message(
                 chat_id=aid,
-                text=f"✉️ <b>New message from user</b>\nID: <code>{uid}</code>\n\n{text_msg}",
-                parse_mode=ParseMode.HTML, reply_markup=admin_contact_kb(uid),
+                text=f"✉️ <b>New message from user</b>\nID: <code>{sender_id}</code>\n\n{text_msg}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=admin_contact_kb(sender_id),
             )
-        except Exception: pass
+        except Exception:
+            pass
     await update.message.reply_text("Thanks! Your message was forwarded to the admin 👌")
 
 # ---------- Expiry reminders ----------
@@ -472,7 +500,7 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(admin_action_cb, pattern=r"^adm:(reply|decline|grant):"))
     app.add_handler(CallbackQueryHandler(job_action_cb, pattern=r"^job:(save|delete)$"))
 
-    # text router (no keyword inline mode)
+    # text router (continuous chat)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, incoming_message_router))
 
     # scheduler
