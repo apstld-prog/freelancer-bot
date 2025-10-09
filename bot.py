@@ -1,10 +1,10 @@
-# bot.py — full replacement (English-only UX + admin + contact + keywords + expiry reminders)
+# bot.py — full replacement (English-only UX + continuous user↔admin chat + keywords + admin fixes + safe scheduler)
 import os
 import logging
 import asyncio
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -18,13 +18,13 @@ from telegram.ext import (
     filters,
 )
 
-# Try import symbol; may exist but instantiation can still fail without extra deps
+# Try to import JobQueue (may exist but fail to init if extra not installed)
 try:
     from telegram.ext import JobQueue  # type: ignore
 except Exception:
     JobQueue = None  # type: ignore
 
-# --- project-local modules ---
+# --- project-local modules (must exist in your repo) ---
 from db import (
     ensure_schema,
     get_session,
@@ -37,6 +37,7 @@ from config import ADMIN_IDS, TRIAL_DAYS, STATS_WINDOW_HOURS
 from db_events import get_platform_stats
 
 log = logging.getLogger("bot")
+logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN")
@@ -46,8 +47,11 @@ BOT_TOKEN = (
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
 
+ADMIN_ELEVATE_SECRET = os.getenv("ADMIN_ELEVATE_SECRET", "")  # optional secret for /sudo
 
-# ---------------- Admin helpers ----------------
+# ======================================================================
+# Admin helpers
+# ======================================================================
 def get_db_admin_ids() -> Set[int]:
     try:
         with get_session() as s:
@@ -62,8 +66,9 @@ def all_admin_ids() -> Set[int]:
 def is_admin_user(uid: int) -> bool:
     return uid in all_admin_ids()
 
-
-# ---------------- UI ----------------
+# ======================================================================
+# UI (English-only bot text)
+# ======================================================================
 def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
     kb = [
         [InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
@@ -90,12 +95,13 @@ def features_text() -> str:
 
 HELP_EN = (
     "<b>🧭 Help / How it works</b>\n\n"
-    "<b>1)</b> Add keywords with <code>/addkeyword</code> (comma-separated).\n"
+    "<b>1)</b> Add keywords with <code>/addkeyword</code> (comma-separated) or via the “Add Keywords” button.\n"
     "<b>2)</b> Set countries with <code>/setcountry</code> (e.g. <i>US,UK</i> or <i>ALL</i>).\n"
     "<b>3)</b> Save a proposal template with <code>/setproposal &lt;text&gt;</code> (placeholders supported).\n"
     "<b>4)</b> When a job arrives you can keep/delete it or open <b>Proposal</b>/<b>Original</b> link.\n\n"
     "Use <code>/mysettings</code> anytime. Try <code>/selftest</code> for a sample card.\n"
 )
+
 def help_footer(hours: int) -> str:
     return (
         "\n<b>🛰 Platforms monitored:</b>\n"
@@ -103,11 +109,11 @@ def help_footer(hours: int) -> str:
         "Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
         "• Greece: <a href=\"https://www.jobfind.gr\">JobFind.gr</a>, "
         "<a href=\"https://www.skywalker.gr\">Skywalker.gr</a>, <a href=\"https://www.kariera.gr\">Kariera.gr</a>\n\n"
-        "<b>👑 Admin:</b> /users /grant /block /unblock /broadcast /feedstatus\n"
+        "<b>👑 Admin:</b> /users /grant /block /unblock /broadcast /feedstatus (/feetstatus)\n"
         "<i>Link previews disabled for clean help.</i>\n"
     )
 
-def welcome_text(expiry: datetime | None) -> str:
+def welcome_text(expiry: Optional[datetime]) -> str:
     extra = f"\n<b>Free trial ends:</b> {expiry.strftime('%Y-%m-%d %H:%M UTC')}" if expiry else ""
     return (
         "<b>👋 Welcome to Freelancer Alert Bot!</b>\n\n"
@@ -138,15 +144,16 @@ def settings_text(keywords: List[str], countries: str | None, proposal_template:
         "<i>For extension, contact the admin.</i>"
     )
 
-
-# ---------------- Keyword helpers ----------------
+# ======================================================================
+# Keywords helpers
+# ======================================================================
 def parse_keywords_input(raw: str) -> List[str]:
     parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
     seen, clean = set(), []
     for p in parts:
-        k = p.lower()
-        if k not in seen:
-            seen.add(k); clean.append(p)
+        key = p.lower()
+        if key not in seen:
+            seen.add(key); clean.append(p)
     return clean
 
 def add_keywords_safe(db_session, user_id: int, keywords: List[str]) -> int:
@@ -154,38 +161,30 @@ def add_keywords_safe(db_session, user_id: int, keywords: List[str]) -> int:
         return 0
     inserted = 0
     try:
-        res = add_user_keywords(db_session, user_id, keywords)  # try list
+        res = add_user_keywords(db_session, user_id, keywords)  # try list signature
         inserted = int(res) if res is not None else 0
-        if inserted == 0:
-            current = list_user_keywords(db_session, user_id) or []
-            inserted = max(0, len(set([*current, *keywords])) - len(current))
     except TypeError:
         try:
-            res = add_user_keywords(db_session, user_id, ", ".join(keywords))  # fallback str
+            res = add_user_keywords(db_session, user_id, ", ".join(keywords))  # fallback string signature
             inserted = int(res) if res is not None else 0
-            if inserted == 0:
-                current = list_user_keywords(db_session, user_id) or []
-                inserted = max(0, len(set([*current, *keywords])) - len(current))
         except Exception:
             inserted = 0
     except Exception:
         inserted = 0
-    return inserted
 
-def remove_keyword_safe(db_session, user_id: int, keyword: str) -> bool:
+    # If helper didn't report, compute delta vs current list
     try:
-        from db import remove_user_keyword  # optional
-        before = list_user_keywords(db_session, user_id) or []
-        if keyword in before:
-            remove_user_keyword(db_session, user_id, keyword)  # type: ignore
-            after = list_user_keywords(db_session, user_id) or []
-            return keyword not in after
+        current = list_user_keywords(db_session, user_id) or []
+        before = set([c.lower() for c in current])
+        added = [k for k in keywords if k.lower() not in before]
+        inserted = max(inserted, len(added))
     except Exception:
         pass
-    return False
+    return inserted
 
-
-# ---------------- Contact flow ----------------
+# ======================================================================
+# Contact flow helpers (continuous chat)
+# ======================================================================
 def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -199,25 +198,77 @@ def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
     )
 
 def user_contact_hint() -> str:
-    return "Send a message for the admin. I'll forward it.\nType your message now (or /cancel)."
+    return (
+        "Send a message for the admin. I will forward it.\n"
+        "After the admin taps Reply, this becomes a continuous chat.\n"
+        "You can end it anytime with /endchat."
+    )
 
+def pair_admin_user(app: Application, admin_id: int, user_id: int) -> None:
+    """Create bidirectional pairing for continuous chat."""
+    pairs = app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})
+    pairs["user_to_admin"][user_id] = admin_id
+    pairs["admin_to_user"][admin_id] = user_id
 
-# ---------------- Public commands ----------------
+def unpair_admin_user(app: Application, admin_id: Optional[int] = None, user_id: Optional[int] = None) -> None:
+    pairs = app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})
+    if admin_id is not None:
+        uid = pairs["admin_to_user"].pop(admin_id, None)
+        if uid is not None:
+            pairs["user_to_admin"].pop(uid, None)
+    if user_id is not None:
+        aid = pairs["user_to_admin"].pop(user_id, None)
+        if aid is not None:
+            pairs["admin_to_user"].pop(aid, None)
+
+def get_paired(app: Application, admin_id: Optional[int] = None, user_id: Optional[int] = None) -> Optional[int]:
+    pairs = app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})
+    if admin_id is not None:
+        return pairs["admin_to_user"].get(admin_id)
+    if user_id is not None:
+        return pairs["user_to_admin"].get(user_id)
+    return None
+
+# ======================================================================
+# Public commands
+# ======================================================================
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Your Telegram ID: <code>{update.effective_user.id}</code>",
         parse_mode=ParseMode.HTML,
     )
 
-async def _ensure_fallback_running(app: Application):
-    """Start fallback expiry loop if not already running."""
-    if app.bot_data.get("expiry_task"):
-        return
-    try:
-        app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
-        log.info("Fallback expiry loop started immediately.")
-    except Exception as e:
-        log.warning("Could not start fallback loop immediately: %s", e)
+async def sudo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elevate current user to admin if secret matches (set ADMIN_ELEVATE_SECRET in env)."""
+    if not context.args:
+        await update.message.reply_text("Usage: <code>/sudo &lt;secret&gt;</code>", parse_mode=ParseMode.HTML); return
+    secret = " ".join(context.args).strip()
+    if not ADMIN_ELEVATE_SECRET:
+        await update.message.reply_text("Admin elevate secret is not configured."); return
+    if secret != ADMIN_ELEVATE_SECRET:
+        await update.message.reply_text("Invalid secret."); return
+    with get_session() as db:
+        u = get_or_create_user_by_tid(db, update.effective_user.id)
+        setattr(u, "is_admin", True)
+        db.commit()
+    await update.message.reply_text("✅ You are now an admin. Use /users to verify.")
+
+async def endchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if is_admin_user(uid):
+        target = get_paired(context.application, admin_id=uid)
+        unpair_admin_user(context.application, admin_id=uid)
+        await update.message.reply_text("Chat ended.")
+        if target:
+            try: await context.bot.send_message(chat_id=target, text="The admin ended the chat.")
+            except Exception: pass
+    else:
+        target_admin = get_paired(context.application, user_id=uid)
+        unpair_admin_user(context.application, user_id=uid)
+        await update.message.reply_text("Chat ended.")
+        if target_admin:
+            try: await context.bot.send_message(chat_id=target_admin, text=f"User {uid} ended the chat.")
+            except Exception: pass
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as db:
@@ -228,10 +279,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setattr(u, "trial_end", getattr(u, "trial_start") + timedelta(days=TRIAL_DAYS))
         expiry = getattr(u, "license_until", None) or getattr(u, "trial_end", None)
         db.commit()
-    # If we flagged to start on first update, ensure it now
+
+    # start fallback loop on first update if needed
     if context.application and context.application.bot_data.get("start_fallback_on_first_update"):
         await _ensure_fallback_running(context.application)
         context.application.bot_data.pop("start_fallback_on_first_update", None)
+
     await update.effective_chat.send_message(
         welcome_text(expiry), parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
@@ -250,17 +303,8 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Add keywords separated by commas. Example:\n<code>/addkeyword logo, lighting</code>",
             parse_mode=ParseMode.HTML,
         ); return
-    kws = parse_keywords_input(" ".join(context.args))
-    if not kws:
-        await update.message.reply_text("No valid keywords were provided.", parse_mode=ParseMode.HTML); return
-    with get_session() as db:
-        u = get_or_create_user_by_tid(db, update.effective_user.id)
-        inserted = add_keywords_safe(db, u.id, kws)
-        current = list_user_keywords(db, u.id) or []
-    await update.message.reply_text(
-        f"✅ Added {inserted} new keyword(s).\n\nCurrent keywords:\n• " + (", ".join(current) if current else "—"),
-        parse_mode=ParseMode.HTML,
-    )
+    raw = " ".join(context.args)
+    await _add_keywords_flow(update, context, raw)
 
 async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as db:
@@ -268,24 +312,9 @@ async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = list_user_keywords(db, u.id) or []
     await update.message.reply_text(
         "<b>Keywords</b>\n• " + (", ".join(current) if current else "—") +
-        "\n\nAdd: <code>/addkeyword logo, lighting</code>\nRemove: <code>/delkeyword logo</code>",
+        "\n\nAdd: <code>/addkeyword logo, lighting</code>\nRemove (not implemented in this build: use Add again to expand)",
         parse_mode=ParseMode.HTML,
     )
-
-async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: <code>/delkeyword &lt;word&gt;</code>", parse_mode=ParseMode.HTML); return
-    word = " ".join(context.args).strip()
-    with get_session() as db:
-        u = get_or_create_user_by_tid(db, update.effective_user.id)
-        ok = remove_keyword_safe(db, u.id, word)
-        current = list_user_keywords(db, u.id) or []
-    if ok:
-        await update.message.reply_text(f"🗑 Removed <b>{word}</b>.\nCurrent: " + (", ".join(current) if current else "—"),
-                                        parse_mode=ParseMode.HTML)
-    else:
-        await update.message.reply_text("Could not remove it automatically. You can still add with /addkeyword.",
-                                        parse_mode=ParseMode.HTML)
 
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as db:
@@ -324,12 +353,15 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-# ---------------- Admin commands ----------------
+# ======================================================================
+# Admin commands
+# ======================================================================
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
+        await update.message.reply_text("You are not an admin. If you should be, use /sudo <secret>.")
         return
     with get_session() as db:
-        rows = db.query(User).order_by(User.id.desc()).limit(100).all()
+        rows = db.query(User).order_by(User.id.desc()).limit(200).all()
     lines = ["<b>Users</b>"]
     for u in rows:
         kw_count = len(u.keywords or [])
@@ -405,7 +437,10 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
         return
-    stats = get_platform_stats(STATS_WINDOW_HOURS)
+    try:
+        stats = get_platform_stats(STATS_WINDOW_HOURS) or {}
+    except Exception as e:
+        await update.effective_chat.send_message(f"Feed status unavailable: {e}"); return
     if not stats:
         await update.effective_chat.send_message(f"No events in the last {STATS_WINDOW_HOURS} hours."); return
     lines = [f"📊 Feed status (last {STATS_WINDOW_HOURS}h):"]
@@ -413,40 +448,64 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"• {src}: {cnt}")
     await update.effective_chat.send_message("\n".join(lines))
 
+# Add alias /feetstatus (common typo)
+async def feetstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await feedstatus_cmd(update, context)
 
-# ---------------- Contact routing ----------------
+# ======================================================================
+# Contact flow (handlers)
+# ======================================================================
 async def contact_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_contact"] = True
     await update.callback_query.message.reply_text(user_contact_hint())
     await update.callback_query.answer()
 
 async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+    # Skip if command
     if not update.message or not update.message.text or update.message.text.startswith("/"):
         return
+    app = context.application
+    uid = update.effective_user.id
     text = update.message.text.strip()
 
-    # Start fallback loop on first incoming text if flagged
-    if context.application and context.application.bot_data.get("start_fallback_on_first_update"):
-        await _ensure_fallback_running(context.application)
-        context.application.bot_data.pop("start_fallback_on_first_update", None)
+    # If flagged, start fallback scheduler on first incoming message
+    if app and app.bot_data.get("start_fallback_on_first_update"):
+        await _ensure_fallback_running(app)
+        app.bot_data.pop("start_fallback_on_first_update", None)
 
-    # Admin replying?
-    pending: Dict[int, int] = context.bot_data.setdefault("pending_replies", {})
-    if is_admin_user(uid) and uid in pending:
-        target_id = pending.pop(uid, None)
-        if target_id:
+    # 1) Add-keywords inline mode (after pressing Add Keywords button)
+    if context.user_data.pop("awaiting_keywords", False):
+        await _add_keywords_flow(update, context, text)
+        return
+
+    # 2) Continuous chat routing
+    # a) If admin is paired → send to paired user
+    if is_admin_user(uid):
+        target_user = get_paired(app, admin_id=uid)
+        if target_user:
             try:
-                await context.bot.send_message(chat_id=target_id, text=f"💬 Admin: {text}")
-                await update.message.reply_text("✅ Sent.")
+                await context.bot.send_message(chat_id=target_user, text=f"💬 Admin: {text}")
+                # mirror ack optional; avoid clutter
             except Exception:
                 await update.message.reply_text("Failed to deliver.")
+            return
+        # If not paired, ignore (or you can add logic to start new)
+
+    # b) If user is paired → send only to its admin
+    target_admin = get_paired(app, user_id=uid)
+    if target_admin:
+        try:
+            await context.bot.send_message(chat_id=target_admin, text=f"✉️ From {uid}:\n\n{text}",
+                                           reply_markup=admin_contact_kb(uid))
+        except Exception:
+            pass
         return
 
-    # Regular user → forward to admins
-    if is_admin_user(uid):
-        return
-    for aid in all_admin_ids():
+    # c) No pair yet → forward to all admins
+    admins = all_admin_ids()
+    if not admins:
+        await update.message.reply_text("No admin is available at the moment."); return
+    for aid in admins:
         try:
             await context.bot.send_message(
                 chat_id=aid,
@@ -462,17 +521,22 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not is_admin_user(q.from_user.id):
         await q.answer("Not allowed", show_alert=True); return
-    parts = (q.data or "").split(":")  # adm:reply:<uid>  | adm:grant:<uid>:<days> | adm:decline:<uid>
+    data = (q.data or "")
+    parts = data.split(":")  # adm:reply:<uid> | adm:grant:<uid>:<days> | adm:decline:<uid>
     if len(parts) < 3 or parts[0] != "adm":
         await q.answer(); return
-    action, target = parts[1], int(parts[2])
+    action = parts[1]; target = int(parts[2])
 
     if action == "reply":
-        context.bot_data.setdefault("pending_replies", {})[q.from_user.id] = target
-        await q.message.reply_text(f"Reply to <code>{target}</code>: type your message now.", parse_mode=ParseMode.HTML)
+        pair_admin_user(context.application, q.from_user.id, target)
+        await q.message.reply_text(
+            f"Replying to <code>{target}</code>. Type your messages. Use /endchat to stop.",
+            parse_mode=ParseMode.HTML
+        )
         await q.answer(); return
 
     if action == "decline":
+        unpair_admin_user(context.application, user_id=target)
         try:
             await context.bot.send_message(chat_id=target, text="Your message was received. The admin declined to reply.")
         except Exception:
@@ -494,8 +558,30 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await q.answer()
 
+# ======================================================================
+# Keywords flow (shared)
+# ======================================================================
+async def _add_keywords_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_text: str):
+    kws = parse_keywords_input(raw_text)
+    if not kws:
+        await update.effective_chat.send_message("No valid keywords were provided.", parse_mode=ParseMode.HTML)
+        return
+    with get_session() as db:
+        u = get_or_create_user_by_tid(db, update.effective_user.id)
+        inserted = add_keywords_safe(db, u.id, kws)
+        current = list_user_keywords(db, u.id) or []
+    if inserted > 0:
+        msg = f"✅ Added {inserted} new keyword(s)."
+    else:
+        msg = "ℹ️ Those keywords already exist (no changes)."
+    await update.effective_chat.send_message(
+        msg + "\n\nCurrent keywords:\n• " + (", ".join(current) if current else "—"),
+        parse_mode=ParseMode.HTML,
+    )
 
-# ---------------- Expiry reminders ----------------
+# ======================================================================
+# Expiry reminders (scheduler)
+# ======================================================================
 async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc)
     soon = now + timedelta(hours=24)
@@ -528,15 +614,26 @@ async def _background_expiry_loop(app: Application):
             log.exception("expiry loop error: %s", e)
         await asyncio.sleep(3600)
 
+async def _ensure_fallback_running(app: Application):
+    if app.bot_data.get("expiry_task"):
+        return
+    try:
+        app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
+        log.info("Fallback expiry loop started (immediate).")
+    except Exception as e:
+        log.warning("Could not start fallback loop immediately: %s", e)
 
-# ---------------- Menu callbacks ----------------
+# ======================================================================
+# Menu callbacks
+# ======================================================================
 async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = (q.data or "").strip()
 
     if data == "act:addkw":
+        context.user_data["awaiting_keywords"] = True
         await q.message.reply_text(
-            "Add keywords (comma-separated). Example:\n<code>/addkeyword logo, lighting</code>",
+            "Type keywords (comma-separated). Example:\n<code>logo, lighting</code>",
             parse_mode=ParseMode.HTML,
         ); await q.answer(); return
 
@@ -569,14 +666,17 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/grant <id> <days>\n"
             "/block <id> / /unblock <id>\n"
             "/broadcast <text>\n"
-            "/feedstatus — per-platform stats",
+            "/feedstatus — per-platform stats\n"
+            "/endchat — end current chat pairing",
             parse_mode=ParseMode.HTML,
-        ); await q.answer(); return
+        )
+        await q.answer(); return
 
     await q.answer()
 
-
-# ---------------- App factory (safe scheduler init) ----------------
+# ======================================================================
+# App factory (safe scheduler init)
+# ======================================================================
 def build_application() -> Application:
     ensure_schema()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -585,9 +685,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("whoami", whoami_cmd))
+    app.add_handler(CommandHandler("sudo", sudo_cmd))       # elevate to admin with secret
+    app.add_handler(CommandHandler("endchat", endchat_cmd)) # end continuous chat
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app.add_handler(CommandHandler("keywords", keywords_cmd))
-    app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
 
@@ -598,15 +699,16 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("unblock", unblock_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
+    app.add_handler(CommandHandler("feetstatus", feetstatus_cmd))  # alias
 
     # Menu & admin actions
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:(addkw|settings|help|saved|contact|admin)$"))
     app.add_handler(CallbackQueryHandler(admin_action_cb, pattern=r"^adm:(reply|decline|grant):"))
 
-    # Plain text router (for contact and admin replies)
+    # Plain text router (contact + inline add-keywords)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, incoming_message_router))
 
-    # --- Scheduling: try JobQueue; if ANY exception → fallback loop ---
+    # ---- Scheduler: try JobQueue; else robust fallback ----
     used_jobqueue = False
     try:
         if JobQueue is not None:
@@ -618,10 +720,10 @@ def build_application() -> Application:
             used_jobqueue = True
             log.info("Scheduler: JobQueue")
     except Exception as e:
-        log.warning("JobQueue unavailable (%s). Using fallback loop.", e)
+        log.warning("JobQueue unavailable (%s). Using fallback.", e)
 
     if not used_jobqueue:
-        # Try to schedule immediately; if no loop yet, defer to first update
+        # Try to start immediately, else defer to first update
         try:
             app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
             log.info("Scheduler: fallback loop (started immediately)")
@@ -629,4 +731,5 @@ def build_application() -> Application:
             app.bot_data["start_fallback_on_first_update"] = True
             log.info("Scheduler: fallback loop (will start on first update)")
 
+    log.info("Handlers ready: public, admin, contact, keywords, scheduler=%s", "jobqueue" if used_jobqueue else "fallback")
     return app
