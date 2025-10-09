@@ -1,64 +1,54 @@
-
 @echo off
+:: Auto-commit & push to main. Keeps Render in sync.
+:: -----------------------------------------------
+:: Usage: double-click or run from repo root.
+
 setlocal ENABLEDELAYEDEXPANSION
-REM --- Ensure we're inside a Git repo
-git rev-parse --is-inside-work-tree >NUL 2>&1
-if errorlevel 1 (
-  echo [ERROR] This folder is not a Git repository.
+
+:: Fail on error
+cmd /c exit /b 0
+
+:: Compute timestamp (YYYY-MM-DD_HHMMSS)
+for /f "tokens=1-4 delims=/ " %%a in ("%date%") do (
+    set YY=%%d
+    set MM=%%b
+    set DD=%%c
+)
+for /f "tokens=1-3 delims=:. " %%h in ("%time%") do (
+    set HH=%%h
+    set MI=%%i
+    set SS=%%j
+)
+if 1%!HH! LSS 110 set HH=0!HH!
+set TS=%YY%-%MM%-%DD%_%HH%%MI%%SS%
+
+:: Ensure we're in repo
+git rev-parse --is-inside-work-tree >nul 2>&1 || (
+  echo Not inside a Git repository. Aborting.
   exit /b 1
 )
 
-REM --- Determine branch and remote
-for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set BRANCH=%%b
-for /f "delims=" %%r in ('git remote') do set REMOTE=%%r
-if "%REMOTE%"=="" set REMOTE=origin
+:: Show branch
+for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set BR=%%b
+echo Current branch: %BR%
 
-echo.
-echo [INFO] Branch: %BRANCH%
-echo [INFO] Remote: %REMOTE%
-git remote -v
-
-REM --- Stage and commit all changes
+:: Stage all changes (incl. new/deleted)
 git add -A
-for /f "tokens=1-5 delims=/ " %%d in ("%date%") do set DATESTR=%%f-%%e-%%d
-set MSG=Auto push %DATESTR% %time%
-git commit -m "%MSG%" 1>NUL 2>&1
-if errorlevel 1 (
-  echo [INFO] Nothing to commit. Proceeding to push...
+
+:: If nothing to commit, still push in case of remote changes
+git diff --cached --quiet || (
+  git commit -m "Auto push %TS%"
 )
 
-REM --- Pull --rebase to avoid conflicts
-echo [INFO] Pulling latest from %REMOTE%/%BRANCH% ...
-git pull --rebase %REMOTE% %BRANCH%
-if errorlevel 1 (
-  echo [ERROR] git pull --rebase failed. Resolve conflicts and retry.
-  exit /b 1
-)
+:: Rebase on latest main (safe for single-user)
+git pull --rebase origin %BR%
 
-REM --- Push
-echo [INFO] Pushing to %REMOTE%/%BRANCH% ...
-git push -u %REMOTE% %BRANCH%
-if errorlevel 1 (
-  echo [ERROR] git push failed. Check your remote/credentials.
-  exit /b 1
-)
+:: Push branch
+git push origin %BR%
 
-REM --- Optional: trigger Render Deploy Hook if file exists
-if exist .render_deploy_hook (
-  set /p RENDER_HOOK=<.render_deploy_hook
-  if not "%RENDER_HOOK%"=="" (
-    echo [INFO] Triggering Render Deploy Hook...
-    powershell -NoProfile -Command "try { Invoke-WebRequest -Method POST -Uri '%RENDER_HOOK%' ^| Out-Null; exit 0 } catch { exit 1 }"
-    if errorlevel 1 (
-      echo [WARN] Deploy hook call failed. Check the hook URL.
-    ) else (
-      echo [INFO] Deploy hook triggered successfully.
-    )
-  )
-) else (
-  echo [INFO] No .render_deploy_hook file found. Skipping manual deploy trigger.
-  echo [HINT] To force a deploy even without code changes, create a file named .render_deploy_hook in repo root with your Render Deploy Hook URL.
-)
+:: OPTIONAL: update movable stable tag (uncomment if you want)
+:: git tag -f stable
+:: git push -f origin stable
 
-echo [DONE] All set.
-exit /b 0
+echo Done. Pushed %BR% at %TS%.
+endlocal
