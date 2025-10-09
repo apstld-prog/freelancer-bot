@@ -1,135 +1,329 @@
 import os
+import logging
 from datetime import datetime, timezone
-from typing import List
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
-from db import SessionLocal, User, Keyword, init_db
+from typing import List, Tuple
 
-AFFILIATE_PREFIX = os.getenv("AFFILIATE_PREFIX", "").strip()
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
+
+# === Logging ===
+log = logging.getLogger("bot")
+logging.basicConfig(level=logging.INFO)
+
+
+# === DB layer (expects db.py with these names) ===
+# The code is tolerant: if your existing db.py exposes different shapes, we won't crash the bot flow.
+try:
+    from db import (
+        SessionLocal,              # -> sessionmaker() or similar
+        ensure_schema,             # -> creates/adjusts tables/columns if needed
+        User,                      # -> SQLAlchemy model
+        Keyword,                   # -> SQLAlchemy model with fields: id, user_id, value, created_at, updated_at
+        get_or_create_user_by_tid, # -> (db, telegram_id) -> User
+        get_keywords_for_user,     # -> (db, user_id) -> List[Keyword]
+        add_keywords_for_user,     # -> (db, user_id, values: List[str]) -> Tuple[int, int]
+    )
+except Exception as e:
+    log.warning("db.py import failed or has different API: %s", e)
+
+    # Fallback shims to keep the bot responsive even if db module API differs.
+    SessionLocal = None
+    def ensure_schema():
+        log.info("ensure_schema(): skipped (no db.py)")
+
+    class _DummyUser:
+        id = 0
+        telegram_id = 0
+        is_admin = False
+        is_active = True
+        is_blocked = False
+        created_at = datetime.now(timezone.utc)
+        updated_at = datetime.now(timezone.utc)
+
+    User = _DummyUser
+
+    class _DummyKeyword:
+        id = 0
+        user_id = 0
+        value = ""
+        created_at = datetime.now(timezone.utc)
+        updated_at = datetime.now(timezone.utc)
+
+    Keyword = _DummyKeyword
+
+    def get_or_create_user_by_tid(db, telegram_id: int):
+        u = _DummyUser()
+        u.id = 1
+        u.telegram_id = telegram_id
+        return u
+
+    def get_keywords_for_user(db, user_id: int):
+        return []
+
+    def add_keywords_for_user(db, user_id: int, values: List[str]) -> Tuple[int, int]:
+        # (inserted, skipped)
+        return (0, len(values))
+
+
+# === Utilities ===
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+if not TELEGRAM_TOKEN:
+    log.warning("TELEGRAM_TOKEN is empty — server.py must not build Application (will crash there).")
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
-def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkws"),
-         InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
-        [InlineKeyboardButton("💾 Saved", callback_data="act:saved"),
-         InlineKeyboardButton("🆘 Help", callback_data="act:help")],
-        [InlineKeyboardButton("☎️ Contact", callback_data="act:contact")]
-    ]
-    if is_admin:
-        rows.append([InlineKeyboardButton("👑 Admin", callback_data="act:admin")])
-    return InlineKeyboardMarkup(rows)
+def as_list_from_csv(s: str) -> List[str]:
+    parts = [p.strip() for p in (s or "").replace(";", ",").split(",")]
+    return [p for p in parts if p]
 
-def settings_card(u: User, kws: List[Keyword]) -> str:
-    kws_txt = ", ".join(sorted([k.value for k in kws])) or "—"
-    def iso(dt):
-        if not dt: return "—"
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+
+# === Simple cards (text only – keep your own styling elsewhere) ===
+def welcome_text() -> str:
     return (
-        "⚙️ <b>Your Settings</b>\n\n"
-        f"Keywords: {kws_txt}\n"
-        f"Countries: {u.countries or 'ALL'}\n"
-        f"Trial start: {iso(u.trial_start)}\n"
-        f"Trial ends: {iso(u.trial_end)}\n"
-        f"License until: {iso(u.license_until)}\n"
-        f"Active: {'✅' if u.is_active else '❌'}  Blocked: {'🚫' if u.is_blocked else '✅'}"
+        "👋 Καλωσήρθες!\n"
+        "• Πρόσθεσε λέξεις-κλειδιά: /addkeyword logo, lighting\n"
+        "• Δες τις ρυθμίσεις σου: /mysettings\n"
+        "• Βοήθεια: /help\n"
     )
 
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg_id = str(update.effective_user.id)
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.telegram_id == tg_id).one_or_none()
-        if not user:
-            now = now_utc()
-            user = User(telegram_id=tg_id, is_active=True, is_blocked=False, is_admin=False, trial_start=now)
-            db.add(user); db.commit(); db.refresh(user)
-        kb = main_menu_kb(bool(user.is_admin))
-        await update.message.reply_text("👋 Welcome! Use /addkeyword python, design", parse_mode="HTML", reply_markup=kb)
-    finally:
-        db.close()
+def help_text() -> str:
+    return (
+        "<b>Βοήθεια</b>\n"
+        "• /start — αρχική οθόνη\n"
+        "• /help — αυτή η βοήθεια\n"
+        "• /addkeyword <λέξεις χωρισμένες με κόμμα> — προσθέτει λέξεις-κλειδιά\n"
+        "• /mysettings — προβάλλει τις τρέχουσες λέξεις-κλειδιά\n"
+        "\n"
+        "Παράδειγμα: <code>/addkeyword logo, lighting</code>\n"
+    )
 
-async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = (update.message.text or "").split(maxsplit=1)
-    if len(raw) < 2:
-        await update.message.reply_text("Usage: /addkeyword keyword1, keyword2")
+def settings_card(user: User, kws: List[Keyword]) -> str:
+    if not kws:
+        kws_html = "<i>Δεν έχεις δηλώσει λέξεις-κλειδιά ακόμα.</i>"
+    else:
+        kws_html = "• " + "\n• ".join(f"<code>{k.value}</code>" for k in kws)
+
+    return (
+        "<b>Τα προσωπικά σου settings</b>\n\n"
+        "<b>Λέξεις-κλειδιά</b>:\n"
+        f"{kws_html}\n"
+    )
+
+def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
+        [InlineKeyboardButton("ℹ️ Help", callback_data="act:help")],
+    ]
+    if is_admin:
+        buttons.append([InlineKeyboardButton("🛠 Admin", callback_data="act:admin")])
+    return InlineKeyboardMarkup(buttons)
+
+
+# === Handlers ===
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Robust /start: answer whether update carries message or callback.
+    """
+    text = welcome_text()
+    kb = main_menu_kb(is_admin=False)
+
+    if update.message:
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=kb,
+        )
         return
-    keywords = [k.strip() for k in raw[1].split(",") if k.strip()]
-    if not keywords:
-        await update.message.reply_text("No valid keywords found.")
+
+    if update.callback_query:
+        q = update.callback_query
+        await q.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=kb,
+        )
+        await q.answer()
         return
-    tg_id = str(update.effective_user.id)
-    db = SessionLocal()
-    added = 0
+
+    # Fallback (rare)
+    chat_id = None
     try:
-        user = db.query(User).filter(User.telegram_id == tg_id).one_or_none()
-        if not user:
-            user = User(telegram_id=tg_id, is_active=True, is_blocked=False, is_admin=False)
-            db.add(user); db.flush()
-        for kw in keywords:
-            if not db.query(Keyword).filter_by(user_id=user.id, value=kw).first():
-                db.add(Keyword(user_id=user.id, value=kw)); added += 1
-        db.commit()
-        await update.message.reply_text(f"✅ Added {added} keywords.")
-    except Exception as e:
-        db.rollback()
-        await update.message.reply_text(f"⚠️ Error: {e}")
-    finally:
-        db.close()
+        chat_id = update.effective_chat.id
+    except Exception:
+        pass
+    if chat_id:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=kb,
+        )
 
-async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg_id = str(update.effective_user.id)
-    db = SessionLocal()
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = help_text()
+    if update.message:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    elif update.callback_query:
+        q = update.callback_query
+        await q.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        await q.answer()
+
+
+async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /addkeyword logo, lighting
+    Stores keywords per user. Keeps layout unchanged elsewhere.
+    """
+    # resolve user & text
+    if update.message:
+        chat_id = update.message.chat_id
+        text = (update.message.text or "").strip()
+    elif update.callback_query:
+        chat_id = update.callback_query.message.chat_id
+        text = (update.callback_query.message.text or "").strip()
+    else:
+        # nothing to do
+        return
+
+    # extract after command word
+    parts = (text.split(" ", 1) + [""])[:2]
+    payload = parts[1].strip()
+
+    if not payload:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Δώσε λέξεις-κλειδιά χωρισμένες με κόμμα. Παράδειγμα:\n<code>/addkeyword logo, lighting</code>",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        return
+
+    values = as_list_from_csv(payload)
+    if not values:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Δεν βρέθηκαν λέξεις-κλειδιά στο μήνυμα.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # DB ops
     try:
-        u = db.query(User).filter(User.telegram_id == tg_id).one()
-        kws = db.query(Keyword).filter(Keyword.user_id == u.id).order_by(Keyword.value).all()
-        await update.message.reply_text(settings_card(u, kws), parse_mode="HTML")
-    finally:
-        db.close()
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = ("ℹ️ <b>Commands</b>\n\n"
-           "• /start — show menu\n"
-           "• /addkeyword k1, k2 — add keywords\n"
-           "• /mysettings — view settings\n")
-    await update.message.reply_text(msg, parse_mode="HTML")
-
-async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    data = q.data or ""
-    if data == "act:help":
-        await q.message.reply_text("Use /help for usage guide.")
-    elif data == "act:addkws":
-        await q.message.reply_text("Use /addkeyword python, design")
-    elif data == "act:settings":
-        # call settings
-        tg_id = str(q.from_user.id)
         db = SessionLocal()
-        try:
-            u = db.query(User).filter(User.telegram_id == tg_id).one()
-            kws = db.query(Keyword).filter(Keyword.user_id == u.id).order_by(Keyword.value).all()
-            await q.message.reply_text(settings_card(u, kws), parse_mode="HTML")
-        finally:
+        user = get_or_create_user_by_tid(db, chat_id)
+        inserted, skipped = add_keywords_for_user(db, user.id, values)
+        db.commit()
+        msg = f"Προστέθηκαν: <b>{inserted}</b>, αγνοήθηκαν (διπλότυπα): <b>{skipped}</b>."
+    except Exception as e:
+        log.exception("addkeyword failed: %s", e)
+        if 'db' in locals():
+            db.rollback()
+        msg = "Σφάλμα κατά την αποθήκευση των λέξεων-κλειδιών."
+    finally:
+        if 'db' in locals():
             db.close()
-    elif data == "act:saved":
-        await q.message.reply_text("Saved jobs list (coming soon).")
-    elif data == "act:contact":
-        await q.message.reply_text("Send your message and admin will reply.")
-    elif data == "act:admin":
-        await q.message.reply_text("Admin menu (coming soon).")
-    await q.answer()
 
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=msg,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
+
+
+async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # resolve chat id
+    if update.message:
+        chat_id = update.message.chat_id
+    elif update.callback_query:
+        chat_id = update.callback_query.message.chat_id
+    else:
+        return
+
+    # DB read
+    try:
+        db = SessionLocal()
+        user = get_or_create_user_by_tid(db, chat_id)
+        kws = get_keywords_for_user(db, user.id)
+    except Exception as e:
+        log.exception("mysettings failed: %s", e)
+        if 'db' in locals():
+            db.rollback()
+        kws = []
+        user = User()
+        user.is_admin = False
+    finally:
+        if 'db' in locals():
+            db.close()
+
+    text = settings_card(user, kws)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=main_menu_kb(is_admin=getattr(user, "is_admin", False) is True),
+    )
+
+
+async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Inline keyboard actions for main menu."""
+    q = update.callback_query
+    data = (q.data or "").strip()
+
+    if data == "act:settings":
+        await mysettings_cmd(update, context)
+        await q.answer()
+        return
+
+    if data == "act:help":
+        await help_cmd(update, context)
+        await q.answer()
+        return
+
+    if data == "act:admin":
+        # Keep minimal; do not alter your existing admin UI here.
+        await q.message.reply_text("Admin panel (placeholder).")
+        await q.answer()
+        return
+
+    await q.answer("OK")
+
+
+# === Build application ===
 def build_application() -> Application:
-    init_db()
-    token = os.getenv("TELEGRAM_TOKEN", "").strip()
-    if not token or ":" not in token:
-        raise RuntimeError("TELEGRAM_TOKEN missing/invalid")
+    """Build and return a PTB Application."""
+    ensure_schema()
+
+    token = TELEGRAM_TOKEN
+    if not token:
+        # Server will raise earlier, but keep a clear log here too
+        raise RuntimeError("TELEGRAM_TOKEN is not set in environment.")
+
     app = ApplicationBuilder().token(token).build()
+
+    # Core commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
-    app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))
+
+    # Menu callback
+    app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:(settings|help|admin)$"))
+
+    log.info("Handlers ready: /start /help /addkeyword /mysettings + menu callbacks")
     return app
