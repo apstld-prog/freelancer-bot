@@ -1,33 +1,43 @@
+# db_events.py — feed events schema + stats
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional
 
-from datetime import datetime, timedelta
-from typing import Dict
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
-from sqlalchemy.orm import declarative_base, sessionmaker
-from config import DATABASE_URL, STATS_WINDOW_HOURS
+from sqlalchemy import text
+from db import get_session
 
-Base = declarative_base()
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+DDL = """
+CREATE TABLE IF NOT EXISTS feed_events (
+  id BIGSERIAL PRIMARY KEY,
+  ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  source VARCHAR(120) NOT NULL,
+  payload JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_feed_events_ts ON feed_events (ts);
+CREATE INDEX IF NOT EXISTS idx_feed_events_source ON feed_events (source);
+"""
 
-class FeedEvent(Base):
-    __tablename__ = "feed_events"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    source = Column(String(64), index=True, nullable=False)
-    ts = Column(DateTime, index=True, default=datetime.utcnow, nullable=False)
-
-def ensure_schema():
-    Base.metadata.create_all(engine)
-
-def log_platform_event(source: str):
-    with SessionLocal() as s:
-        s.add(FeedEvent(source=source, ts=datetime.utcnow()))
+def ensure_feed_events_schema() -> None:
+    """Create feed_events table & indexes if they don't exist."""
+    with get_session() as s:
+        s.execute(text(DDL))
         s.commit()
 
-def get_platform_stats(hours: int = STATS_WINDOW_HOURS) -> Dict[str, int]:
-    cutoff = datetime.utcnow() - timedelta(hours=hours)
-    with SessionLocal() as s:
-        rows = s.query(FeedEvent.source).filter(FeedEvent.ts >= cutoff).all()
-    counts: Dict[str, int] = {}
-    for (src,) in rows:
-        counts[src] = counts.get(src, 0) + 1
-    return dict(sorted(counts.items(), key=lambda x: x[0]))
+def record_event(source: str, payload: Optional[dict] = None) -> None:
+    """Optional helper to insert an event (call this όταν φτάνει job από πηγή)."""
+    with get_session() as s:
+        s.execute(
+            text("INSERT INTO feed_events (source, payload) VALUES (:source, :payload)"),
+            {"source": source, "payload": payload},
+        )
+        s.commit()
+
+def get_platform_stats(window_hours: int = 24) -> Dict[str, int]:
+    """Return counts per source for last `window_hours`."""
+    with get_session() as s:
+        q = text(
+            "SELECT source, COUNT(*) FROM feed_events "
+            "WHERE ts >= :ts_from GROUP BY source ORDER BY 2 DESC"
+        )
+        ts_from = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        rows = s.execute(q, {"ts_from": ts_from}).fetchall()
+        return {r[0]: int(r[1]) for r in rows}
