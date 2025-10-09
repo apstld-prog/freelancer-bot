@@ -1,4 +1,4 @@
-# bot.py — EN-only, robust keywords + stable modes, admin panel, selftest, feedstatus
+# bot.py — EN-only, robust keywords + stable modes, delete keywords, admin panel, selftest, feedstatus
 import os, logging, asyncio
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -21,7 +21,10 @@ from sqlalchemy import text
 from db import ensure_schema, get_session, get_or_create_user_by_tid, User
 from config import ADMIN_IDS, TRIAL_DAYS, STATS_WINDOW_HOURS
 from db_events import ensure_feed_events_schema, get_platform_stats
-from db_keywords import list_keywords, add_keywords, count_keywords, ensure_keyword_unique
+from db_keywords import (
+    list_keywords, add_keywords, count_keywords,
+    ensure_keyword_unique, delete_keywords, clear_keywords
+)
 
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
@@ -61,9 +64,10 @@ def main_menu_kb(is_admin: bool=False) -> InlineKeyboardMarkup:
 HELP_EN = (
     "<b>🧭 Help / How it works</b>\n\n"
     "<b>1)</b> Add keywords with <code>/addkeyword</code> (comma-separated) or via the “Add Keywords” button.\n"
-    "<b>2)</b> Set countries with <code>/setcountry</code> (e.g. <i>US,UK</i> or <i>ALL</i>).\n"
-    "<b>3)</b> Save a proposal template with <code>/setproposal &lt;text&gt;</code> (placeholders supported).\n"
-    "<b>4)</b> When a job arrives you can keep/delete it or open <b>Proposal</b>/<b>Original</b> link.\n\n"
+    "<b>2)</b> Remove with <code>/delkeyword</code> (comma-separated) or clear with <code>/clearkeywords</code>.\n"
+    "<b>3)</b> Set countries with <code>/setcountry</code> (e.g. <i>US,UK</i> or <i>ALL</i>).\n"
+    "<b>4)</b> Save a proposal template with <code>/setproposal &lt;text&gt;</code>.\n"
+    "<b>5)</b> When a job arrives you can keep/delete it or open <b>Proposal</b>/<b>Original</b> link.\n\n"
     "Use <code>/mysettings</code> anytime. Try <code>/selftest</code> for a sample card.\n"
 )
 
@@ -196,22 +200,40 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings_text(kws, countries, pt, ts, te, lic, bool(act), bool(blk)),
         parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
+def _parse_keywords(raw: str) -> List[str]:
+    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
+    seen, out = set(), []
+    for p in parts:
+        lp = p.lower()
+        if lp not in seen:
+            seen.add(lp); out.append(p)
+    return out
+
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Add keywords separated by commas. Example:\n<code>/addkeyword logo, lighting</code>",
-            parse_mode=ParseMode.HTML)
-        return
+            parse_mode=ParseMode.HTML); return
     await _add_keywords_flow(update, context, " ".join(context.args))
 
-async def keywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "Delete keywords (comma-separated). Example:\n<code>/delkeyword logo, lighting</code>",
+            parse_mode=ParseMode.HTML); return
+    kws = _parse_keywords(" ".join(context.args))
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
-        kws = list_keywords(u.id)
+    removed = delete_keywords(u.id, kws)
+    left = list_keywords(u.id)
     await update.message.reply_text(
-        "<b>Keywords</b>\n• " + (", ".join(kws) if kws else "—") +
-        "\n\nAdd: <code>/addkeyword logo, lighting</code>\nExit inline add: <code>/done</code>",
+        f"🗑 Removed {removed} keyword(s).\n\nCurrent keywords:\n• " + (", ".join(left) if left else "—"),
         parse_mode=ParseMode.HTML)
+
+async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes, clear all", callback_data="kw:clear:yes"),
+                                InlineKeyboardButton("❌ No", callback_data="kw:clear:no")]])
+    await update.message.reply_text("Clear ALL your keywords?", reply_markup=kb)
 
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_text = (
@@ -315,7 +337,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "act:saved":
         await q.message.reply_text("Saved list: (demo)"); await q.answer(); return
     if data == "act:contact":
-        set_mode(context, None)  # βεβαιώσου ότι δεν είμαστε σε add-kw mode
+        set_mode(context, None)  # make sure not in keyword mode
         await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.\nType /done to exit keyword entry; /endchat to end the pairing.")
         await q.answer(); return
     if data == "act:admin":
@@ -333,6 +355,19 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ); await q.answer(); return
     await q.answer()
 
+async def kw_clear_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q.data.startswith("kw:clear:"):
+        await q.answer(); return
+    agree = q.data.split(":")[-1] == "yes"
+    if not agree:
+        await q.message.reply_text("Cancelled."); await q.answer(); return
+    with get_session() as s:
+        u = get_or_create_user_by_tid(s, q.from_user.id)
+    n = clear_keywords(u.id)
+    await q.message.reply_text(f"🗑 Cleared {n} keyword(s).")
+    await q.answer()
+
 async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not is_admin_user(q.from_user.id):
@@ -343,7 +378,6 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action, target = parts[1], int(parts[2])
 
     if action == "reply":
-        # μπαίνουμε σε admin chat-mode, όχι keyword mode
         set_mode(context, "chat_admin")
         pair_admin_user(context.application, q.from_user.id, target)
         await q.message.reply_text(f"Replying to <code>{target}</code>. Type your messages. Use /endchat to stop.", parse_mode=ParseMode.HTML)
@@ -370,17 +404,17 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 # ---------- Router ----------
-def _parse_keywords(raw: str) -> List[str]:
-    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
-    seen, out = set(), []
-    for p in parts:
-        lp = p.lower()
-        if lp not in seen:
-            seen.add(lp); out.append(p)
-    return out
-
 async def _add_keywords_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str):
-    kws = _parse_keywords(raw)
+    def parse(raw: str) -> List[str]:
+        parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
+        seen, out = set(), []
+        for p in parts:
+            lp = p.lower()
+            if lp not in seen:
+                seen.add(lp); out.append(p)
+        return out
+
+    kws = parse(raw)
     if not kws:
         await update.effective_chat.send_message("No valid keywords were provided.", parse_mode=ParseMode.HTML); return
     with get_session() as s:
@@ -398,13 +432,12 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
     uid = update.effective_user.id
     app = context.application
 
-    # kick fallback loop if needed
     if app and app.bot_data.get("start_fallback_on_first_update"):
         await _ensure_fallback_running(app); app.bot_data.pop("start_fallback_on_first_update", None)
 
     mode = get_mode(context)
 
-    # Keyword mode (μένει μέχρι /done)
+    # Keyword mode
     if mode == "kw":
         if text_msg.lower() in {"done", "/done", "cancel", "/cancel"}:
             set_mode(context, None); await update.message.reply_text("Keyword entry finished."); return
@@ -483,7 +516,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("whoami", whoami_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
-    app.add_handler(CommandHandler("keywords", keywords_cmd))
+    app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
+    app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
     app.add_handler(CommandHandler("sudo", sudo_cmd))
 
@@ -498,6 +532,7 @@ def build_application() -> Application:
 
     # callbacks
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:(addkw|settings|help|saved|contact|admin)$"))
+    app.add_handler(CallbackQueryHandler(kw_clear_confirm_cb, pattern=r"^kw:clear:(yes|no)$"))
     app.add_handler(CallbackQueryHandler(admin_action_cb, pattern=r"^adm:(reply|decline|grant):"))
     app.add_handler(CallbackQueryHandler(job_action_cb, pattern=r"^job:(save|delete)$"))
 
