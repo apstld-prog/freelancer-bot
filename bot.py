@@ -1,4 +1,4 @@
-# bot.py — full replacement (English-only UX + code, admin + contact + trial/licensing + keywords)
+# bot.py — full replacement (English-only UX + admin + contact + keywords + expiry reminders)
 import os
 import logging
 import asyncio
@@ -18,21 +18,19 @@ from telegram.ext import (
     filters,
 )
 
-# Try to import JobQueue (may be missing if PTB installed without extra)
+# Try import symbol; may exist but instantiation can still fail without extra deps
 try:
     from telegram.ext import JobQueue  # type: ignore
-    HAS_PTB_JOBQUEUE = True
-except Exception:  # ModuleNotFoundError / RuntimeError cases
+except Exception:  # ModuleNotFoundError etc.
     JobQueue = None  # type: ignore
-    HAS_PTB_JOBQUEUE = False
 
-# --- Project-local modules expected in your repo ---
+# --- project-local modules ---
 from db import (
     ensure_schema,
     get_session,
     get_or_create_user_by_tid,
     list_user_keywords,
-    add_user_keywords,   # signature may vary; handled below
+    add_user_keywords,
     User,
 )
 from config import ADMIN_IDS, TRIAL_DAYS, STATS_WINDOW_HOURS
@@ -40,18 +38,16 @@ from db_events import get_platform_stats
 
 log = logging.getLogger("bot")
 
-TELEGRAM_BOT_TOKEN = (
+BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN")
     or os.getenv("BOT_TOKEN")
     or os.getenv("TELEGRAM_TOKEN")
 )
-if not TELEGRAM_BOT_TOKEN:
+if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
 
 
-# =========================
-# Admin helpers
-# =========================
+# ---------------- Admin helpers ----------------
 def get_db_admin_ids() -> Set[int]:
     try:
         with get_session() as s:
@@ -61,27 +57,21 @@ def get_db_admin_ids() -> Set[int]:
         return set()
 
 def all_admin_ids() -> Set[int]:
-    env_ids = set(int(x) for x in (ADMIN_IDS or []))
-    return env_ids | get_db_admin_ids()
+    return set(int(x) for x in (ADMIN_IDS or [])) | get_db_admin_ids()
 
 def is_admin_user(uid: int) -> bool:
     return uid in all_admin_ids()
 
 
-# =========================
-# UI (English)
-# =========================
+# ---------------- UI ----------------
 def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
-    row1 = [
-        InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
-        InlineKeyboardButton("⚙️ Settings", callback_data="act:settings"),
+    kb = [
+        [InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
+        [InlineKeyboardButton("🆘 Help", callback_data="act:help"),
+         InlineKeyboardButton("💾 Saved", callback_data="act:saved")],
+        [InlineKeyboardButton("📨 Contact", callback_data="act:contact")],
     ]
-    row2 = [
-        InlineKeyboardButton("🆘 Help", callback_data="act:help"),
-        InlineKeyboardButton("💾 Saved", callback_data="act:saved"),
-    ]
-    row3 = [InlineKeyboardButton("📨 Contact", callback_data="act:contact")]
-    kb = [row1, row2, row3]
     if is_admin:
         kb.append([InlineKeyboardButton("🔥 Admin", callback_data="act:admin")])
     return InlineKeyboardMarkup(kb)
@@ -100,25 +90,20 @@ def features_text() -> str:
 
 HELP_EN = (
     "<b>🧭 Help / How it works</b>\n\n"
-    "<b>1)</b> Add keywords with <code>/addkeyword</code>, e.g. <i>python, telegram</i> (comma-separated).\n"
+    "<b>1)</b> Add keywords with <code>/addkeyword</code> (comma-separated).\n"
     "<b>2)</b> Set countries with <code>/setcountry</code> (e.g. <i>US,UK</i> or <i>ALL</i>).\n"
-    "<b>3)</b> Save a proposal template using <code>/setproposal &lt;text&gt;</code> — "
-    "placeholders: <code>{jobtitle}</code>, <code>{experience}</code>, <code>{stack}</code>, "
-    "<code>{availability}</code>, <code>{step1}</code>, <code>{step2}</code>, <code>{step3}</code>, "
-    "<code>{budgettime}</code>, <code>{portfolio}</code>, <code>{name}</code>.\n"
-    "<b>4)</b> When a job arrives you can: keep it, delete it, open the <b>Proposal</b> or <b>Original</b> link.\n\n"
-    "<b>Use</b> <code>/mysettings</code> anytime. Try <code>/selftest</code> for a sample card.\n"
-    "<b>/platforms</b> CC shows platforms by country (e.g., <code>/platforms GR</code>).\n"
+    "<b>3)</b> Save a proposal template with <code>/setproposal &lt;text&gt;</code> (placeholders supported).\n"
+    "<b>4)</b> When a job arrives you can keep/delete it or open <b>Proposal</b>/<b>Original</b> link.\n\n"
+    "Use <code>/mysettings</code> anytime. Try <code>/selftest</code> for a sample card.\n"
 )
 def help_footer(hours: int) -> str:
     return (
         "\n<b>🛰 Platforms monitored:</b>\n"
-        "• Global: <a href=\"https://www.freelancer.com\">Freelancer.com</a> (affiliate links), "
-        "PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
-        "  <i>(* referral/curated)</i>\n"
+        "• Global: <a href=\"https://www.freelancer.com\">Freelancer.com</a> (affiliate), PeoplePerHour, Malt, Workana, Guru, 99designs, "
+        "Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
         "• Greece: <a href=\"https://www.jobfind.gr\">JobFind.gr</a>, "
         "<a href=\"https://www.skywalker.gr\">Skywalker.gr</a>, <a href=\"https://www.kariera.gr\">Kariera.gr</a>\n\n"
-        "<b>👑 Admin commands</b>: /users /grant /block /unblock /broadcast /feedstatus\n"
+        "<b>👑 Admin:</b> /users /grant /block /unblock /broadcast /feedstatus\n"
         "<i>Link previews disabled for clean help.</i>\n"
     )
 
@@ -127,21 +112,12 @@ def welcome_text(expiry: datetime | None) -> str:
     return (
         "<b>👋 Welcome to Freelancer Alert Bot!</b>\n\n"
         "🎁 You have a <b>10-day free trial</b>.\n"
-        "The bot finds matching freelance jobs from top platforms and sends instant alerts.\n"
-        f"{extra}\n\n"
-        "Use <code>/help</code> for instructions.\n"
+        "The bot finds matching freelance jobs from top platforms and sends instant alerts."
+        f"{extra}\n\nUse <code>/help</code> for instructions.\n"
     )
 
-def settings_text(
-    keywords: List[str],
-    countries: str | None,
-    proposal_template: str | None,
-    trial_start,
-    trial_end,
-    license_until,
-    active: bool,
-    blocked: bool,
-) -> str:
+def settings_text(keywords: List[str], countries: str | None, proposal_template: str | None,
+                  trial_start, trial_end, license_until, active: bool, blocked: bool) -> str:
     def b(v: bool) -> str: return "✅" if v else "❌"
     k = ", ".join(keywords) if keywords else "(none)"
     c = countries if countries else "ALL"
@@ -158,18 +134,12 @@ def settings_text(
         f"<b>●</b> Trial ends: {te} UTC\n"
         f"<b>🔑</b> License until: {lic}\n"
         f"<b>✅ Active:</b> {b(active)}    <b>⛔ Blocked:</b> {b(blocked)}\n\n"
-        "<b>🛰 Platforms monitored:</b>\n"
-        "• Global: <a href=\"https://www.freelancer.com\">Freelancer.com</a> (affiliate links), PeoplePerHour, "
-        "Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
-        "  <i>(* referral/curated)</i>\n"
-        "• Greece: <a href=\"https://www.jobfind.gr\">JobFind.gr</a>, "
-        "<a href=\"https://www.skywalker.gr\">Skywalker.gr</a>, <a href=\"https://www.kariera.gr\">Kariera.gr</a>\n\n"
+        "<b>🛰 Platforms monitored:</b> Global & GR boards.\n"
         "<i>For extension, contact the admin.</i>"
     )
 
-# =========================
-# Keyword helpers
-# =========================
+
+# ---------------- Keyword helpers ----------------
 def parse_keywords_input(raw: str) -> List[str]:
     parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
     seen, clean = set(), []
@@ -215,9 +185,7 @@ def remove_keyword_safe(db_session, user_id: int, keyword: str) -> bool:
     return False
 
 
-# =========================
-# Contact flow helpers
-# =========================
+# ---------------- Contact flow ----------------
 def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -234,9 +202,7 @@ def user_contact_hint() -> str:
     return "Send a message for the admin. I'll forward it.\nType your message now (or /cancel)."
 
 
-# =========================
-# Public commands
-# =========================
+# ---------------- Public commands ----------------
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Your Telegram ID: <code>{update.effective_user.id}</code>",
@@ -244,7 +210,6 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Ensure user exists, set trial dates if missing
     with get_session() as db:
         u = get_or_create_user_by_tid(db, update.effective_user.id)
         if not getattr(u, "trial_start", None):
@@ -253,7 +218,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setattr(u, "trial_end", getattr(u, "trial_start") + timedelta(days=TRIAL_DAYS))
         expiry = getattr(u, "license_until", None) or getattr(u, "trial_end", None)
         db.commit()
-
     await update.effective_chat.send_message(
         welcome_text(expiry), parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
@@ -346,9 +310,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-# =========================
-# Admin commands
-# =========================
+# ---------------- Admin commands ----------------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
         return
@@ -438,25 +400,11 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_chat.send_message("\n".join(lines))
 
 
-# =========================
-# Contact flow (user ↔ admin)
-# =========================
+# ---------------- Contact routing ----------------
 async def contact_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_contact"] = True
     await update.callback_query.message.reply_text(user_contact_hint())
     await update.callback_query.answer()
-
-def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("💬 Reply", callback_data=f"adm:reply:{user_id}"),
-             InlineKeyboardButton("❌ Decline", callback_data=f"adm:decline:{user_id}")],
-            [InlineKeyboardButton("+30d", callback_data=f"adm:grant:{user_id}:30"),
-             InlineKeyboardButton("+90d", callback_data=f"adm:grant:{user_id}:90"),
-             InlineKeyboardButton("+180d", callback_data=f"adm:grant:{user_id}:180"),
-             InlineKeyboardButton("+365d", callback_data=f"adm:grant:{user_id}:365")],
-        ]
-    )
 
 async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -479,11 +427,7 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
     # Regular user → forward to admins
     if is_admin_user(uid):
         return
-    admins = all_admin_ids()
-    if not admins:
-        await update.message.reply_text("No admin is available at the moment."); return
-
-    for aid in admins:
+    for aid in all_admin_ids():
         try:
             await context.bot.send_message(
                 chat_id=aid,
@@ -499,15 +443,13 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not is_admin_user(q.from_user.id):
         await q.answer("Not allowed", show_alert=True); return
-    data = (q.data or "")
-    parts = data.split(":")  # adm:reply:<uid>  | adm:grant:<uid>:<days> | adm:decline:<uid>
+    parts = (q.data or "").split(":")  # adm:reply:<uid>  | adm:grant:<uid>:<days> | adm:decline:<uid>
     if len(parts) < 3 or parts[0] != "adm":
         await q.answer(); return
-    action = parts[1]; target = int(parts[2])
+    action, target = parts[1], int(parts[2])
 
     if action == "reply":
-        pending: Dict[int, int] = context.bot_data.setdefault("pending_replies", {})
-        pending[q.from_user.id] = target
+        context.bot_data.setdefault("pending_replies", {})[q.from_user.id] = target
         await q.message.reply_text(f"Reply to <code>{target}</code>: type your message now.", parse_mode=ParseMode.HTML)
         await q.answer(); return
 
@@ -534,9 +476,7 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 
-# =========================
-# Expiry notifications
-# =========================
+# ---------------- Expiry reminders ----------------
 async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc)
     soon = now + timedelta(hours=24)
@@ -560,9 +500,7 @@ async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
                 pass
 
 async def _background_expiry_loop(app: Application):
-    """Fallback scheduler if JobQueue extra isn't installed."""
-    # tiny delay so bot is fully started
-    await asyncio.sleep(5)
+    await asyncio.sleep(5)  # give app time to start
     while True:
         try:
             ctx = SimpleNamespace(bot=app.bot)
@@ -572,9 +510,7 @@ async def _background_expiry_loop(app: Application):
         await asyncio.sleep(3600)
 
 
-# =========================
-# Menu callbacks
-# =========================
+# ---------------- Menu callbacks ----------------
 async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = (q.data or "").strip()
@@ -587,31 +523,23 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "act:settings":
         with get_session() as db:
-            u = get_or_create_user_by_tid(db, q.from_user.id)
-            kws = list_user_keywords(db, u.id)
-        txt = settings_text(
-            keywords=kws, countries=getattr(u, "countries", "ALL"),
-            proposal_template=getattr(u, "proposal_template", None),
-            trial_start=getattr(u, "trial_start", None),
-            trial_end=getattr(u, "trial_end", None),
-            license_until=getattr(u, "license_until", None),
-            active=bool(getattr(u, "is_active", True)), blocked=bool(getattr(u, "is_blocked", False)),
-        )
-        await q.message.reply_text(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        await q.answer(); return
+            u = get_or_create_user_by_tid(db, q.from_user.id); kws = list_user_keywords(db, u.id)
+        txt = settings_text(kws, getattr(u, "countries", "ALL"), getattr(u, "proposal_template", None),
+                            getattr(u, "trial_start", None), getattr(u, "trial_end", None),
+                            getattr(u, "license_until", None), bool(getattr(u, "is_active", True)),
+                            bool(getattr(u, "is_blocked", False)))
+        await q.message.reply_text(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
 
     if data == "act:help":
         await q.message.reply_text(HELP_EN + help_footer(STATS_WINDOW_HOURS),
-                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        await q.answer(); return
+                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
 
     if data == "act:saved":
         await q.message.reply_text("💾 Saved (coming soon)."); await q.answer(); return
 
     if data == "act:contact":
         context.user_data["awaiting_contact"] = True
-        await q.message.reply_text(user_contact_hint())
-        await q.answer(); return
+        await q.message.reply_text(user_contact_hint()); await q.answer(); return
 
     if data == "act:admin":
         if not is_admin_user(q.from_user.id):
@@ -624,18 +552,15 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/broadcast <text>\n"
             "/feedstatus — per-platform stats",
             parse_mode=ParseMode.HTML,
-        )
-        await q.answer(); return
+        ); await q.answer(); return
 
     await q.answer()
 
 
-# =========================
-# App factory (with JobQueue OR fallback loop)
-# =========================
+# ---------------- App factory (safe JobQueue init) ----------------
 def build_application() -> Application:
     ensure_schema()
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Public commands
     app.add_handler(CommandHandler("start", start_cmd))
@@ -659,23 +584,29 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:(addkw|settings|help|saved|contact|admin)$"))
     app.add_handler(CallbackQueryHandler(admin_action_cb, pattern=r"^adm:(reply|decline|grant):"))
 
-    # Plain-text router (for contact and admin replies)
+    # Plain text router (for contact and admin replies)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, incoming_message_router))
 
-    # --- Scheduling: PTB JobQueue if available, else background loop
-    if HAS_PTB_JOBQUEUE:
-        jq = app.job_queue  # type: ignore[attr-defined]
-        if jq is None and JobQueue is not None:
-            jq = JobQueue()
-            jq.set_application(app)
-        if jq is not None:
-            jq.run_repeating(notify_expiring_job, interval=3600, first=60)  # type: ignore[arg-type]
-    else:
-        # Fallback background task; starts after app initialization
-        async def _post_init(_: Application) -> None:
-            app.bot_data["expiry_task"] = asyncio.create_task(_background_expiry_loop(app))
-        app.post_init.append(_post_init)  # PTB runs this when starting the application
+    # --- Scheduling: try JobQueue; if ANY exception → fallback loop ---
+    def _start_fallback_loop(_: Application) -> None:
+        # run background loop after init
+        app.bot_data["expiry_task"] = asyncio.create_task(_background_expiry_loop(app))
 
-    log.info("Handlers ready: public, admin, contact, notifications (scheduler=%s).",
-             "jobqueue" if HAS_PTB_JOBQUEUE else "loop")
+    used_jobqueue = False
+    try:
+        if JobQueue is not None:
+            jq = app.job_queue
+            if jq is None:
+                jq = JobQueue()
+                jq.set_application(app)
+            jq.run_repeating(notify_expiring_job, interval=3600, first=60)  # type: ignore[arg-type]
+            used_jobqueue = True
+    except Exception as e:
+        log.warning("JobQueue unavailable (%s). Using fallback loop.", e)
+
+    if not used_jobqueue:
+        # PTB calls post_init callbacks on start
+        app.post_init.append(_start_fallback_loop)
+
+    log.info("Handlers ready. Scheduler=%s", "jobqueue" if used_jobqueue else "fallback-loop")
     return app
