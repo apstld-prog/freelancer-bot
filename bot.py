@@ -21,7 +21,7 @@ from telegram.ext import (
 # Try import symbol; may exist but instantiation can still fail without extra deps
 try:
     from telegram.ext import JobQueue  # type: ignore
-except Exception:  # ModuleNotFoundError etc.
+except Exception:
     JobQueue = None  # type: ignore
 
 # --- project-local modules ---
@@ -209,6 +209,16 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
     )
 
+async def _ensure_fallback_running(app: Application):
+    """Start fallback expiry loop if not already running."""
+    if app.bot_data.get("expiry_task"):
+        return
+    try:
+        app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
+        log.info("Fallback expiry loop started immediately.")
+    except Exception as e:
+        log.warning("Could not start fallback loop immediately: %s", e)
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as db:
         u = get_or_create_user_by_tid(db, update.effective_user.id)
@@ -218,6 +228,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setattr(u, "trial_end", getattr(u, "trial_start") + timedelta(days=TRIAL_DAYS))
         expiry = getattr(u, "license_until", None) or getattr(u, "trial_end", None)
         db.commit()
+    # If we flagged to start on first update, ensure it now
+    if context.application and context.application.bot_data.get("start_fallback_on_first_update"):
+        await _ensure_fallback_running(context.application)
+        context.application.bot_data.pop("start_fallback_on_first_update", None)
     await update.effective_chat.send_message(
         welcome_text(expiry), parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
@@ -412,6 +426,11 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
         return
     text = update.message.text.strip()
 
+    # Start fallback loop on first incoming text if flagged
+    if context.application and context.application.bot_data.get("start_fallback_on_first_update"):
+        await _ensure_fallback_running(context.application)
+        context.application.bot_data.pop("start_fallback_on_first_update", None)
+
     # Admin replying?
     pending: Dict[int, int] = context.bot_data.setdefault("pending_replies", {})
     if is_admin_user(uid) and uid in pending:
@@ -557,7 +576,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 
-# ---------------- App factory (safe JobQueue init) ----------------
+# ---------------- App factory (safe scheduler init) ----------------
 def build_application() -> Application:
     ensure_schema()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -588,10 +607,6 @@ def build_application() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, incoming_message_router))
 
     # --- Scheduling: try JobQueue; if ANY exception → fallback loop ---
-    def _start_fallback_loop(_: Application) -> None:
-        # run background loop after init
-        app.bot_data["expiry_task"] = asyncio.create_task(_background_expiry_loop(app))
-
     used_jobqueue = False
     try:
         if JobQueue is not None:
@@ -601,12 +616,17 @@ def build_application() -> Application:
                 jq.set_application(app)
             jq.run_repeating(notify_expiring_job, interval=3600, first=60)  # type: ignore[arg-type]
             used_jobqueue = True
+            log.info("Scheduler: JobQueue")
     except Exception as e:
         log.warning("JobQueue unavailable (%s). Using fallback loop.", e)
 
     if not used_jobqueue:
-        # PTB calls post_init callbacks on start
-        app.post_init.append(_start_fallback_loop)
+        # Try to schedule immediately; if no loop yet, defer to first update
+        try:
+            app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
+            log.info("Scheduler: fallback loop (started immediately)")
+        except Exception:
+            app.bot_data["start_fallback_on_first_update"] = True
+            log.info("Scheduler: fallback loop (will start on first update)")
 
-    log.info("Handlers ready. Scheduler=%s", "jobqueue" if used_jobqueue else "fallback-loop")
     return app
