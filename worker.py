@@ -10,15 +10,13 @@ from sqlalchemy import text
 from db import get_session
 from db_events import ensure_feed_events_schema, upsert_events
 from fetchers import ALL_FETCHERS
-from config import FETCH_INTERVAL_SEC, BOT_TOKEN
+from config import FETCH_INTERVAL_SEC, BOT_TOKEN, DELIVERY_WINDOW_HOURS
 
-# PTB Bot (only when app is None)
+# PTB Bot (standalone)
 from telegram import Bot
 
 log = logging.getLogger("worker")
 logging.basicConfig(level=logging.INFO)
-
-MATCH_LOWERCASE = True
 
 def _normalize_kw(s: str) -> List[str]:
     parts = []
@@ -81,25 +79,22 @@ async def _send_job_card(tg_bot, chat_id: int, ev: Dict[str, Any], matched: List
         log.warning("send_message failed: %s", e)
 
 def _get_bot(app) -> Bot:
-    """Return a telegram.Bot whether we run with Application or standalone."""
     if app is not None and getattr(app, "bot", None) is not None:
         return app.bot  # type: ignore[return-value]
     return Bot(BOT_TOKEN)
 
 async def run_once(app=None) -> int:
-    """Fetch all sources, upsert, then deliver to matching users."""
+    """Fetch all sources, upsert, then deliver to matching users across a configurable window."""
     ensure_feed_events_schema()
 
     # 1) Fetch from all adapters concurrently
     results = await asyncio.gather(*(f() for f in ALL_FETCHERS), return_exceptions=False)
     all_events: List[Dict[str, Any]] = [e for sub in results for e in sub]
 
-    if not all_events:
-        log.info("No events fetched this round.")
-        return 0
-
-    # 2) Upsert (dedup/affiliate-prefer inside db_events)
-    new_count = upsert_events(all_events)
+    # 2) Upsert
+    new_count = 0
+    if all_events:
+        new_count = upsert_events(all_events)
     log.info("Upserted events: new=%d total_in_batch=%d", new_count, len(all_events))
 
     # 3) Load users & keywords
@@ -108,8 +103,8 @@ async def run_once(app=None) -> int:
         log.info("No active users to notify.")
         return new_count
 
-    # 4) Pull fresh events from the window of this cycle
-    since = datetime.now(timezone.utc) - timedelta(seconds=FETCH_INTERVAL_SEC + 60)
+    # 4) Fetch recent events within DELIVERY_WINDOW_HOURS (wider than fetch interval)
+    since = datetime.now(timezone.utc) - timedelta(hours=DELIVERY_WINDOW_HOURS)
     with get_session() as s:
         rows = s.execute(text("""
             SELECT platform, title, description, original_url, affiliate_url, country, budget_amount, budget_currency
@@ -135,6 +130,7 @@ async def run_once(app=None) -> int:
             if matched:
                 await _send_job_card(tg_bot, tid, ev, matched)
                 notified += 1
+
     log.info("Delivered %d job cards to users.", notified)
     return new_count
 
