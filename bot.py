@@ -114,13 +114,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Free trial ends:</b> {expiry.strftime('%Y-%m-%d %H:%M UTC') if isinstance(expiry, datetime) else '—'}\n\n"
         "Use <code>/help</code> for instructions."
     )
-    # ⬇️ Κουμπιά στο ΙΔΙΟ μήνυμα
     await update.effective_chat.send_message(
         first,
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb(is_admin=is_admin_user(u.id))
     )
-    # Δεύτερο μήνυμα: Features block
     await update.effective_chat.send_message(FEATURES_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 # ---------- settings/help ----------
@@ -138,7 +136,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- keywords ----------
 def _parse_keywords(raw: str) -> List[str]:
-    parts = [p.strip() for chunk in raw split(",") for p in chunk.split() if p.strip()]
+    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]  # <- fixed
     seen, out = set(), []
     for p in parts:
         lp = p.lower()
