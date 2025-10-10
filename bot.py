@@ -223,23 +223,35 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                              parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    job_text = (
-        "<b>Email Signature from Existing Logo</b>\n"
-        "<b>Budget:</b> 10.0–30.0 USD\n"
-        "<b>Source:</b> Freelancer\n"
-        "<b>Match:</b> logo\n"
-        "✏️ Please create an editable version of the email signature based on the provided logo.\n"
-    )
-    url = "https://www.freelancer.com/get/apstld?f=give&dl=https://www.freelancer.com/projects/sample"
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Proposal", url=url),
-         InlineKeyboardButton("🔗 Original", url=url)],
-        [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
-         InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
-    ])
-    await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-# ---------- Admin ----------
+from telegram.constants import ParseMode
+job_title = "Email Signature from Existing Logo"
+budget_min = 10.0
+budget_max = 30.0
+source = "PeoplePerHour"
+match_url = "https://www.peopleperhour.com/freelance-jobs?q=logo"
+description = "Please duplicate and make an editable version of my existing email signature based on the logo file"
+
+job_text = (
+    f"<b>{job_title}</b>\n"
+    f"  <b>Budget:</b> {budget_min:.1f}–{budget_max:.1f}\n"
+    f"  <b>Source:</b> {source}\n"
+    f"  <b>🔎 Match:</b> <a href=\\"{match_url}\\">logo</a>\n"
+    f"  <b>📝</b> {description}"
+)
+
+# For PPH we don't have affiliate wrap yet; send same URL for both buttons
+url = "https://www.peopleperhour.com/freelance-jobs/technology-programming/other/"
+kb = InlineKeyboardMarkup([
+    [InlineKeyboardButton("📄 Proposal", url=url),
+     InlineKeyboardButton("🔗 Original", url=url)],
+    [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+     InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
+])
+
+await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
         await update.message.reply_text("You are not an admin."); return

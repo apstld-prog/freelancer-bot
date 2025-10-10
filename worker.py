@@ -7,10 +7,9 @@ from config import (
 from utils_fx import load_fx_rates, to_usd
 from dedup import make_key, prefer_affiliate
 import platform_skywalker as sky
-import platform_careerjet as cj
-import platform_kariera as kr
 import platform_placeholders as ph
 import platform_freelancer as fr
+import platform_peopleperhour as pph
 from db_events import ensure_schema, log_platform_event
 
 # Ensure the events table exists at import time (safe no-op if already there)
@@ -38,22 +37,8 @@ def fetch_all(keywords_query: str = None) -> List[Dict]:
             i["affiliate"] = False
             out.append(i)
 
-    
-
-# Careerjet RSS (GR)
-if PLATFORMS.get("careerjet"):
-    for i in cj.fetch(CAREERJET_RSS):
-        i["affiliate"] = False
-        out.append(i)
-
-# Kariera RSS (if provided)
-if PLATFORMS.get("kariera"):
-    for i in kr.fetch(KARIERA_RSS):
-        i["affiliate"] = False
-        out.append(i)
-
     # Placeholders (currently return [])
-    if PLATFORMS.get("peopleperhour"): out += ph.fetch_peopleperhour()
+    if PLATFORMS.get("peopleperhour"): out += pph.fetch(query=keywords_query or None)
     if PLATFORMS.get("malt"): out += ph.fetch_malt()
     if PLATFORMS.get("workana"): out += ph.fetch_workana()
     if PLATFORMS.get("wripple"): out += ph.fetch_wripple()
