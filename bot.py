@@ -10,7 +10,7 @@ from telegram.ext import (
     ApplicationBuilder, Application,
     CommandHandler, CallbackQueryHandler,
     ContextTypes,
-    JobQueue, Job,
+    JobQueue
 )
 from sqlalchemy import text
 
@@ -136,7 +136,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await help_cmd(update, context)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Build help dynamically; hide admin section for non-admins
     lines = [
         "<b>Help / How it works</b>",
         "1) Add keywords with <code>/addkeyword python, telegram</code> (English or Greek).",
@@ -195,6 +194,18 @@ def _parse_kw_args(text: str) -> List[str]:
             seen.add(p); out.append(p)
     return out
 
+async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with get_session() as s:
+        user = get_or_create_user_by_tid(s, update.effective_user.id)
+    kws = list_keywords_safe(user.id)
+    kw_str = ", ".join(kws) if kws else "(none)"
+    await update.effective_chat.send_message(
+        f"<b>Your Settings</b>\n• <b>Keywords:</b> {kw_str}\n\nUsage: /addkeyword word1, word2.\nYou can also use the buttons below.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=settings_kb(),
+        disable_web_page_preview=True,
+    )
+
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.effective_message.text or ""
     raw = raw.partition(" ")[2]
@@ -243,7 +254,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     url = "https://www.peopleperhour.com/freelance-jobs/technology-programming/other/"
     payload = urllib.parse.quote_plus(f"{job_title}|{url}")
-    kb = InlineKeyboardMarkup([[ 
+    kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("📄 Proposal", url=url),
         InlineKeyboardButton("🔗 Original", url=url)
     ],[
@@ -350,7 +361,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id): 
+    if not is_admin_user(update.effective_user.id):
         await update.message.reply_text("You're not an admin."); 
         return
     stats = get_platform_stats(STATS_WINDOW_HOURS) or {}
@@ -362,7 +373,7 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def job_notify_trial_expiring(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc)
     in_24h = now + timedelta(hours=24)
-    in_25h = now + timedelta(hours=25)  # 1-hour window to avoid duplicates
+    in_25h = now + timedelta(hours=25)
     with get_session() as s:
         rows = s.execute(_t('''
             SELECT id, telegram_id, trial_end
@@ -387,7 +398,7 @@ async def job_notify_trial_expiring(context: ContextTypes.DEFAULT_TYPE):
 
 def _setup_schedules(app: Application):
     jq: JobQueue = app.job_queue
-    jq.run_repeating(job_notify_trial_expiring, interval=3600, first=30)  # every hour
+    jq.run_repeating(job_notify_trial_expiring, interval=3600, first=30)
 
 def build_application() -> Application:
     ensure_schema(); ensure_feed_events_schema(); ensure_saved_schema(); ensure_trial_notice_schema(); ensure_keyword_unique()
