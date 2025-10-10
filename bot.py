@@ -20,21 +20,25 @@ from db_events import ensure_feed_events_schema, get_platform_stats
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
 
-# Optional helpers
 try:
     from db import ensure_keyword_unique  # type: ignore
 except Exception:
     def ensure_keyword_unique():
         log.warning("ensure_keyword_unique() not found in db.py — skipping")
 
-# UI texts
+# UI texts fallback (English)
 try:
     from ui_texts import HELP_EN, help_footer, welcome_full
 except Exception:
-    HELP_EN = "<b>Help</b>\nUse /addkeyword to start receiving job alerts."
+    HELP_EN = (
+        "<b>Help / How it works</b>\n"
+        "1) Add keywords with <code>/addkeyword python, telegram</code> (English or Greek).\n"
+        "2) Check your settings with <code>/mysettings</code>.\n"
+        "3) Use <code>/selftest</code> to see a sample alert."
+    )
     def help_footer(h:int)->str: return f"\n\nStats window: {h}h"
     def welcome_full(trial_days: int = 10) -> str:
-        return f"<b>Welcome!</b> You have a {trial_days}-day free trial. Use /addkeyword to begin."
+        return f"<b>Welcome to Freelancer Alert Bot!</b> You have a {trial_days}-day free trial."
 
 def is_admin_user(tid: int) -> bool:
     try:
@@ -42,7 +46,6 @@ def is_admin_user(tid: int) -> bool:
     except Exception:
         return False
 
-# -------- Keyword helpers (schema-agnostic) --------
 from sqlalchemy import text as _t
 
 def _kwexpr() -> str:
@@ -65,7 +68,6 @@ def add_keywords_safe(user_id: int, values: List[str]):
                            {"u": user_id, "v": vv}).fetchone()
             if ex:
                 skipped.append(vv); continue
-            # FIX: set created_at to satisfy NOT NULL constraint
             s.execute(_t('INSERT INTO "keyword"(user_id, keyword, value, created_at) '
                          "VALUES (:u, :v, :v, NOW() AT TIME ZONE 'UTC')"),
                       {"u": user_id, "v": vv})
@@ -86,7 +88,6 @@ def clear_keywords_safe(user_id: int) -> int:
         if rc: s.commit()
     return int(rc or 0)
 
-# -------- UI helpers --------
 def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
     kb = [
         [InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
@@ -105,11 +106,12 @@ def welcome_text(expiry: Optional[datetime]) -> str:
     except Exception:
         return "<b>Welcome!</b>\nUse /addkeyword to add search keywords."
 
-# -------- Commands --------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
+            # Activate user and init trial
+            s.execute(_t("UPDATE \"user\" SET is_active=TRUE WHERE id=:id"), {"id": u.id})
             s.execute(_t("UPDATE \"user\" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE 'UTC') WHERE id=:id"), {"id": u.id})
             s.execute(_t("UPDATE \"user\" SET trial_end=COALESCE(trial_end, NOW() AT TIME ZONE 'UTC') + INTERVAL :days WHERE id=:id")
                       .bindparams(days=f"{TRIAL_DAYS} days"), {"id": u.id})
@@ -137,13 +139,33 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True,
     )
 
+async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with get_session() as s:
+        u = get_or_create_user_by_tid(s, update.effective_user.id)
+        row = s.execute(_t('SELECT is_active, trial_end, license_until FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
+    is_admin = "yes" if is_admin_user(update.effective_user.id) else "no"
+    is_active = "yes" if (row and row[0]) else "no"
+    trial_end = row[1] if row else None
+    lic_until = row[2] if row else None
+    kws = list_keywords_safe(u.id)
+    txt = (
+        "<b>Who am I</b>\n"
+        f"• Telegram ID: <code>{update.effective_user.id}</code>\n"
+        f"• Admin: <b>{is_admin}</b>\n"
+        f"• Active: <b>{is_active}</b>\n"
+        f"• Trial end: {trial_end or '-'}\n"
+        f"• License until: {lic_until or '-'}\n"
+        f"• Keywords: {', '.join(kws) if kws else '(none)'}"
+    )
+    await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML)
+
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         user = get_or_create_user_by_tid(s, update.effective_user.id)
     kws = list_keywords_safe(user.id)
     kw_str = ", ".join(kws) if kws else "(none)"
     await update.effective_chat.send_message(
-        f"<b>Your Settings</b>\n• <b>Keywords:</b> {kw_str}\n\nUsage: /addkeyword word1, word2 (English or Greek).",
+        f"<b>Your Settings</b>\n• <b>Keywords:</b> {kw_str}\n\nUsage: /addkeyword word1, word2.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -206,7 +228,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  <b>📝</b> {description}"
     )
     url = "https://www.peopleperhour.com/freelance-jobs/technology-programming/other/"
-    kb = InlineKeyboardMarkup([[
+    kb = InlineKeyboardMarkup([[ 
         InlineKeyboardButton("📄 Proposal", url=url),
         InlineKeyboardButton("🔗 Original", url=url)
     ],[
@@ -262,7 +284,7 @@ def build_application() -> Application:
     # Commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("whoami", help_cmd))
+    app.add_handler(CommandHandler("whoami", whoami_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app.add_handler(CommandHandler("addkw", addkeyword_cmd))
