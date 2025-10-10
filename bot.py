@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 import logging
 from datetime import datetime
@@ -33,7 +34,7 @@ except Exception:
     HELP_EN = "<b>Help</b>\nUse /addkeyword to start receiving job alerts."
     def help_footer(h:int)->str: return f"\n\nStats window: {h}h"
     def welcome_full(trial_days: int = 10) -> str:
-        return f"<b>Welcome!</b> You have a {trial_days}-day trial. Use /addkeyword to begin."
+        return f"<b>Welcome!</b> You have a {trial_days}-day free trial. Use /addkeyword to begin."
 
 def is_admin_user(tid: int) -> bool:
     try:
@@ -64,8 +65,10 @@ def add_keywords_safe(user_id: int, values: List[str]):
                            {"u": user_id, "v": vv}).fetchone()
             if ex:
                 skipped.append(vv); continue
-            s.execute(_t('INSERT INTO "keyword"(user_id, keyword, value) VALUES (:u, :v, :v)'),
-                     {"u": user_id, "v": vv})
+            # FIX: set created_at to satisfy NOT NULL constraint
+            s.execute(_t('INSERT INTO "keyword"(user_id, keyword, value, created_at) '
+                         "VALUES (:u, :v, :v, NOW() AT TIME ZONE 'UTC')"),
+                      {"u": user_id, "v": vv})
             added.append(vv)
         if added: s.commit()
     return len(added), added, skipped
@@ -110,7 +113,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             s.execute(_t("UPDATE \"user\" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE 'UTC') WHERE id=:id"), {"id": u.id})
             s.execute(_t("UPDATE \"user\" SET trial_end=COALESCE(trial_end, NOW() AT TIME ZONE 'UTC') + INTERVAL :days WHERE id=:id")
                       .bindparams(days=f"{TRIAL_DAYS} days"), {"id": u.id})
-            expiry = s.execute(_t('SELECT COALESCE(license_until, trial_end) FROM \"user\" WHERE id=:id'), {"id": u.id}).scalar()
+            expiry = s.execute(_t('SELECT COALESCE(license_until, trial_end) FROM "user" WHERE id=:id'), {"id": u.id}).scalar()
             s.commit()
         except Exception:
             logging.getLogger("bot").exception("start_cmd: trial init failed")
@@ -140,7 +143,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kws = list_keywords_safe(user.id)
     kw_str = ", ".join(kws) if kws else "(none)"
     await update.effective_chat.send_message(
-        f"<b>My settings</b>\n• <b>Keywords:</b> {kw_str}\n\nΧρήση: /addkeyword λέξη1, λέξη2 (ελληνικά/αγγλικά).",
+        f"<b>Your Settings</b>\n• <b>Keywords:</b> {kw_str}\n\nUsage: /addkeyword word1, word2 (English or Greek).",
         parse_mode=ParseMode.HTML,
     )
 
@@ -161,32 +164,32 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = raw.partition(" ")[2]
     kws = _parse_kw_args(raw)
     if not kws:
-        await update.message.reply_text("Χρήση: /addkeyword λέξη1, λέξη2")
+        await update.message.reply_text("Usage: /addkeyword word1, word2")
         return
     with get_session() as s:
         user = get_or_create_user_by_tid(s, update.effective_user.id)
     n, added, skipped = add_keywords_safe(user.id, kws)
-    msg = f"✅ Προστέθηκαν: {', '.join(added)}" if added else "—"
+    msg = f"✅ Added: {', '.join(added)}" if added else "—"
     if skipped:
-        msg += f"\n↪️ Ήδη υπήρχαν: {', '.join(skipped)}"
+        msg += f"\n↪️ Already existed: {', '.join(skipped)}"
     await update.message.reply_text(msg)
 
 async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.effective_message.text or ""
     arg = raw.partition(" ")[2].strip()
     if not arg:
-        await update.message.reply_text("Χρήση: /delkeyword λέξη")
+        await update.message.reply_text("Usage: /delkeyword word")
         return
     with get_session() as s:
         user = get_or_create_user_by_tid(s, update.effective_user.id)
     ok = delete_keyword_safe(user.id, arg)
-    await update.message.reply_text("Διαγράφηκε." if ok else "Δεν βρέθηκε.")
+    await update.message.reply_text("Deleted." if ok else "Not found.")
 
 async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         user = get_or_create_user_by_tid(s, update.effective_user.id)
     n = clear_keywords_safe(user.id)
-    await update.message.reply_text(f"Καθαρίστηκαν {n} keywords.")
+    await update.message.reply_text(f"Cleared {n} keywords.")
 
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_title = "Email Signature from Existing Logo"
@@ -203,7 +206,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  <b>📝</b> {description}"
     )
     url = "https://www.peopleperhour.com/freelance-jobs/technology-programming/other/"
-    kb = InlineKeyboardMarkup([[ 
+    kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("📄 Proposal", url=url),
         InlineKeyboardButton("🔗 Original", url=url)
     ],[
@@ -216,26 +219,26 @@ async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; data = q.data if q else ""
     await q.answer()
     if data == "act:addkw":
-        await q.message.reply_text("Στείλε: /addkeyword λέξη1, λέξη2")
+        await q.message.reply_text("Send: /addkeyword word1, word2")
     elif data == "act:settings":
         await mysettings_cmd(update, context)
     elif data == "act:help":
         await help_cmd(update, context)
     elif data == "act:saved":
-        await q.message.reply_text("Δεν έχεις αποθηκεύσει αγγελίες ακόμη.")
+        await q.message.reply_text("You haven't saved any jobs yet.")
     elif data == "act:contact":
-        await q.message.reply_text("Επικοινωνία: @your_username")
+        await q.message.reply_text("Contact: @your_username")
     elif data == "act:admin":
         if is_admin_user(update.effective_user.id):
             await q.message.reply_text("Admin: /users, /feedstatus")
         else:
-            await q.message.reply_text("Δεν είσαι admin.")
+            await q.message.reply_text("You're not an admin.")
     else:
-        await q.message.reply_text("Άγνωστη ενέργεια.")
+        await q.message.reply_text("Unknown action.")
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
-        await update.message.reply_text("Δεν είσαι admin."); return
+        await update.message.reply_text("You're not an admin."); return
     with get_session() as s:
         rows = s.execute(text('SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200')).fetchall()
     lines = ["<b>Users</b>"]
@@ -246,7 +249,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id): 
-        await update.message.reply_text("Δεν είσαι admin."); 
+        await update.message.reply_text("You're not an admin."); 
         return
     stats = get_platform_stats(STATS_WINDOW_HOURS) or {}
     if not stats:
@@ -259,7 +262,7 @@ def build_application() -> Application:
     # Commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("whoami", help_cmd))  # keep simple
+    app.add_handler(CommandHandler("whoami", help_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app.add_handler(CommandHandler("addkw", addkeyword_cmd))
@@ -267,7 +270,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
-    # Admin command handlers (FIX)
+    # Admin
     app.add_handler(CommandHandler("users", users_cmd))
     app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
     # Buttons
