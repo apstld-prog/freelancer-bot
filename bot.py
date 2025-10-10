@@ -1,4 +1,4 @@
-# bot.py — fully compatible, keeps your UI; safe fallbacks if some db helpers are missing
+# bot.py — full compat v2: keyword fallbacks write BOTH "keyword" and "value" to satisfy NOT NULL schemas
 from __future__ import annotations
 
 import logging
@@ -17,42 +17,29 @@ from telegram.ext import (
 from sqlalchemy import text
 
 # Project modules
-from config import (
-    BOT_TOKEN,
-    ADMIN_IDS,
-    STATS_WINDOW_HOURS,
-    TRIAL_DAYS,
-)
-from db import (
-    get_session,
-    ensure_schema,
-    get_or_create_user_by_tid,
-)
+from config import BOT_TOKEN, ADMIN_IDS, STATS_WINDOW_HOURS, TRIAL_DAYS
+from db import get_session, ensure_schema, get_or_create_user_by_tid
 from db_events import ensure_feed_events_schema, get_platform_stats
 
-# Try to import ensure_keyword_unique; if missing, use no-op
+# Optional db helpers
 try:
     from db import ensure_keyword_unique  # type: ignore
 except Exception:
     def ensure_keyword_unique():
         logging.getLogger("bot").warning("ensure_keyword_unique() not found in db.py — skipping")
 
-# Optional helper imports (provide fallbacks if missing)
 try:
     from db import list_keywords as _list_keywords  # type: ignore
 except Exception:
     _list_keywords = None
-
 try:
     from db import add_keywords as _add_keywords  # type: ignore
 except Exception:
     _add_keywords = None
-
 try:
     from db import delete_keyword as _delete_keyword  # type: ignore
 except Exception:
     _delete_keyword = None
-
 try:
     from db import clear_keywords as _clear_keywords  # type: ignore
 except Exception:
@@ -70,17 +57,23 @@ except Exception:
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
 
-# Local admin check
 def is_admin_user(telegram_id: int) -> bool:
     try:
         return int(telegram_id) in ADMIN_IDS
     except Exception:
         return False
 
-# ---------------- Local SQL fallbacks for keyword helpers ----------------
+# ---------------- Keyword helpers (robust fallbacks) ----------------
+def _select_keyword_expr() -> str:
+    # Prefer COALESCE(keyword, value) to be robust across schemas
+    return 'COALESCE(keyword, value)'
+
 def list_keywords_fallback(user_id: int) -> List[str]:
     with get_session() as s:
-        rows = s.execute(text('SELECT value FROM "keyword" WHERE user_id=:uid ORDER BY id ASC'), {"uid": user_id}).fetchall()
+        rows = s.execute(
+            text(f'SELECT {_select_keyword_expr()} FROM "keyword" WHERE user_id=:uid ORDER BY id ASC'),
+            {"uid": user_id}
+        ).fetchall()
         return [r[0] for r in rows if r and r[0]]
 
 def add_keywords_fallback(s, user_id: int, values: List[str]) -> int:
@@ -89,19 +82,28 @@ def add_keywords_fallback(s, user_id: int, values: List[str]) -> int:
         v_norm = (v or "").strip()
         if not v_norm:
             continue
-        # check existence
-        exists = s.execute(text('SELECT 1 FROM "keyword" WHERE user_id=:uid AND value=:v LIMIT 1'),
-                           {"uid": user_id, "v": v_norm}).fetchone()
+        # exists check on either column
+        exists = s.execute(
+            text('SELECT 1 FROM "keyword" WHERE user_id=:uid AND (keyword=:v OR value=:v) LIMIT 1'),
+            {"uid": user_id, "v": v_norm}
+        ).fetchone()
         if exists:
             continue
-        s.execute(text('INSERT INTO "keyword"(user_id, value) VALUES (:uid, :v)'), {"uid": user_id, "v": v_norm})
+        # insert to satisfy schemas with NOT NULL "keyword" and/or "value"
+        s.execute(
+            text('INSERT INTO "keyword"(user_id, keyword, value) VALUES (:uid, :v, :v)'),
+            {"uid": user_id, "v": v_norm}
+        )
         inserted += 1
     if inserted:
         s.commit()
     return inserted
 
 def delete_keyword_fallback(s, user_id: int, value: str) -> bool:
-    res = s.execute(text('DELETE FROM "keyword" WHERE user_id=:uid AND value=:v'), {"uid": user_id, "v": value}).rowcount
+    res = s.execute(
+        text('DELETE FROM "keyword" WHERE user_id=:uid AND (keyword=:v OR value=:v)'),
+        {"uid": user_id, "v": value}
+    ).rowcount
     if res:
         s.commit()
     return res > 0
@@ -112,7 +114,6 @@ def clear_keywords_fallback(s, user_id: int) -> int:
         s.commit()
     return int(res or 0)
 
-# Choose helpers (db-provided or fallbacks)
 def list_keywords_safe(user_id: int) -> List[str]:
     try:
         if _list_keywords:
