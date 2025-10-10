@@ -74,3 +74,25 @@ PY
 
 
 
+
+
+## Deploy on Render (single service)
+1. Create a Web Service → Build command: `pip install -r requirements.txt` → Start command: `./start.sh`.
+
+2. Set Environment Variables:
+   - `BOT_TOKEN` (or `TELEGRAM_TOKEN`) — the bot token from @BotFather
+
+   - `DATABASE_URL` — e.g. `postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME`
+
+   - `WEBHOOK_SECRET` — e.g. `hook-secret-777`
+
+   - `WEBHOOK_BASE_URL` — your Render URL, e.g. `https://your-service.onrender.com`
+
+   - Optional: `TRIAL_DAYS`, `ADMIN_IDS`, `STATS_WINDOW_HOURS`, `AFFILIATE_PREFIX`
+
+3. Ensure port is exposed via `start.sh` (Uvicorn listens on `$PORT`).
+
+4. After deploy, check Logs for “Webhook set to …/webhook/SECRET” and “✅ Bot is ready”.
+
+5. Test by sending `/start` to the bot.
+
