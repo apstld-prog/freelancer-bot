@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 import logging
 from datetime import datetime
@@ -52,7 +53,7 @@ def list_keywords_safe(user_id: int) -> List[str]:
         rows = s.execute(_t(f'SELECT {_kwexpr()} FROM "keyword" WHERE user_id=:u ORDER BY id ASC'), {"u": user_id}).fetchall()
         return [r[0] for r in rows if r and r[0]]
 
-def add_keywords_safe(user_id: int, values: List[str]) -> (int, List[str], List[str]):
+def add_keywords_safe(user_id: int, values: List[str]):
     added, skipped = [], []
     if not values: return 0, added, skipped
     with get_session() as s:
@@ -63,28 +64,24 @@ def add_keywords_safe(user_id: int, values: List[str]) -> (int, List[str], List[
             ex = s.execute(_t('SELECT 1 FROM "keyword" WHERE user_id=:u AND (keyword=:v OR value=:v) LIMIT 1'),
                            {"u": user_id, "v": vv}).fetchone()
             if ex:
-                skipped.append(vv)
-                continue
+                skipped.append(vv); continue
             s.execute(_t('INSERT INTO "keyword"(user_id, keyword, value) VALUES (:u, :v, :v)'),
                      {"u": user_id, "v": vv})
             added.append(vv)
-        if added:
-            s.commit()
+        if added: s.commit()
     return len(added), added, skipped
 
 def delete_keyword_safe(user_id: int, value: str) -> bool:
     with get_session() as s:
         rc = s.execute(_t('DELETE FROM "keyword" WHERE user_id=:u AND (keyword=:v OR value=:v)'),
                        {"u": user_id, "v": value}).rowcount
-        if rc:
-            s.commit()
+        if rc: s.commit()
     return rc > 0
 
 def clear_keywords_safe(user_id: int) -> int:
     with get_session() as s:
         rc = s.execute(_t('DELETE FROM "keyword" WHERE user_id=:u'), {"u": user_id}).rowcount
-        if rc:
-            s.commit()
+        if rc: s.commit()
     return int(rc or 0)
 
 # -------- UI helpers --------
@@ -111,7 +108,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
-            # FIXED SQL syntax
             s.execute(_t("UPDATE \"user\" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE 'UTC') WHERE id=:id"), {"id": u.id})
             s.execute(_t("UPDATE \"user\" SET trial_end=COALESCE(trial_end, NOW() AT TIME ZONE 'UTC') + INTERVAL :days WHERE id=:id")
                       .bindparams(days=f"{TRIAL_DAYS} days"), {"id": u.id})
@@ -150,8 +146,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 def _parse_kw_args(text: str) -> List[str]:
-    if not text:
-        return []
+    if not text: return []
     txt = text.replace(";", ",").replace("  ", " ")
     parts = [p.strip() for p in txt.split(",") if p.strip()]
     if not parts:
@@ -159,8 +154,7 @@ def _parse_kw_args(text: str) -> List[str]:
     seen, out = set(), []
     for p in parts:
         if p not in seen:
-            seen.add(p)
-            out.append(p)
+            seen.add(p); out.append(p)
     return out
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -210,7 +204,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  <b>📝</b> {description}"
     )
     url = "https://www.peopleperhour.com/freelance-jobs/technology-programming/other/"
-    kb = InlineKeyboardMarkup([[ 
+    kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("📄 Proposal", url=url),
         InlineKeyboardButton("🔗 Original", url=url)
     ],[
@@ -252,7 +246,9 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id): return
+    if not is_admin_user(update.effective_user.id): 
+        await update.message.reply_text("Δεν είσαι admin."); 
+        return
     stats = get_platform_stats(STATS_WINDOW_HOURS) or {}
     if not stats:
         await update.effective_chat.send_message(f"No events in the last {STATS_WINDOW_HOURS} hours."); return
@@ -264,6 +260,7 @@ def build_application() -> Application:
     # Commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("whoami", help_cmd))  # keep simple
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app.add_handler(CommandHandler("addkw", addkeyword_cmd))
@@ -271,5 +268,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
+    # Admin command handlers (FIX)
+    app.add_handler(CommandHandler("users", users_cmd))
+    app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
+    # Buttons
     app.add_handler(CallbackQueryHandler(cb_mainmenu))
     return app
