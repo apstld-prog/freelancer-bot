@@ -1,6 +1,5 @@
-# bot.py — EN-only, keywords, admin panel, selftest, saved jobs
-import os, logging, asyncio, re
-from types import SimpleNamespace
+# bot.py — EN-only UI, USD budget, time-ago, save/delete, saved list as full cards
+import os, logging, asyncio, json
 from datetime import datetime, timedelta, timezone
 from typing import List, Set, Optional
 
@@ -17,7 +16,6 @@ except Exception:
     JobQueue = None  # type: ignore
 
 from sqlalchemy import text
-
 from db import ensure_schema, get_session, get_or_create_user_by_tid
 from config import ADMIN_IDS, TRIAL_DAYS, STATS_WINDOW_HOURS
 from db_events import ensure_feed_events_schema, get_platform_stats
@@ -32,6 +30,46 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
+
+# ---------------- FX (EUR/GBP/... -> USD) ----------------
+DEFAULT_RATES = {
+    "USD": 1.0, "EUR": 1.07, "GBP": 1.24, "AUD": 0.65, "CAD": 0.73,
+    "INR": 0.012, "BRL": 0.18, "TRY": 0.031,
+}
+def fx_rates():
+    raw = os.getenv("FX_RATES_JSON", "")
+    if not raw:
+        return DEFAULT_RATES
+    try:
+        data = json.loads(raw)
+        return {k.upper(): float(v) for k, v in data.items()}
+    except Exception:
+        return DEFAULT_RATES
+
+def to_usd(amount: float | None, currency: str | None) -> tuple[str, bool]:
+    if amount is None or not currency:
+        return ("", False)
+    c = currency.upper().strip()
+    rate = fx_rates().get(c)
+    if rate is None:
+        return (f"{amount:g} {c}", False)
+    usd = round(amount * rate, 2)
+    return (f"{usd:g} USD", True)
+
+def time_ago(dt: datetime | None) -> str:
+    if not isinstance(dt, datetime):
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - dt
+    s = int(delta.total_seconds())
+    if s < 60:   return f"{s}s ago"
+    m = s // 60
+    if m < 60:   return f"{m}m ago"
+    h = m // 60
+    if h < 24:   return f"{h}h ago"
+    d = h // 24
+    return f"{d}d ago"
 
 # ---------- Admin helpers ----------
 def get_db_admin_ids() -> Set[int]:
@@ -56,15 +94,11 @@ def ensure_saved_schema():
             CREATE TABLE IF NOT EXISTS saved_job (
                 id BIGSERIAL PRIMARY KEY,
                 user_tid BIGINT NOT NULL,
-                url TEXT,
-                card_html TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                event_id BIGINT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE (user_tid, event_id)
             )
         """))
-        # για συμβατότητα με παλιότερο πίνακα (αν υπήρχε)
-        s.execute(text("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS user_tid BIGINT"))
-        s.execute(text("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
-        s.execute(text("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS card_html TEXT"))
         s.commit()
 
 # ---------- UI ----------
@@ -134,7 +168,31 @@ def settings_text(keywords: List[str], countries: str|None, proposal_template: s
         "<i>For extension, contact the admin.</i>"
     )
 
-# ---------- Contact helpers ----------
+# ---------- Card rendering ----------
+def render_card_from_event(ev: dict, matched: List[str]) -> str:
+    title = ev.get("title") or "(no title)"
+    platform = ev.get("platform") or "Freelancer"
+    budget = ev.get("budget_amount")
+    bcur = ev.get("budget_currency")
+    created = ev.get("created_at")
+
+    budget_str, _ = to_usd(budget, bcur)
+    budget_line = f"<b>Budget:</b> {budget_str}\n" if budget_str else ""
+    matched_line = ", ".join(matched) if matched else ""
+    desc = (ev.get("description") or "").strip().replace("\n", " ")
+    if len(desc) > 140: desc = desc[:139].rstrip() + "…"
+    ago = time_ago(created)
+    ago_line = f"\n<i>{ago}</i>" if ago else ""
+
+    return (
+        f"<b>{title}</b>\n"
+        f"{budget_line}"
+        f"<b>Source:</b> {platform}\n"
+        f"<b>Match:</b> {matched_line}\n"
+        f"✏️ {desc}{ago_line}"
+    ).strip()
+
+# ---------- Contact helpers (αμετάβλητα) ----------
 def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 Reply", callback_data=f"adm:reply:{user_id}"),
@@ -165,7 +223,7 @@ def unpair(app: Application, admin_id: Optional[int]=None, user_id: Optional[int
         aid = pairs["user_to_admin"].pop(user_id, None)
         if aid is not None: pairs["admin_to_user"].pop(aid, None)
 
-# ---------- Commands ----------
+# ---------- Commands (όπως πριν, συντομευμένα) ----------
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     role = "🧩 Admin" if is_admin_user(tid) else "👤 User"
@@ -201,21 +259,40 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         expiry = s.execute(text('SELECT COALESCE(license_until, trial_end) FROM "user" WHERE id=:id'), {"id": u.id}).scalar()
         s.commit()
     await update.effective_chat.send_message(
-        welcome_text(expiry if isinstance(expiry, datetime) else None),
+        ("<b>👋 Welcome to Freelancer Alert Bot!</b>\n\n"
+         "🎁 You have a <b>10-day free trial</b>.\n"
+         "The bot finds matching freelance jobs from top platforms and sends instant alerts.\n"
+         f"Free trial ends: {expiry.strftime('%Y-%m-%d %H:%M UTC') if isinstance(expiry, datetime) else '—'}\n\n"
+         "Use <code>/help</code> for instructions."),
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
     )
-    await update.effective_chat.send_message(HELP_EN + help_footer(STATS_WINDOW_HOURS),
-                                             parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         kws = list_keywords(u.id)
         row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
-    await update.message.reply_text(
-        settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6])),
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    def b(v: bool) -> str: return "✅" if v else "❌"
+    k = ", ".join(kws) if kws else "(none)"
+    c = row[0] if row[0] else "ALL"
+    pt = "(none)" if not row[1] else "(saved)"
+    ts = row[2].isoformat().replace("+00:00","Z") if row[2] else "—"
+    te = row[3].isoformat().replace("+00:00","Z") if row[3] else "—"
+    lic = "None" if not row[4] else row[4].isoformat().replace("+00:00","Z")
+    txt = (
+        "<b>🛠 Your Settings</b>\n"
+        f"• <b>Keywords:</b> {k}\n"
+        f"• <b>Countries:</b> {c}\n"
+        f"• <b>Proposal template:</b> {pt}\n\n"
+        f"<b>●</b> Start date: {ts}\n"
+        f"<b>●</b> Trial ends: {te} UTC\n"
+        f"<b>🔑</b> License until: {lic}\n"
+        f"<b>✅ Active:</b> {b(bool(row[5]))}    <b>⛔ Blocked:</b> {b(bool(row[6]))}\n\n"
+        "<b>🛰 Platforms monitored:</b> Global & GR boards.\n"
+        "<i>For extension, contact the admin.</i>"
+    )
+    await update.message.reply_text(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 def _parse_keywords(raw: str) -> List[str]:
     parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
@@ -264,21 +341,25 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                              parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    job_text = (
-        "<b>Email Signature from Existing Logo</b>\n"
-        "<b>Budget:</b> 10.0–30.0 USD\n"
-        "<b>Source:</b> Freelancer\n"
-        "<b>Match:</b> logo\n"
-        "✏️ Please create an editable version of the email signature based on the provided logo.\n"
-    )
-    url = "https://www.freelancer.com/get/apstld?f=give&dl=https://www.freelancer.com/projects/sample"
+    # demo από job_event-like dict
+    ev = {
+        "id": 0,
+        "platform": "Freelancer",
+        "title": "Email Signature from Existing Logo",
+        "description": "Please create an editable version of the email signature based on the provided logo.",
+        "original_url": "https://www.freelancer.com/projects/sample",
+        "affiliate_url": "https://www.freelancer.com/get/apstld?f=give&dl=https://www.freelancer.com/projects/sample",
+        "budget_amount": 20.0, "budget_currency": "USD",
+        "created_at": datetime.now(timezone.utc) - timedelta(minutes=1),
+    }
+    txt = render_card_from_event(ev, matched=["logo"])
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Proposal", url=url),
-         InlineKeyboardButton("🔗 Original", url=url)],
-        [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+        [InlineKeyboardButton("📄 Proposal", url=ev["affiliate_url"]),
+         InlineKeyboardButton("🔗 Original", url=ev["affiliate_url"])],
+        [InlineKeyboardButton("⭐ Save", callback_data=f"job:save:{ev['id']}"),
          InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
     ])
-    await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ---------- Admin ----------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -319,37 +400,6 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try: await context.bot.send_message(chat_id=tid, text=f"🔑 Your access is extended until {until.strftime('%Y-%m-%d %H:%M UTC')}.")
     except Exception: pass
 
-async def block_cmd(update: Update, Context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id): return
-    parts = (update.message.text or "").split()
-    if len(parts) < 2:
-        await update.effective_chat.send_message("Usage: /block <id>"); return
-    tid = int(parts[1])
-    with get_session() as s:
-        s.execute(text('UPDATE "user" SET is_blocked=TRUE WHERE telegram_id=:tid'), {"tid": tid}); s.commit()
-    await update.effective_chat.send_message(f"⛔ Blocked {tid}.")
-
-async def unblock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id): return
-    parts = (update.message.text or "").split()
-    if len(parts) < 2:
-        await update.effective_chat.send_message("Usage: /unblock <id>"); return
-    tid = int(parts[1])
-    with get_session() as s:
-        s.execute(text('UPDATE "user" SET is_blocked=FALSE WHERE telegram_id=:tid'), {"tid": tid}); s.commit()
-    await update.effective_chat.send_message(f"✅ Unblocked {tid}.")
-
-async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id): return
-    if not context.args: await update.effective_chat.send_message("Usage: /broadcast <text>"); return
-    txt = " ".join(context.args)
-    with get_session() as s:
-        ids = [r[0] for r in s.execute(text('SELECT telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()]
-    for tid in ids:
-        try: await context.bot.send_message(chat_id=tid, text=txt, parse_mode=ParseMode.HTML)
-        except Exception: pass
-    await update.effective_chat.send_message(f"📣 Broadcast sent to {len(ids)} users.")
-
 # ---------- Callbacks ----------
 async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; data = (q.data or "").strip()
@@ -363,35 +413,71 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             u = get_or_create_user_by_tid(s, q.from_user.id)
             kws = list_keywords(u.id)
             row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
-        txt = settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6]))
+        def b(v: bool) -> str: return "✅" if v else "❌"
+        k = ", ".join(kws) if kws else "(none)"
+        c = row[0] if row[0] else "ALL"
+        pt = "(none)" if not row[1] else "(saved)"
+        ts = row[2].isoformat().replace("+00:00","Z") if row[2] else "—"
+        te = row[3].isoformat().replace("+00:00","Z") if row[3] else "—"
+        lic = "None" if not row[4] else row[4].isoformat().replace("+00:00","Z")
+        txt = (
+            "<b>🛠 Your Settings</b>\n"
+            f"• <b>Keywords:</b> {k}\n"
+            f"• <b>Countries:</b> {c}\n"
+            f"• <b>Proposal template:</b> {pt}\n\n"
+            f"<b>●</b> Start date: {ts}\n"
+            f"<b>●</b> Trial ends: {te} UTC\n"
+            f"<b>🔑</b> License until: {lic}\n"
+            f"<b>✅ Active:</b> {b(bool(row[5]))}    <b>⛔ Blocked:</b> {b(bool(row[6]))}\n\n"
+            "<b>🛰 Platforms monitored:</b> Global & GR boards.\n"
+            "<i>For extension, contact the admin.</i>"
+        )
         await q.message.reply_text(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:help":
         await q.message.reply_text(HELP_EN + help_footer(STATS_WINDOW_HOURS),
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
         ensure_saved_schema()
-        # δείξε τις τελευταίες 10 αποθηκευμένες ως «κάρτες»
+        # Πάρε τις αποθηκευμένες του χρήστη με join στο job_event
         with get_session() as s:
             rows = s.execute(text("""
-                SELECT card_html, url FROM saved_job
-                WHERE user_tid=:tid
-                ORDER BY created_at DESC
+                SELECT je.id, je.platform, je.title, je.description, je.original_url, je.affiliate_url,
+                       je.budget_amount, je.budget_currency, je.created_at
+                FROM saved_job sj
+                JOIN job_event je ON je.id = sj.event_id
+                WHERE sj.user_tid = :tid
+                ORDER BY sj.created_at DESC
                 LIMIT 10
             """), {"tid": q.from_user.id}).fetchall()
         if not rows:
             await q.message.reply_text("No saved jobs yet."); await q.answer(); return
-        for card_html, url in rows:
+        for r in rows:
+            ev = {
+                "id": r[0], "platform": r[1], "title": r[2], "description": r[3] or "",
+                "original_url": r[4], "affiliate_url": r[5],
+                "budget_amount": r[6], "budget_currency": r[7], "created_at": r[8],
+            }
+            txt = render_card_from_event(ev, matched=[])
+            url = ev["affiliate_url"] or ev["original_url"]
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📄 Proposal", url=url),
                  InlineKeyboardButton("🔗 Original", url=url)],
-                [InlineKeyboardButton("🗑️ Delete", callback_data="saved:delete")]  # προαιρετικό
+                [InlineKeyboardButton("🗑️ Delete", callback_data=f"saved:delete:{ev['id']}")]
             ])
-            try:
-                await q.message.chat.send_message(card_html, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
-            except Exception:
-                # fallback ως απλό κείμενο
-                await q.message.chat.send_message(card_html, disable_web_page_preview=True)
+            await q.message.chat.send_message(txt, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
         await q.answer(); return
+    if data.startswith("saved:delete:"):
+        try:
+            _, _, ev_id_str = data.split(":")
+            ev_id = int(ev_id_str)
+        except Exception:
+            return await q.answer()
+        with get_session() as s:
+            s.execute(text("DELETE FROM saved_job WHERE user_tid=:tid AND event_id=:eid"),
+                      {"tid": q.from_user.id, "eid": ev_id}); s.commit()
+        try: await q.message.delete()
+        except Exception: pass
+        return await q.answer("Removed from Saved")
     if data == "act:admin":
         if not is_admin_user(q.from_user.id):
             await q.answer("Not allowed", show_alert=True); return
@@ -438,49 +524,46 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Save/Delete on job cards:
-    - Save: insert (user_tid, url, card_html) then delete message
-    - Delete: delete message
-    """
+    """Save/Delete on job cards — Save by event_id, then delete message immediately."""
     q = update.callback_query
     data = q.data or ""
 
-    # URL = πρώτο κουμπί
-    url = None
-    try:
-        url = q.message.reply_markup.inline_keyboard[0][0].url
-    except Exception:
-        url = None
-
-    if data == "job:save":
+    # job:save:<event_id>
+    if data.startswith("job:save:"):
+        try:
+            _, _, id_str = data.split(":")
+            ev_id = int(id_str)
+        except Exception:
+            return await q.answer("Save error")
         ensure_saved_schema()
-        card_html = q.message.text_html or q.message.text or ""
         with get_session() as s:
             s.execute(text("""
-                INSERT INTO saved_job (user_tid, url, card_html)
-                VALUES (:tid, :url, :html)
-            """), {"tid": q.from_user.id, "url": url or "", "html": card_html})
+                INSERT INTO saved_job (user_tid, event_id)
+                VALUES (:tid, :eid)
+                ON CONFLICT (user_tid, event_id) DO NOTHING
+            """), {"tid": q.from_user.id, "eid": ev_id})
             s.commit()
-        # σβήσε την κάρτα
-        try:
-            await q.message.delete()
-        except Exception:
-            # αν δεν μπορεί να σβηστεί, κάνε edit
-            try: await q.message.edit_text("⭐ Saved to your list.", parse_mode=ParseMode.HTML)
-            except Exception: pass
-        await q.answer("Saved ⭐")
-        return
+        try: await q.message.delete()
+        except Exception: pass
+        return await q.answer("Saved ⭐")
 
     if data == "job:delete":
         try: await q.message.delete()
         except Exception: pass
-        await q.answer("Deleted 🗑")
-        return
+        return await q.answer("Deleted 🗑")
 
     await q.answer()
 
-# ---------- Router (continuous admin-user chat) ----------
+# ---------- Router (συνεχές chat admin<->user, αμετάβλητο) ----------
+def get_paired_admin(app: Application, user_id: int) -> Optional[int]:
+    return app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})["user_to_admin"].get(user_id)
+def get_paired_user(app: Application, admin_id: int) -> Optional[int]:
+    return app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})["admin_to_user"].get(admin_id)
+def pair_admin_user(app: Application, admin_id: int, user_id: int) -> None:
+    pairs = app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})
+    pairs["user_to_admin"][user_id] = admin_id
+    pairs["admin_to_user"][admin_id] = user_id
+
 async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text or update.message.text.startswith("/"):
         return
@@ -488,7 +571,6 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
     sender_id = update.effective_user.id
     app = context.application
 
-    # Admin replying (paired)
     if is_admin_user(sender_id):
         paired_user = get_paired_user(app, sender_id)
         if paired_user:
@@ -496,29 +578,33 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
             except Exception: pass
             return
 
-    # User paired
     paired_admin = get_paired_admin(app, sender_id)
     if paired_admin:
         try:
             await context.bot.send_message(chat_id=paired_admin,
                                            text=f"✉️ From {sender_id}:\n\n{text_msg}",
-                                           reply_markup=admin_contact_kb(sender_id))
+                                           reply_markup=InlineKeyboardMarkup([
+                                               [InlineKeyboardButton("💬 Reply", callback_data=f"adm:reply:{sender_id}"),
+                                                InlineKeyboardButton("❌ Decline", callback_data=f"adm:decline:{sender_id}")]
+                                           ]))
         except Exception: pass
         return
 
-    # First contact -> to all admins
     for aid in all_admin_ids():
         try:
             await context.bot.send_message(
                 chat_id=aid,
                 text=f"✉️ <b>New message from user</b>\nID: <code>{sender_id}</code>\n\n{text_msg}",
                 parse_mode=ParseMode.HTML,
-                reply_markup=admin_contact_kb(sender_id),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💬 Reply", callback_data=f"adm:reply:{sender_id}"),
+                     InlineKeyboardButton("❌ Decline", callback_data=f"adm:decline:{sender_id}")]
+                ]),
             )
         except Exception: pass
     await update.message.reply_text("Thanks! Your message was forwarded to the admin 👌")
 
-# ---------- Expiry reminders ----------
+# ---------- Expiry reminders (όπως πριν) ----------
 async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc); soon = now + timedelta(hours=24)
     with get_session() as s:
@@ -536,8 +622,7 @@ async def _background_expiry_loop(app: Application):
     await asyncio.sleep(5)
     while True:
         try:
-            ctx = SimpleNamespace(bot=app.bot)
-            await notify_expiring_job(ctx)  # type: ignore[arg-type]
+            await notify_expiring_job(type("Ctx", (), {"bot": app.bot})())
         except Exception as e:
             log.exception("expiry loop error: %s", e)
         await asyncio.sleep(3600)
@@ -560,14 +645,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
-    app.add_handler(CommandHandler("saved", lambda u,c: u.effective_chat.send_message("Use the 'Saved' button from the menu.")))  # hint
 
     # admin
     app.add_handler(CommandHandler("users", users_cmd))
     app.add_handler(CommandHandler("grant", grant_cmd))
-    app.add_handler(CommandHandler("block", block_cmd))
-    app.add_handler(CommandHandler("unblock", unblock_cmd))
-    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
     app.add_handler(CommandHandler("feetstatus", feedstatus_cmd))
 
@@ -575,12 +656,12 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:(addkw|settings|help|saved|contact|admin)$"))
     app.add_handler(CallbackQueryHandler(kw_clear_confirm_cb, pattern=r"^kw:clear:(yes|no)$"))
     app.add_handler(CallbackQueryHandler(admin_action_cb, pattern=r"^adm:(reply|decline|grant):"))
-    app.add_handler(CallbackQueryHandler(job_action_cb, pattern=r"^job:(save|delete)$"))
+    app.add_handler(CallbackQueryHandler(job_action_cb, pattern=r"^job:(save|delete)(:\d+)?$"))
 
-    # text router (continuous chat)
+    # text router
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, incoming_message_router))
 
-    # scheduler (fallback loop if no PTB job-queue extra)
+    # scheduler
     try:
         if JobQueue is not None:
             jq = app.job_queue or JobQueue()
@@ -590,10 +671,6 @@ def build_application() -> Application:
         else:
             raise RuntimeError("no jobqueue")
     except Exception:
-        try:
-            app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
-            log.info("Scheduler: fallback loop (started immediately)")
-        except Exception:
-            app.bot_data["start_fallback_on_first_update"] = True
-            log.info("Scheduler: fallback loop (will start on first update)")
+        app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
+        log.info("Scheduler: fallback loop (started immediately)")
     return app
