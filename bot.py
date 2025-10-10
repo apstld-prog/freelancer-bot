@@ -1,13 +1,14 @@
-# bot.py — Welcome layout όπως στη Φωτο 1 + σταθερά callbacks
-import os, logging, asyncio, json
-from datetime import datetime, timedelta, timezone
-from typing import List, Set, Optional
+# bot.py — σταθερό /start, ασφαλή callbacks (anti-429)
+import os, logging, asyncio
+from datetime import datetime, timezone
+from typing import List, Set
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
+from telegram.error import RetryAfter, TimedOut, NetworkError
 from telegram.ext import (
     ApplicationBuilder, Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters,
+    ContextTypes,
 )
 from sqlalchemy import text
 
@@ -22,11 +23,29 @@ from db_keywords import (
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or
+             os.getenv("BOT_TOKEN") or
+             os.getenv("TELEGRAM_TOKEN"))
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
 
-# ---------- helpers ----------
+# ----------------- helpers -----------------
+async def safe_send(chat, text, **kwargs):
+    """send_message με μικρό backoff ώστε τα callbacks να μην 'σβήνουν' με 429"""
+    retries = 2
+    for i in range(retries + 1):
+        try:
+            return await chat.send_message(text, **kwargs)
+        except RetryAfter as e:
+            # Αν είναι μεγάλο, μην περιμένεις για ώρες – γύρνα λάθος
+            if e.retry_after and e.retry_after > 30:
+                raise
+            await asyncio.sleep(max(1, int(e.retry_after)))
+        except (TimedOut, NetworkError):
+            await asyncio.sleep(1 + i)
+    # αν δεν καταφέραμε, ξαναπετάμε το τελευταίο σφάλμα
+    return await chat.send_message(text, **kwargs)
+
 def all_admin_ids() -> Set[int]:
     ids = set(int(x) for x in (ADMIN_IDS or []))
     try:
@@ -91,7 +110,7 @@ def settings_text(keywords: List[str], countries: str|None, proposal_template: s
         "<i>For extension, contact the admin.</i>"
     )
 
-# ---------- /start (πληκτρολόγιο στο ΙΔΙΟ μήνυμα) ----------
+# ----------------- /start -----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     with get_session() as s:
@@ -99,7 +118,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         s.execute(text('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'),
                   {"id": usr.id})
         s.execute(
-            text("UPDATE \"user\" SET trial_end=COALESCE(trial_end, (NOW() AT TIME ZONE 'UTC') + INTERVAL :d) WHERE id=:id")
+            text("UPDATE \"user\" SET trial_end=COALESCE(trial_end, (NOW() AT TIME ZONE 'UTC') + INTERVAL :d) WHERE id=:id)")
             .bindparams(d=f"{TRIAL_DAYS} days"),
             {"id": usr.id},
         )
@@ -114,14 +133,15 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Free trial ends:</b> {expiry.strftime('%Y-%m-%d %H:%M UTC') if isinstance(expiry, datetime) else '—'}\n\n"
         "Use <code>/help</code> for instructions."
     )
-    await update.effective_chat.send_message(
+    await safe_send(
+        update.effective_chat,
         first,
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb(is_admin=is_admin_user(u.id))
     )
-    await update.effective_chat.send_message(FEATURES_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    await safe_send(update.effective_chat, FEATURES_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
-# ---------- settings/help ----------
+# ----------------- settings/help -----------------
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
@@ -129,14 +149,14 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'),
                         {"id": u.id}).fetchone()
     txt = settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6]))
-    await update.message.reply_text(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    await safe_send(update.effective_chat, txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_chat.send_message(HELP_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    await safe_send(update.effective_chat, HELP_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
-# ---------- keywords ----------
+# ----------------- keywords -----------------
 def _parse_keywords(raw: str) -> List[str]:
-    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]  # <- fixed
+    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
     seen, out = set(), []
     for p in parts:
         lp = p.lower()
@@ -146,111 +166,122 @@ def _parse_keywords(raw: str) -> List[str]:
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
+        return await safe_send(update.effective_chat,
             "Add keywords separated by commas. Example:\n<code>/addkeyword logo, lighting</code>",
-            parse_mode=ParseMode.HTML
-        ); return
+            parse_mode=ParseMode.HTML)
     kws = _parse_keywords(" ".join(context.args))
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
     n = add_keywords(u.id, kws)
     cur = list_keywords(u.id)
     msg = "✅ Added." if n else "ℹ️ Those keywords already exist (no changes)."
-    await update.message.reply_text(msg + "\n\nCurrent keywords:\n• " + (", ".join(cur) if cur else "—"),
-                                    parse_mode=ParseMode.HTML)
+    await safe_send(update.effective_chat,
+                    msg + "\n\nCurrent keywords:\n• " + (", ".join(cur) if cur else "—"),
+                    parse_mode=ParseMode.HTML)
 
 async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Delete keywords. Example:\n<code>/delkeyword logo, sales</code>",
-                                        parse_mode=ParseMode.HTML); return
+        return await safe_send(update.effective_chat,
+            "Delete keywords. Example:\n<code>/delkeyword logo, sales</code>",
+            parse_mode=ParseMode.HTML)
     kws = _parse_keywords(" ".join(context.args))
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
     n = delete_keywords(u.id, kws)
     left = list_keywords(u.id)
-    await update.message.reply_text(f"🗑 Removed {n}.\n\nCurrent keywords:\n• " + (", ".join(left) if left else "—"),
-                                    parse_mode=ParseMode.HTML)
+    await safe_send(update.effective_chat,
+                    f"🗑 Removed {n}.\n\nCurrent keywords:\n• " + (", ".join(left) if left else "—"),
+                    parse_mode=ParseMode.HTML)
 
 async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes, clear all", callback_data="kw:clear:yes"),
                                 InlineKeyboardButton("❌ No", callback_data="kw:clear:no")]])
-    await update.message.reply_text("Clear ALL your keywords?", reply_markup=kb)
+    await safe_send(update.effective_chat, "Clear ALL your keywords?", reply_markup=kb)
 
-# ---------- admin ----------
+# ----------------- admin -----------------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
-        await update.message.reply_text("You are not an admin."); return
+        return await safe_send(update.effective_chat, "You are not an admin.")
     with get_session() as s:
         rows = s.execute(text('SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200')).fetchall()
     lines = ["<b>Users</b>"]
     for uid, tid, trial_end, lic, act, blk in rows:
         kwc = count_keywords(uid)
         lines.append(f"• <a href=\"tg://user?id={tid}\">{tid}</a> — kw:{kwc} | trial:{trial_end} | lic:{lic} | A:{'✅' if act else '❌'} B:{'✅' if blk else '❌'}")
-    await update.effective_chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML)
+    await safe_send(update.effective_chat, "\n".join(lines), parse_mode=ParseMode.HTML)
 
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id): return
     try:
         stats = get_platform_stats(STATS_WINDOW_HOURS) or {}
     except Exception as e:
-        await update.effective_chat.send_message(f"Feed status unavailable: {e}"); return
+        return await safe_send(update.effective_chat, f"Feed status unavailable: {e}")
     if not stats:
-        await update.effective_chat.send_message(f"No events in the last {STATS_WINDOW_HOURS} hours."); return
-    await update.effective_chat.send_message("📊 Feed status (last %dh):\n%s" % (
-        STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k,v in stats.items()])
-    ))
+        return await safe_send(update.effective_chat, f"No events in the last {STATS_WINDOW_HOURS} hours.")
+    await safe_send(update.effective_chat,
+                    "📊 Feed status (last %dh):\n%s" % (
+                        STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k,v in stats.items()])
+                    ))
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     role = "🧩 Admin" if is_admin_user(tid) else "👤 User"
-    await update.message.reply_text(f"<b>Role:</b> {role}\n<b>Telegram ID:</b> <code>{tid}</code>",
-                                    parse_mode=ParseMode.HTML)
+    await safe_send(update.effective_chat,
+                    f"<b>Role:</b> {role}\n<b>Telegram ID:</b> <code>{tid}</code>",
+                    parse_mode=ParseMode.HTML)
 
-# ---------- callbacks ----------
+# ----------------- callbacks -----------------
 async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; data = (q.data or "").strip()
-    if data == "act:addkw":
-        await q.answer()
-        return await q.message.reply_text(
-            "Add keywords with:\n<code>/addkeyword logo, lighting</code>\n"
-            "Remove: <code>/delkeyword logo</code> • Clear: <code>/clearkeywords</code>",
-            parse_mode=ParseMode.HTML)
-    if data == "act:settings":
-        with get_session() as s:
-            u = get_or_create_user_by_tid(s, q.from_user.id)
-            kws = list_keywords(u.id)
-            row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'),
-                            {"id": u.id}).fetchone()
-        await q.answer()
-        return await q.message.reply_text(settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6])),
-                                          parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    if data == "act:help":
-        await q.answer(); return await q.message.reply_text(HELP_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    if data == "act:saved":
-        await q.answer(); return await q.message.reply_text("Opening Saved… use /saved soon (under construction).")
-    if data == "act:contact":
-        await q.answer(); return await q.message.reply_text("Send your message here; it will be forwarded to the admin.")
-    if data == "act:admin":
-        await q.answer()
-        if not is_admin_user(q.from_user.id): return await q.message.reply_text("Not allowed.")
-        return await q.message.reply_text(
-            "<b>Admin panel</b>\n"
-            "<code>/users</code> • <code>/grant &lt;id&gt; &lt;days&gt;</code>\n"
-            "<code>/block &lt;id&gt;</code> • <code>/unblock &lt;id&gt;</code>\n"
-            "<code>/broadcast &lt;text&gt;</code> • <code>/feedstatus</code>",
-            parse_mode=ParseMode.HTML)
+    try:
+        await q.answer()  # πάντα απαντάμε για να μην «κολλήσει» το UI
+        if data == "act:addkw":
+            return await safe_send(q.message.chat, 
+                "Add keywords with:\n<code>/addkeyword logo, lighting</code>\n"
+                "Remove: <code>/delkeyword logo</code> • Clear: <code>/clearkeywords</code>",
+                parse_mode=ParseMode.HTML)
+        if data == "act:settings":
+            with get_session() as s:
+                u = get_or_create_user_by_tid(s, q.from_user.id)
+                kws = list_keywords(u.id)
+                row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'),
+                                {"id": u.id}).fetchone()
+            return await safe_send(q.message.chat,
+                                   settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6])),
+                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        if data == "act:help":
+            return await safe_send(q.message.chat, HELP_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        if data == "act:saved":
+            return await safe_send(q.message.chat, "Opening Saved… use /saved soon (under construction).")
+        if data == "act:contact":
+            return await safe_send(q.message.chat, "Send your message here; it will be forwarded to the admin.")
+        if data == "act:admin":
+            if not is_admin_user(q.from_user.id):
+                return await safe_send(q.message.chat, "Not allowed.")
+            return await safe_send(
+                q.message.chat,
+                "<b>Admin panel</b>\n"
+                "<code>/users</code> • <code>/grant &lt;id&gt; &lt;days&gt;</code>\n"
+                "<code>/block &lt;id&gt;</code> • <code>/unblock &lt;id&gt;</code>\n"
+                "<code>/broadcast &lt;text&gt;</code> • <code>/feedstatus</code>",
+                parse_mode=ParseMode.HTML
+            )
+    except RetryAfter:
+        # Αν το Telegram μας μπλόκαρε λόγω 429, δείχνουμε ειδοποίηση
+        await q.answer("Please wait a few seconds…", show_alert=False)
 
 async def kw_clear_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    if not q.data.startswith("kw:clear:"): return await q.answer()
+    await q.answer()
+    if not q.data.startswith("kw:clear:"): return
     if q.data.endswith(":no"):
-        await q.answer(); return await q.message.reply_text("Cancelled.")
+        return await safe_send(q.message.chat, "Cancelled.")
     with get_session() as s:
         u = get_or_create_user_by_tid(s, q.from_user.id)
     n = clear_keywords(u.id)
-    await q.answer(); return await q.message.reply_text(f"🗑 Cleared {n} keyword(s).")
+    return await safe_send(q.message.chat, f"🗑 Cleared {n} keyword(s).")
 
-# ---------- wiring ----------
+# ----------------- wiring -----------------
 def build_application() -> Application:
     ensure_schema()
     ensure_feed_events_schema()
@@ -270,5 +301,4 @@ def build_application() -> Application:
 
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:(addkw|settings|help|saved|contact|admin)$"))
     app.add_handler(CallbackQueryHandler(kw_clear_confirm_cb, pattern=r"^kw:clear:(yes|no)$"))
-
     return app

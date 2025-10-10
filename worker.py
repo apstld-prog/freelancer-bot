@@ -1,4 +1,4 @@
-# worker.py — throttling + RetryAfter handling
+# worker.py — στείλε λίγα/ελεγχόμενα, σταμάτα run όταν RetryAfter είναι μεγάλο
 from __future__ import annotations
 import asyncio, os, logging
 from datetime import datetime, timezone, timedelta
@@ -17,11 +17,12 @@ from config import FETCH_INTERVAL_SEC, BOT_TOKEN, DELIVERY_WINDOW_HOURS
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
 
-# αντι-flood ρυθμίσεις από env
-MAX_MSGS_PER_RUN = int(os.getenv("MAX_MSGS_PER_RUN", "20"))
-MSG_DELAY_MS = int(os.getenv("MSG_DELAY_MS", "250"))
+# Anti-flood (ρυθμίζονται και από ENV)
+MAX_MSGS_PER_RUN = int(os.getenv("MAX_MSGS_PER_RUN", "8"))      # μικρό batch
+MSG_DELAY_MS     = int(os.getenv("MSG_DELAY_MS", "500"))        # 0.5s ανά μήνυμα
+RETRY_AFTER_CAP  = int(os.getenv("RETRY_AFTER_CAP", "30"))      # αν >30s, σταμάτα run
 
-def _short(s: str, n: int = 140) -> str:
+def _short(s: str, n: int = 160) -> str:
     s = (s or "").strip().replace("\n", " ")
     return s if len(s) <= n else (s[: n - 1].rstrip() + "…")
 
@@ -38,16 +39,16 @@ def _time_ago(dt: datetime | None) -> str:
     return f"{d}d ago"
 
 async def _send(bot: Bot, chat_id: int, text: str, kb: InlineKeyboardMarkup):
-    while True:
-        try:
-            await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML",
-                                   reply_markup=kb, disable_web_page_preview=True)
-            return
-        except RetryAfter as e:
-            # σεβασμός Retry-After
-            delay = max(1, int(e.retry_after))
-            log.warning("Flood control: sleeping %ss", delay)
-            await asyncio.sleep(delay)
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML",
+                               reply_markup=kb, disable_web_page_preview=True)
+    except RetryAfter as e:
+        if int(getattr(e, "retry_after", 0)) > RETRY_AFTER_CAP:
+            # σταμάτα το run – ας ξαναδοκιμάσουμε στον επόμενο κύκλο
+            raise
+        await asyncio.sleep(max(1, int(e.retry_after)))
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML",
+                               reply_markup=kb, disable_web_page_preview=True)
 
 async def _send_card(bot: Bot, tid: int, ev: Dict[str, Any], matched: List[str]):
     title = ev.get("title") or "(no title)"
@@ -56,9 +57,7 @@ async def _send_card(bot: Bot, tid: int, ev: Dict[str, Any], matched: List[str])
     ago = _time_ago(ev.get("created_at"))
     budget_amount = ev.get("budget_amount")
     budget_currency = ev.get("budget_currency")
-    budget_line = ""
-    if budget_amount and budget_currency:
-        budget_line = f"<b>Budget:</b> {budget_amount:g} {budget_currency}\n"
+    budget_line = f"<b>Budget:</b> {budget_amount:g} {budget_currency}\n" if (budget_amount and budget_currency) else ""
 
     txt = (
         f"<b>{title}</b>\n"
@@ -67,7 +66,7 @@ async def _send_card(bot: Bot, tid: int, ev: Dict[str, Any], matched: List[str])
         f"<b>Match:</b> {', '.join(matched)}\n"
         f"✏️ {desc}\n<i>{ago}</i>"
     ).strip()
-    url = ev.get("affiliate_url") or ev.get("original_url")
+    url = ev.get("affiliate_url") or ev.get("original_url") or "#"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Proposal", url=url),
          InlineKeyboardButton("🔗 Original", url=url)],
@@ -117,20 +116,22 @@ async def run_once(app=None) -> int:
         "budget_amount": r[6], "budget_currency": r[7], "created_at": r[8],
     } for r in rows]
 
-    bot = app.bot if app and getattr(app, "bot", None) else Bot(BOT_TOKEN)
+    bot = Bot(BOT_TOKEN)
 
     sent = 0
-    for uid, tid, kws in users:
-        for ev in evs:
+    try:
+        for uid, tid, kws in users:
+            for ev in evs:
+                if sent >= MAX_MSGS_PER_RUN: break
+                m = _match(ev["title"], ev["description"], kws)
+                if m:
+                    await _send_card(bot, tid, ev, m)
+                    sent += 1
+                    await asyncio.sleep(MSG_DELAY_MS / 1000.0)
             if sent >= MAX_MSGS_PER_RUN: break
-            m = _match(ev["title"], ev["description"], kws)
-            if m:
-                await _send_card(bot, tid, ev, m)
-                sent += 1
-                await asyncio.sleep(MSG_DELAY_MS / 1000.0)
-        if sent >= MAX_MSGS_PER_RUN: break
-
-    log.info("Delivered %d cards (rate-limited).", sent)
+        log.info("Delivered %d cards (rate-limited).", sent)
+    except RetryAfter as e:
+        log.warning("Flood control: RetryAfter=%ss — stop this run", int(e.retry_after))
     return newc
 
 async def main(app=None):
