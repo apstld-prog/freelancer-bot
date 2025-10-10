@@ -1,4 +1,4 @@
-# worker.py — στείλε λίγα/ελεγχόμενα, σταμάτα run όταν RetryAfter είναι μεγάλο
+# worker.py — budget + USD conversion, rate limiting
 from __future__ import annotations
 import asyncio, os, logging
 from datetime import datetime, timezone, timedelta
@@ -17,12 +17,22 @@ from config import FETCH_INTERVAL_SEC, BOT_TOKEN, DELIVERY_WINDOW_HOURS
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
 
-# Anti-flood (ρυθμίζονται και από ENV)
-MAX_MSGS_PER_RUN = int(os.getenv("MAX_MSGS_PER_RUN", "8"))      # μικρό batch
-MSG_DELAY_MS     = int(os.getenv("MSG_DELAY_MS", "500"))        # 0.5s ανά μήνυμα
-RETRY_AFTER_CAP  = int(os.getenv("RETRY_AFTER_CAP", "30"))      # αν >30s, σταμάτα run
+MAX_MSGS_PER_RUN = int(os.getenv("MAX_MSGS_PER_RUN", "8"))
+MSG_DELAY_MS     = int(os.getenv("MSG_DELAY_MS", "500"))
+RETRY_AFTER_CAP  = int(os.getenv("RETRY_AFTER_CAP", "30"))
 
-def _short(s: str, n: int = 160) -> str:
+FX = {
+    "USD": 1.00,
+    "EUR": float(os.getenv("FX_EURUSD", "1.07")),
+    "GBP": float(os.getenv("FX_GBPUSD", "1.25")),
+}
+
+def _to_usd(amount: float|None, currency: str|None) -> float|None:
+    if not amount or not currency: return None
+    rate = FX.get(currency.upper())
+    return round(amount * rate, 2) if rate else None
+
+def _short(s: str, n: int = 220) -> str:
     s = (s or "").strip().replace("\n", " ")
     return s if len(s) <= n else (s[: n - 1].rstrip() + "…")
 
@@ -44,7 +54,6 @@ async def _send(bot: Bot, chat_id: int, text: str, kb: InlineKeyboardMarkup):
                                reply_markup=kb, disable_web_page_preview=True)
     except RetryAfter as e:
         if int(getattr(e, "retry_after", 0)) > RETRY_AFTER_CAP:
-            # σταμάτα το run – ας ξαναδοκιμάσουμε στον επόμενο κύκλο
             raise
         await asyncio.sleep(max(1, int(e.retry_after)))
         await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML",
@@ -55,9 +64,14 @@ async def _send_card(bot: Bot, tid: int, ev: Dict[str, Any], matched: List[str])
     platform = ev.get("platform") or "Freelancer"
     desc = _short(ev.get("description",""))
     ago = _time_ago(ev.get("created_at"))
-    budget_amount = ev.get("budget_amount")
-    budget_currency = ev.get("budget_currency")
-    budget_line = f"<b>Budget:</b> {budget_amount:g} {budget_currency}\n" if (budget_amount and budget_currency) else ""
+    amt = ev.get("budget_amount")
+    cur = (ev.get("budget_currency") or "").upper()
+    usd = _to_usd(amt, cur)
+    budget_line = ""
+    if amt and cur:
+        budget_line = f"<b>Budget:</b> {amt:g} {cur}"
+        if usd is not None: budget_line += f" (~${usd:g} USD)"
+        budget_line += "\n"
 
     txt = (
         f"<b>{title}</b>\n"
@@ -91,9 +105,16 @@ def _match(hay_title: str, hay_desc: str, kws: List[str]) -> List[str]:
 async def run_once(app=None) -> int:
     ensure_feed_events_schema()
 
-    # fetch
     res = await asyncio.gather(*(f() for f in ALL_FETCHERS), return_exceptions=False)
     events = [e for sub in res for e in sub]
+
+    # αποθηκεύουμε και USD στο job_event για να το βλέπει και το bot
+    for e in events:
+        amt, cur = e.get("budget_amount"), (e.get("budget_currency") or "").upper()
+        usd = _to_usd(amt, cur)
+        if usd is not None:
+            e["budget_usd"] = usd
+
     newc = upsert_events(events) if events else 0
     log.info("Upserted events: new=%d total_in_batch=%d", newc, len(events))
 
@@ -104,7 +125,7 @@ async def run_once(app=None) -> int:
     with get_session() as s:
         rows = s.execute(text("""
             SELECT id, platform, title, description, original_url, affiliate_url,
-                   budget_amount, budget_currency, created_at
+                   budget_amount, budget_currency, budget_usd, created_at
             FROM job_event
             WHERE created_at >= :since
             ORDER BY created_at DESC
@@ -113,7 +134,7 @@ async def run_once(app=None) -> int:
     evs = [{
         "id": r[0], "platform": r[1], "title": r[2], "description": r[3] or "",
         "original_url": r[4], "affiliate_url": r[5],
-        "budget_amount": r[6], "budget_currency": r[7], "created_at": r[8],
+        "budget_amount": r[6], "budget_currency": r[7], "budget_usd": r[8], "created_at": r[9],
     } for r in rows]
 
     bot = Bot(BOT_TOKEN)
