@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 import logging
 from datetime import datetime
@@ -111,7 +110,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             s.execute(_t("UPDATE \"user\" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE 'UTC') WHERE id=:id"), {"id": u.id})
             s.execute(_t("UPDATE \"user\" SET trial_end=COALESCE(trial_end, NOW() AT TIME ZONE 'UTC') + INTERVAL :days WHERE id=:id")
                       .bindparams(days=f"{TRIAL_DAYS} days"), {"id": u.id})
-            expiry = s.execute(_t('SELECT COALESCE(license_until, trial_end) FROM "user" WHERE id=:id'), {"id": u.id}).scalar()
+            expiry = s.execute(_t('SELECT COALESCE(license_until, trial_end) FROM \"user\" WHERE id=:id'), {"id": u.id}).scalar()
             s.commit()
         except Exception:
             logging.getLogger("bot").exception("start_cmd: trial init failed")
@@ -204,7 +203,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  <b>📝</b> {description}"
     )
     url = "https://www.peopleperhour.com/freelance-jobs/technology-programming/other/"
-    kb = InlineKeyboardMarkup([[
+    kb = InlineKeyboardMarkup([[ 
         InlineKeyboardButton("📄 Proposal", url=url),
         InlineKeyboardButton("🔗 Original", url=url)
     ],[
