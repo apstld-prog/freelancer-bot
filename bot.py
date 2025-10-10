@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 import logging
 from datetime import datetime
@@ -112,7 +111,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
-            # FIXED: clean SQL strings (no bad escapes)
+            # FIXED SQL syntax
             s.execute(_t("UPDATE \"user\" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE 'UTC') WHERE id=:id"), {"id": u.id})
             s.execute(_t("UPDATE \"user\" SET trial_end=COALESCE(trial_end, NOW() AT TIME ZONE 'UTC') + INTERVAL :days WHERE id=:id")
                       .bindparams(days=f"{TRIAL_DAYS} days"), {"id": u.id})
@@ -207,11 +206,11 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>{job_title}</b>\n"
         f"  <b>Budget:</b> {budget_min:.1f}–{budget_max:.1f}\n"
         f"  <b>Source:</b> {source}\n"
-        f"  <b>🔎 Match:</b> <a href=\\"{match_url}\\">logo</a>\n"
+        f"  <b>🔎 Match:</b> <a href=\"{match_url}\">logo</a>\n"
         f"  <b>📝</b> {description}"
     )
     url = "https://www.peopleperhour.com/freelance-jobs/technology-programming/other/"
-    kb = InlineKeyboardMarkup([[
+    kb = InlineKeyboardMarkup([[ 
         InlineKeyboardButton("📄 Proposal", url=url),
         InlineKeyboardButton("🔗 Original", url=url)
     ],[
@@ -249,15 +248,15 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["<b>Users</b>"]
     for uid, tid, trial_end, lic, act, blk in rows:
         kwc = len(list_keywords_safe(uid))
-        lines.append(f"• <a href=\\"tg://user?id={tid}\\">{tid}</a> — kw:{kwc} | trial:{trial_end or '-'} | lic:{lic or '-'} | active:{'Y' if act else 'N'} | blocked:{'Y' if blk else 'N'}")
-    await update.message.reply_text("\\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        lines.append(f"• <a href=\"tg://user?id={tid}\">{tid}</a> — kw:{kwc} | trial:{trial_end or '-'} | lic:{lic or '-'} | active:{'Y' if act else 'N'} | blocked:{'Y' if blk else 'N'}")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id): return
     stats = get_platform_stats(STATS_WINDOW_HOURS) or {}
     if not stats:
         await update.effective_chat.send_message(f"No events in the last {STATS_WINDOW_HOURS} hours."); return
-    await update.effective_chat.send_message("📊 Feed status (last %dh):\n%s" % (STATS_WINDOW_HOURS, "\\n".join([f"• {k}: {v}" for k, v in stats.items()])))
+    await update.effective_chat.send_message("📊 Feed status (last %dh):\n%s" % (STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k, v in stats.items()])))
 
 def build_application() -> Application:
     ensure_schema(); ensure_feed_events_schema(); ensure_keyword_unique()
@@ -265,14 +264,12 @@ def build_application() -> Application:
     # Commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("whoami", whoami_cmd))
     app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
-    app.add_handler(CommandHandler("addkw", addkeyword_cmd))           # alias
-    app.add_handler(CommandHandler("keywords", mysettings_cmd))        # alias
+    app.add_handler(CommandHandler("addkw", addkeyword_cmd))
+    app.add_handler(CommandHandler("keywords", mysettings_cmd))
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
-    # Buttons
     app.add_handler(CallbackQueryHandler(cb_mainmenu))
     return app
