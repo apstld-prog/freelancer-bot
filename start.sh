@@ -1,21 +1,34 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
-# Respect Render's PORT (defaults to 10000 locally)
-export PORT="${PORT:-10000}"
+echo "======================================================"
+echo "🚀 Starting Freelancer Alert Bot full service"
+echo "======================================================"
+date
 
-echo "==> launching web(server) + worker..."
+# Load environment
+echo "Environment check:"
+echo "WORKER_INTERVAL=${WORKER_INTERVAL:-120}"
+echo "KEYWORD_FILTER_MODE=${KEYWORD_FILTER_MODE:-on}"
+echo "Render Service: ${RENDER_SERVICE_NAME:-unknown}"
+echo "------------------------------------------------------"
 
-# Start worker in background
-python -u worker.py &
+# Ensure python path inside project
+cd /opt/render/project/src || exit 1
+
+# Start the worker in background
+echo "[Worker] Starting background process..."
+nohup python3 worker.py > worker.log 2>&1 &
 WORKER_PID=$!
+sleep 3
+if ps -p $WORKER_PID > /dev/null; then
+    echo "[Worker] ✅ Running (PID: $WORKER_PID)"
+else
+    echo "[Worker] ❌ Failed to start!"
+    cat worker.log || true
+    exit 1
+fi
 
-cleanup() {
-  echo "==> stopping..."
-  kill -TERM "$WORKER_PID" 2>/dev/null || true
-  wait "$WORKER_PID" 2>/dev/null || true
-}
-trap cleanup SIGINT SIGTERM
-
-# Run Uvicorn in foreground so Render detects the open port
-python -m uvicorn server:app --host 0.0.0.0 --port "${PORT}" --no-access-log
+# Start the FastAPI/Telegram bot (main server)
+echo "[Server] Starting FastAPI + Telegram bot..."
+exec python3 server.py
