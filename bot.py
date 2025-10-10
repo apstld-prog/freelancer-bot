@@ -1,6 +1,4 @@
-# bot.py — full compat v2: keyword fallbacks write BOTH "keyword" and "value" to satisfy NOT NULL schemas
 from __future__ import annotations
-
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -8,20 +6,16 @@ from typing import List, Optional
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder,
-    Application,
-    CommandHandler,
+    ApplicationBuilder, Application,
+    CommandHandler, CallbackQueryHandler,
     ContextTypes,
-    JobQueue,
 )
 from sqlalchemy import text
 
-# Project modules
 from config import BOT_TOKEN, ADMIN_IDS, STATS_WINDOW_HOURS, TRIAL_DAYS
 from db import get_session, ensure_schema, get_or_create_user_by_tid
 from db_events import ensure_feed_events_schema, get_platform_stats
 
-# Optional db helpers
 try:
     from db import ensure_keyword_unique  # type: ignore
 except Exception:
@@ -45,7 +39,6 @@ try:
 except Exception:
     _clear_keywords = None
 
-# UI texts
 try:
     from ui_texts import HELP_EN, help_footer, welcome_full
 except Exception:
@@ -63,100 +56,74 @@ def is_admin_user(telegram_id: int) -> bool:
     except Exception:
         return False
 
-# ---------------- Keyword helpers (robust fallbacks) ----------------
-def _select_keyword_expr() -> str:
-    # Prefer COALESCE(keyword, value) to be robust across schemas
+# ---------- keyword fallbacks (schema-agnostic) ----------
+from sqlalchemy import text as _t
+
+def _kw_expr() -> str:
     return 'COALESCE(keyword, value)'
-
-def list_keywords_fallback(user_id: int) -> List[str]:
-    with get_session() as s:
-        rows = s.execute(
-            text(f'SELECT {_select_keyword_expr()} FROM "keyword" WHERE user_id=:uid ORDER BY id ASC'),
-            {"uid": user_id}
-        ).fetchall()
-        return [r[0] for r in rows if r and r[0]]
-
-def add_keywords_fallback(s, user_id: int, values: List[str]) -> int:
-    inserted = 0
-    for v in values:
-        v_norm = (v or "").strip()
-        if not v_norm:
-            continue
-        # exists check on either column
-        exists = s.execute(
-            text('SELECT 1 FROM "keyword" WHERE user_id=:uid AND (keyword=:v OR value=:v) LIMIT 1'),
-            {"uid": user_id, "v": v_norm}
-        ).fetchone()
-        if exists:
-            continue
-        # insert to satisfy schemas with NOT NULL "keyword" and/or "value"
-        s.execute(
-            text('INSERT INTO "keyword"(user_id, keyword, value) VALUES (:uid, :v, :v)'),
-            {"uid": user_id, "v": v_norm}
-        )
-        inserted += 1
-    if inserted:
-        s.commit()
-    return inserted
-
-def delete_keyword_fallback(s, user_id: int, value: str) -> bool:
-    res = s.execute(
-        text('DELETE FROM "keyword" WHERE user_id=:uid AND (keyword=:v OR value=:v)'),
-        {"uid": user_id, "v": value}
-    ).rowcount
-    if res:
-        s.commit()
-    return res > 0
-
-def clear_keywords_fallback(s, user_id: int) -> int:
-    res = s.execute(text('DELETE FROM "keyword" WHERE user_id=:uid'), {"uid": user_id}).rowcount
-    if res:
-        s.commit()
-    return int(res or 0)
 
 def list_keywords_safe(user_id: int) -> List[str]:
     try:
         if _list_keywords:
             return _list_keywords(user_id)  # type: ignore
     except Exception:
-        log.exception("list_keywords (db) failed, using fallback")
-    return list_keywords_fallback(user_id)
+        log.exception("list_keywords (db) failed; fallback used")
+    with get_session() as s:
+        rows = s.execute(_t(f'SELECT {_kw_expr()} FROM "keyword" WHERE user_id=:uid ORDER BY id ASC'), {"uid": user_id}).fetchall()
+        return [r[0] for r in rows if r and r[0]]
 
 def add_keywords_safe(s, user_id: int, values: List[str]) -> int:
     try:
         if _add_keywords:
             return _add_keywords(s, user_id, values)  # type: ignore
     except Exception:
-        log.exception("add_keywords (db) failed, using fallback")
-    return add_keywords_fallback(s, user_id, values)
+        log.exception("add_keywords (db) failed; fallback used")
+    ins = 0
+    for v in values:
+        v = (v or "").strip()
+        if not v:
+            continue
+        ex = s.execute(_t('SELECT 1 FROM "keyword" WHERE user_id=:u AND (keyword=:v OR value=:v) LIMIT 1'),
+                       {"u": user_id, "v": v}).fetchone()
+        if ex:
+            continue
+        s.execute(_t('INSERT INTO "keyword"(user_id, keyword, value) VALUES (:u, :v, :v)'),
+                  {"u": user_id, "v": v})
+        ins += 1
+    if ins:
+        s.commit()
+    return ins
 
 def delete_keyword_safe(s, user_id: int, value: str) -> bool:
     try:
         if _delete_keyword:
             return _delete_keyword(s, user_id, value)  # type: ignore
     except Exception:
-        log.exception("delete_keyword (db) failed, using fallback")
-    return delete_keyword_fallback(s, user_id, value)
+        log.exception("delete_keyword (db) failed; fallback used")
+    rc = s.execute(_t('DELETE FROM "keyword" WHERE user_id=:u AND (keyword=:v OR value=:v)'),
+                   {"u": user_id, "v": value}).rowcount
+    if rc:
+        s.commit()
+    return rc > 0
 
 def clear_keywords_safe(s, user_id: int) -> int:
     try:
         if _clear_keywords:
             return _clear_keywords(s, user_id)  # type: ignore
     except Exception:
-        log.exception("clear_keywords (db) failed, using fallback")
-    return clear_keywords_fallback(s, user_id)
+        log.exception("clear_keywords (db) failed; fallback used")
+    rc = s.execute(_t('DELETE FROM "keyword" WHERE user_id=:u'), {"u": user_id}).rowcount
+    if rc:
+        s.commit()
+    return int(rc or 0)
 
-# ---------------- UI helpers ----------------
+# ---------- UI helpers ----------
 def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
     kb = [
-        [
-            InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
-            InlineKeyboardButton("⚙️ Settings", callback_data="act:settings"),
-        ],
-        [
-            InlineKeyboardButton("🆘 Help", callback_data="act:help"),
-            InlineKeyboardButton("💾 Saved", callback_data="act:saved"),
-        ],
+        [InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
+        [InlineKeyboardButton("🆘 Help", callback_data="act:help"),
+         InlineKeyboardButton("💾 Saved", callback_data="act:saved")],
         [InlineKeyboardButton("📨 Contact", callback_data="act:contact")],
     ]
     if is_admin:
@@ -167,30 +134,16 @@ def welcome_text(expiry: Optional[datetime]) -> str:
     try:
         return welcome_full(trial_days=TRIAL_DAYS if isinstance(TRIAL_DAYS, int) else 10)
     except Exception:
-        return (
-            "<b>Welcome!</b>\n"
-            "Use <code>/addkeyword</code> to add search keywords and get curated job alerts.\n"
-            "Open the menu to explore settings and saved items."
-        )
+        return "<b>Welcome!</b>\nUse /addkeyword to add search keywords. Open the menu to explore settings."
 
-# ---------------- Commands ----------------
+# ---------- Commands ----------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
-            s.execute(
-                text('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'),
-                {"id": u.id},
-            )
-            s.execute(
-                text('UPDATE "user" SET trial_end=COALESCE(trial_end, NOW() AT TIME ZONE \'UTC\') + INTERVAL :days WHERE id=:id')
-                .bindparams(days=f"{TRIAL_DAYS} days"),
-                {"id": u.id},
-            )
-            expiry = s.execute(
-                text('SELECT COALESCE(license_until, trial_end) FROM "user" WHERE id=:id'),
-                {"id": u.id},
-            ).scalar()
+            s.execute(text('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'), {"id": u.id})
+            s.execute(text('UPDATE "user" SET trial_end=COALESCE(trial_end, NOW() AT TIME ZONE \'UTC\') + INTERVAL :days WHERE id=:id').bindparams(days=f"{TRIAL_DAYS} days"), {"id": u.id})
+            expiry = s.execute(text('SELECT COALESCE(license_until, trial_end) FROM "user" WHERE id=:id'), {"id": u.id}).scalar()
             s.commit()
         except Exception:
             log.exception("start_cmd: trial init failed (non-fatal)")
@@ -225,7 +178,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         user = get_or_create_user_by_tid(s, update.effective_user.id)
         kws = list_keywords_safe(user.id)
-        kw_str = ", ".join(kws) if kws else "(none)"
+    kw_str = ", ".join(kws) if kws else "(none)"
     await update.effective_chat.send_message(
         f"<b>My settings</b>\n• <b>Keywords:</b> {kw_str}\n\nUse /addkeyword, /delkeyword, /clearkeywords.",
         parse_mode=ParseMode.HTML,
@@ -243,16 +196,9 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /addkeyword word1, word2, ...")
         return
     kws = _split_keywords(args)
-    if not kws:
-        await update.message.reply_text("No keywords provided.")
-        return
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
-        try:
-            n = add_keywords_safe(s, u.id, kws)
-        except Exception:
-            log.exception("addkeyword failed")
-            n = 0
+        n = add_keywords_safe(s, u.id, kws)
     await update.message.reply_text(f"Added {n} keyword(s).")
 
 async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -260,36 +206,25 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await update.message.reply_text("Usage: /delkeyword word")
         return
-    kw = args.strip()
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
-        try:
-            ok = delete_keyword_safe(s, u.id, kw)
-        except Exception:
-            log.exception("delkeyword failed")
-            ok = False
+        ok = delete_keyword_safe(s, u.id, args.strip())
     await update.message.reply_text("Deleted." if ok else "Not found.")
 
 async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
-        try:
-            n = clear_keywords_safe(s, u.id)
-        except Exception:
-            log.exception("clearkeywords failed")
-            n = 0
+        n = clear_keywords_safe(s, u.id)
     await update.message.reply_text(f"Cleared {n} keyword(s).")
 
-# ---------------- Self-test card (PeoplePerHour style) ----------------
+# ---------- Self-test ----------
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_title = "Email Signature from Existing Logo"
     budget_min = 10.0
     budget_max = 30.0
     source = "PeoplePerHour"
     match_url = "https://www.peopleperhour.com/freelance-jobs?q=logo"
-    description = (
-        "Please duplicate and make an editable version of my existing email signature based on the logo file"
-    )
+    description = "Please duplicate and make an editable version of my existing email signature based on the logo file"
 
     job_text = (
         f"<b>{job_title}</b>\n"
@@ -298,60 +233,52 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  <b>🔎 Match:</b> <a href=\"{match_url}\">logo</a>\n"
         f"  <b>📝</b> {description}"
     )
-
     url = "https://www.peopleperhour.com/freelance-jobs/technology-programming/other/"
-    kb = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📄 Proposal", url=url), InlineKeyboardButton("🔗 Original", url=url)],
-            [InlineKeyboardButton("⭐ Save", callback_data="job:save"), InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
-        ]
-    )
-
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Proposal", url=url), InlineKeyboardButton("🔗 Original", url=url)],
+        [InlineKeyboardButton("⭐ Save", callback_data="job:save"), InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
+    ])
     await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-# ---------------- Admin commands ----------------
+# ---------- CallbackQuery handler for main menu ----------
+async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data if q else ""
+    await q.answer()
+    if data == "act:addkw":
+        await q.message.reply_text("Send /addkeyword word1, word2, ...")
+    elif data == "act:settings":
+        await mysettings_cmd(update, context)
+    elif data == "act:help":
+        await help_cmd(update, context)
+    elif data == "act:saved":
+        await q.message.reply_text("No saved items yet.")
+    elif data == "act:contact":
+        await q.message.reply_text("Contact admin: @your_username")
+    elif data == "act:admin":
+        if is_admin_user(update.effective_user.id):
+            await q.message.reply_text("Admin panel: /users, /grant <id> <days>, /block <id>, /unblock <id>, /feedstatus")
+        else:
+            await q.message.reply_text("You are not an admin.")
+    else:
+        await q.message.reply_text("Unknown action.")
+
+# ---------- Admin ----------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
         await update.message.reply_text("You are not an admin.")
         return
     with get_session() as s:
         try:
-            rows = s.execute(
-                text('SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200')
-            ).fetchall()
+            rows = s.execute(text('SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200')).fetchall()
         except Exception:
             await update.message.reply_text("Unable to query users.")
             return
-
     lines = ["<b>Users</b>"]
     for uid, tid, trial_end, lic, act, blk in rows:
-        try:
-            kwc = len(list_keywords_safe(uid))
-        except Exception:
-            kwc = 0
-        lines.append(
-            f"• <a href=\"tg://user?id={tid}\">{tid}</a> — kw:{kwc} | trial:{trial_end or '-'} | lic:{lic or '-'} | active:{'Y' if act else 'N'} | blocked:{'Y' if blk else 'N'}"
-        )
-
+        kwc = len(list_keywords_safe(uid))
+        lines.append(f"• <a href=\"tg://user?id={tid}\">{tid}</a> — kw:{kwc} | trial:{trial_end or '-'} | lic:{lic or '-'} | active:{'Y' if act else 'N'} | blocked:{'Y' if blk else 'N'}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-
-async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id):
-        await update.message.reply_text("You are not an admin.")
-        return
-    await update.message.reply_text("Grant logic not implemented in this file (kept as in your base).")
-
-async def block_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id):
-        await update.message.reply_text("You are not an admin.")
-        return
-    await update.message.reply_text("Block logic not implemented in this file (kept as in your base).")
-
-async def unblock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id):
-        await update.message.reply_text("You are not an admin.")
-        return
-    await update.message.reply_text("Unblock logic not implemented in this file (kept as in your base).")
 
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
@@ -364,12 +291,9 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not stats:
         await update.effective_chat.send_message(f"No events in the last {STATS_WINDOW_HOURS} hours.")
         return
-    await update.effective_chat.send_message(
-        "📊 Feed status (last %dh):\n%s"
-        % (STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k, v in stats.items()])),
-    )
+    await update.effective_chat.send_message("📊 Feed status (last %dh):\n%s" % (STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k, v in stats.items()])))
 
-# ---------------- Build Application ----------------
+# ---------- Build app (no JobQueue to avoid warning) ----------
 def build_application() -> Application:
     ensure_schema()
     ensure_feed_events_schema()
@@ -377,7 +301,6 @@ def build_application() -> Application:
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Public commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("whoami", whoami_cmd))
@@ -387,19 +310,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
 
-    # Admin commands
-    app.add_handler(CommandHandler("users", users_cmd))
-    app.add_handler(CommandHandler("grant", grant_cmd))
-    app.add_handler(CommandHandler("block", block_cmd))
-    app.add_handler(CommandHandler("unblock", unblock_cmd))
-    app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
-
-    try:
-        jq = app.job_queue or JobQueue()
-        if app.job_queue is None:
-            jq.set_application(app)
-        logging.getLogger("bot").info("Scheduler: JobQueue ready")
-    except Exception:
-        logging.getLogger("bot").exception("JobQueue setup failed (non-fatal)")
+    app.add_handler(CallbackQueryHandler(cb_mainmenu))  # enables the buttons
 
     return app

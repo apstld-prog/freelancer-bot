@@ -1,4 +1,3 @@
-# worker.py — conservative fallback with platform fetch + logging
 import os
 import time
 import logging
@@ -9,7 +8,6 @@ from config import (
     SKYWALKER_RSS,
     CAREERJET_RSS,
     KARIERA_RSS,
-    WORKER_INTERVAL,
     FX_USD_RATES,
 )
 
@@ -49,6 +47,13 @@ except Exception:
 log = logging.getLogger("worker")
 logging.basicConfig(level=logging.INFO)
 
+def _interval_seconds() -> int:
+    val = os.getenv("WORKER_INTERVAL", "120")
+    try:
+        return max(30, int(val))
+    except Exception:
+        return 120
+
 def fetch_all(keywords_query: Optional[str] = None) -> List[Dict]:
     out: List[Dict] = []
     log.info("Fetching sources... keywords_query=%s", keywords_query)
@@ -87,10 +92,9 @@ def fetch_all(keywords_query: Optional[str] = None) -> List[Dict]:
     return out
 
 def main():
-    # This fallback only logs; it doesn't send messages (preserve original behavior elsewhere)
-    interval = int(WORKER_INTERVAL) if str(WORKER_INTERVAL).isdigit() else 120
+    interval = _interval_seconds()
     rates = load_fx_rates(FX_USD_RATES) if 'FX_USD_RATES' in globals() else {}
-    keywords = []  # leave to original pipeline; here we just fetch all
+    keywords: List[str] = []  # keyword filtering may be applied downstream in your pipeline
 
     while True:
         try:
