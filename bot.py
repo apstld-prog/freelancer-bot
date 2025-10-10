@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 import logging, urllib.parse
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import List, Optional
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -10,7 +10,6 @@ from telegram.ext import (
     ApplicationBuilder, Application,
     CommandHandler, CallbackQueryHandler,
     ContextTypes,
-    JobQueue
 )
 from sqlalchemy import text
 
@@ -18,7 +17,6 @@ from config import BOT_TOKEN, ADMIN_IDS, STATS_WINDOW_HOURS, TRIAL_DAYS
 from db import get_session, ensure_schema, get_or_create_user_by_tid
 from db_events import ensure_feed_events_schema, get_platform_stats
 from db_saved import ensure_saved_schema, add_saved_job, list_saved_jobs, clear_saved_jobs
-from db_trial_notice import ensure_trial_notice_schema, has_day_before_sent, mark_day_before_sent
 
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +27,7 @@ except Exception:
     def ensure_keyword_unique():
         log.warning("ensure_keyword_unique() not found in db.py — skipping")
 
+# === helpers ===
 def is_admin_user(tid: int) -> bool:
     try:
         return int(tid) in ADMIN_IDS
@@ -99,22 +98,17 @@ def settings_kb() -> InlineKeyboardMarkup:
 def fmt_dt(dt: Optional[datetime]) -> str:
     if not dt:
         return "-"
-    if isinstance(dt, datetime):
+    try:
         return dt.isoformat()
-    return str(dt)
+    except Exception:
+        return str(dt)
 
-def welcome_text(trial_start: Optional[datetime], trial_end: Optional[datetime]) -> str:
-    return (
-        "<b>Welcome to Freelancer Alert Bot!</b>\n"
-        f"• Trial start: {fmt_dt(trial_start)}\n"
-        f"• Trial end: {fmt_dt(trial_end)}\n"
-        "Use /addkeyword to add search keywords."
-    )
-
-# ---------- Commands ----------
+# === commands (layout unchanged) ===
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # keep same flow, just append trial dates in the welcome text
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
+        # keep previous behavior: activate & set trial
         try:
             s.execute(_t("UPDATE \"user\" SET is_active=TRUE WHERE id=:id"), {"id": u.id})
             s.execute(_t("UPDATE \"user\" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE 'UTC') WHERE id=:id"), {"id": u.id})
@@ -122,49 +116,40 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       .bindparams(days=f"{TRIAL_DAYS} days"), {"id": u.id})
             row = s.execute(_t('SELECT trial_start, trial_end FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
             s.commit()
-            trial_start, trial_end = (row[0], row[1]) if row else (None, None)
         except Exception:
-            logging.getLogger("bot").exception("start_cmd: trial init failed")
-            trial_start = trial_end = None
+            log.exception("start_cmd: trial init failed")
+            row = None
+
+    trial_start = row[0] if row else None
+    trial_end = row[1] if row else None
+
+    welcome = (
+        "<b>Welcome to Freelancer Alert Bot!</b>\n"
+        "Automatically finds matching freelance jobs from top platforms and sends you instant alerts.\n\n"
+        f"• <b>Trial start:</b> {fmt_dt(trial_start)}\n"
+        f"• <b>Trial end:</b> {fmt_dt(trial_end)}"
+    )
 
     await update.effective_chat.send_message(
-        welcome_text(trial_start, trial_end),
+        welcome,
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
         disable_web_page_preview=True,
     )
-    await help_cmd(update, context)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lines = [
-        "<b>Help / How it works</b>",
-        "1) Add keywords with <code>/addkeyword python, telegram</code> (English or Greek).",
-        "2) Check your settings with <code>/mysettings</code>.",
-        "3) Use <code>/selftest</code> to see a sample alert.",
-        "",
-        "Use <code>/whoami</code> to see your trial dates and keywords.",
-    ]
-    if is_admin_user(update.effective_user.id):
-        lines += [
-            "",
-            "👑 <b>Admin commands</b>:",
-            "/users — list users",
-            "/feedstatus — last 24h by platform",
-            "/grant <telegram_id> <days> — extend license",
-            "/block <telegram_id> / /unblock <telegram_id>",
-            "/broadcast <text> — to all active",
-        ]
-    await update.effective_chat.send_message(
-        "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
+    txt = (
+        "<b>Help / How it works</b>\n"
+        "1) Add keywords with <code>/addkeyword python, telegram</code> (comma-separated).\n"
+        "2) Use <code>/mysettings</code> anytime to check your filters and proposal.\n"
+        "Try <code>/selftest</code> for a sample."
     )
+    await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         row = s.execute(_t('SELECT is_active, trial_start, trial_end, license_until FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
-    is_admin = "yes" if is_admin_user(update.effective_user.id) else "no"
     is_active = "yes" if (row and row[0]) else "no"
     trial_start = row[1] if row else None
     trial_end = row[2] if row else None
@@ -173,7 +158,6 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "<b>Who am I</b>\n"
         f"• Telegram ID: <code>{update.effective_user.id}</code>\n"
-        f"• Admin: <b>{is_admin}</b>\n"
         f"• Active: <b>{is_active}</b>\n"
         f"• Trial start: {fmt_dt(trial_start)}\n"
         f"• Trial end: {fmt_dt(trial_end)}\n"
@@ -181,6 +165,18 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Keywords: {', '.join(kws) if kws else '(none)'}"
     )
     await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with get_session() as s:
+        user = get_or_create_user_by_tid(s, update.effective_user.id)
+    kws = list_keywords_safe(user.id)
+    kw_str = ", ".join(kws) if kws else "(none)"
+    await update.effective_chat.send_message(
+        f"<b>Your Settings</b>\n• <b>Keywords:</b> {kw_str}\n\nUsage: /addkeyword word1, word2.",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=settings_kb()
+    )
 
 def _parse_kw_args(text: str) -> List[str]:
     if not text: return []
@@ -193,18 +189,6 @@ def _parse_kw_args(text: str) -> List[str]:
         if p not in seen:
             seen.add(p); out.append(p)
     return out
-
-async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with get_session() as s:
-        user = get_or_create_user_by_tid(s, update.effective_user.id)
-    kws = list_keywords_safe(user.id)
-    kw_str = ", ".join(kws) if kws else "(none)"
-    await update.effective_chat.send_message(
-        f"<b>Your Settings</b>\n• <b>Keywords:</b> {kw_str}\n\nUsage: /addkeyword word1, word2.\nYou can also use the buttons below.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=settings_kb(),
-        disable_web_page_preview=True,
-    )
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.effective_message.text or ""
@@ -254,7 +238,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     url = "https://www.peopleperhour.com/freelance-jobs/technology-programming/other/"
     payload = urllib.parse.quote_plus(f"{job_title}|{url}")
-    kb = InlineKeyboardMarkup([[
+    kb = InlineKeyboardMarkup([[ 
         InlineKeyboardButton("📄 Proposal", url=url),
         InlineKeyboardButton("🔗 Original", url=url)
     ],[
@@ -290,15 +274,7 @@ async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Contact: @your_username")
     elif data == "act:admin":
         if is_admin_user(update.effective_user.id):
-            await q.message.reply_text(
-                "Admin commands:\n"
-                "/users — list users\n"
-                "/feedstatus — last 24h by platform\n"
-                "/grant <telegram_id> <days> — extend license\n"
-                "/block <telegram_id> / /unblock <telegram_id>\n"
-                "/broadcast <text> — to all active",
-                disable_web_page_preview=True
-            )
+            await q.message.reply_text("Admin: /users, /feedstatus")
         else:
             await q.message.reply_text("You're not an admin.")
     elif data == "act:back":
@@ -361,7 +337,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id):
+    if not is_admin_user(update.effective_user.id): 
         await update.message.reply_text("You're not an admin."); 
         return
     stats = get_platform_stats(STATS_WINDOW_HOURS) or {}
@@ -369,39 +345,8 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message(f"No events in the last {STATS_WINDOW_HOURS} hours."); return
     await update.effective_chat.send_message("📊 Feed status (last %dh):\n%s" % (STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k, v in stats.items()])))
 
-# ---------- Scheduler: notify 1 day before trial end ----------
-async def job_notify_trial_expiring(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(timezone.utc)
-    in_24h = now + timedelta(hours=24)
-    in_25h = now + timedelta(hours=25)
-    with get_session() as s:
-        rows = s.execute(_t('''
-            SELECT id, telegram_id, trial_end
-            FROM "user"
-            WHERE is_active = TRUE
-              AND trial_end IS NOT NULL
-              AND trial_end >= :t1 AND trial_end < :t2
-        '''), {"t1": in_24h, "t2": in_25h}).fetchall()
-    for uid, tid, trial_end in rows:
-        if has_day_before_sent(uid):
-            continue
-        text_msg = (
-            "<b>Heads up!</b> Your free trial ends in 24 hours.\n"
-            f"• Trial end: {trial_end.isoformat()}\n"
-            "Reply /contact if you need more time."
-        )
-        try:
-            await context.bot.send_message(chat_id=tid, text=text_msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-            mark_day_before_sent(uid)
-        except Exception as e:
-            log.warning("Failed to send trial notice to %s: %s", tid, e)
-
-def _setup_schedules(app: Application):
-    jq: JobQueue = app.job_queue
-    jq.run_repeating(job_notify_trial_expiring, interval=3600, first=30)
-
 def build_application() -> Application:
-    ensure_schema(); ensure_feed_events_schema(); ensure_saved_schema(); ensure_trial_notice_schema(); ensure_keyword_unique()
+    ensure_schema(); ensure_feed_events_schema(); ensure_saved_schema(); ensure_keyword_unique()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     # Commands
     app.add_handler(CommandHandler("start", start_cmd))
@@ -420,6 +365,4 @@ def build_application() -> Application:
     # Buttons
     app.add_handler(CallbackQueryHandler(cb_mainmenu, pattern="^(act:|kw:)"))
     app.add_handler(CallbackQueryHandler(cb_job, pattern="^job:"))
-    # Schedules
-    _setup_schedules(app)
     return app
