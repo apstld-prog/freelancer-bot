@@ -1,4 +1,4 @@
-# bot.py — /start fix (interval), Saved list, job:save/delete, anti-429
+# bot.py — stable build: interval CAST fix, Saved list, save/delete, menus
 import os, logging, asyncio, json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -20,9 +20,9 @@ from db_events import ensure_feed_events_schema, get_platform_stats
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
 
-BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or
-             os.getenv("BOT_TOKEN") or
-             os.getenv("TELEGRAM_TOKEN"))
+BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN")
+             or os.getenv("BOT_TOKEN")
+             or os.getenv("TELEGRAM_TOKEN"))
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
 
@@ -35,7 +35,7 @@ async def safe_send(chat, text, **kwargs):
         except RetryAfter as e:
             if e.retry_after and e.retry_after > 30:
                 raise
-            await asyncio.sleep(max(1, int(e.retry_after)))
+            await asyncio.sleep(max(1, int(e.retry_after or 1)))
         except (TimedOut, NetworkError):
             await asyncio.sleep(1 + i)
     return await chat.send_message(text, **kwargs)
@@ -61,7 +61,8 @@ def main_menu_kb(is_admin: bool=False) -> InlineKeyboardMarkup:
          InlineKeyboardButton("💾 Saved", callback_data="act:saved")],
         [InlineKeyboardButton("📨 Contact", callback_data="act:contact")],
     ]
-    if is_admin: kb.append([InlineKeyboardButton("🔥 Admin", callback_data="act:admin")])
+    if is_admin:
+        kb.append([InlineKeyboardButton("🔥 Admin", callback_data="act:admin")])
     return InlineKeyboardMarkup(kb)
 
 FEATURES_EN = (
@@ -169,11 +170,16 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'),
             {"id": usr.id}
         )
-        # FIX: robust interval χωρίς make_interval ονοματισμένο arg
+        # Robust interval: CAST(:d AS text) || ' days'
         s.execute(
-            text("UPDATE \"user\" "
-                 "SET trial_end=COALESCE(trial_end, (NOW() AT TIME ZONE 'UTC') + (:d::text || ' days')::interval) "
-                 "WHERE id=:id"),
+            text(
+                "UPDATE \"user\" "
+                "SET trial_end = COALESCE("
+                "    trial_end, "
+                "    (NOW() AT TIME ZONE 'UTC') + (CAST(:d AS text) || ' days')::interval"
+                ") "
+                "WHERE id = :id"
+            ),
             {"id": usr.id, "d": int(TRIAL_DAYS)},
         )
         expiry = s.execute(
@@ -242,7 +248,8 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "VALUES (:u, :k, NOW() AT TIME ZONE 'UTC', NOW() AT TIME ZONE 'UTC') "
                 "ON CONFLICT DO NOTHING"), {"u": u.id, "k": kw}).rowcount or 0
         s.commit()
-        cur = [r[0] for r in s.execute(text("SELECT keyword FROM keyword WHERE user_id=:u ORDER BY id"), {"u": u.id}).fetchall()]
+        cur = [r[0] for r in s.execute(text("SELECT keyword FROM keyword WHERE user_id=:u ORDER BY id"),
+                                       {"u": u.id}).fetchall()]
     msg = "✅ Added." if added else "ℹ️ Those keywords already exist (no changes)."
     await safe_send(update.effective_chat, msg + "\n\nCurrent keywords:\n• " + (", ".join(cur) if cur else "—"),
                     parse_mode=ParseMode.HTML)
@@ -258,7 +265,8 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         n = s.execute(text("DELETE FROM keyword WHERE user_id=:u AND keyword = ANY(:ks)"),
                       {"u": u.id, "ks": kws}).rowcount or 0
         s.commit()
-        left = [r[0] for r in s.execute(text("SELECT keyword FROM keyword WHERE user_id=:u ORDER BY id"), {"u": u.id}).fetchall()]
+        left = [r[0] for r in s.execute(text("SELECT keyword FROM keyword WHERE user_id=:u ORDER BY id"),
+                                        {"u": u.id}).fetchall()]
     await safe_send(update.effective_chat, f"🗑 Removed {n}.\n\nCurrent keywords:\n• " + (", ".join(left) if left else "—"),
                     parse_mode=ParseMode.HTML)
 
@@ -272,11 +280,17 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
         return await safe_send(update.effective_chat, "You are not an admin.")
     with get_session() as s:
-        rows = s.execute(text('SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200')).fetchall()
+        rows = s.execute(text(
+            'SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked '
+            'FROM "user" ORDER BY id DESC LIMIT 200'
+        )).fetchall()
         lines = ["<b>Users</b>"]
         for uid, tid, trial_end, lic, act, blk in rows:
             kwc = s.execute(text("SELECT count(*) FROM keyword WHERE user_id=:u"), {"u": uid}).scalar() or 0
-            lines.append(f"• <a href=\"tg://user?id={tid}\">{tid}</a> — kw:{kwc} | trial:{trial_end} | lic:{lic} | A:{_b(bool(act))} B:{_b(bool(blk))}")
+            lines.append(
+                f"• <a href=\"tg://user?id={tid}\">{tid}</a> — kw:{kwc} | "
+                f"trial:{trial_end} | lic:{lic} | A:{_b(bool(act))} B:{_b(bool(blk))}"
+            )
     await safe_send(update.effective_chat, "\n".join(lines), parse_mode=ParseMode.HTML)
 
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -360,7 +374,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await q.answer()
         if data == "act:addkw":
-            return await safe_send(q.message.chat, 
+            return await safe_send(q.message.chat,
                 "Add keywords with:\n<code>/addkeyword logo, lighting</code>\n"
                 "Remove: <code>/delkeyword logo</code> • Clear: <code>/clearkeywords</code>",
                 parse_mode=ParseMode.HTML)
@@ -370,10 +384,13 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rows = s.execute(text("SELECT keyword FROM keyword WHERE user_id=:u ORDER BY id"),
                                  {"u": u.id}).fetchall()
                 kws = [r[0] for r in rows]
-                row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'),
-                                {"id": u.id}).fetchone()
+                row = s.execute(text(
+                    'SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked '
+                    'FROM "user" WHERE id=:id'),
+                    {"id": u.id}).fetchone()
             return await safe_send(q.message.chat,
-                                   settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6])),
+                                   settings_text(kws, row[0], row[1], row[2], row[3], row[4],
+                                                 bool(row[5]), bool(row[6])),
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         if data == "act:help":
             return await safe_send(q.message.chat, HELP_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
@@ -427,7 +444,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("whoami", whoami_cmd))
     app.add_handler(CommandHandler("saved", saved_cmd))
 
-    app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:(addkw|settings|help|saved|contact|admin)$"))
+    app.add_handler(CallbackQueryHandler(menu_action_cb,
+                    pattern=r"^act:(addkw|settings|help|saved|contact|admin)$"))
     app.add_handler(CallbackQueryHandler(kw_clear_confirm_cb, pattern=r"^kw:clear:(yes|no)$"))
     app.add_handler(CallbackQueryHandler(job_action_cb, pattern=r"^job:(save|delete)(?::\d+)?$"))
     return app
