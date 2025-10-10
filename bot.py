@@ -29,11 +29,9 @@ from config import (
 from db import (
     get_session,
     ensure_schema,
-    ensure_keyword_unique,
-    # user helpers
+    # get_or_create_user_by_tid etc.
     get_or_create_user_by_tid,
     is_admin_user,
-    # keywords helpers
     list_keywords,
     count_keywords,
     add_keywords,
@@ -42,13 +40,30 @@ from db import (
 )
 from db_events import ensure_feed_events_schema, get_platform_stats
 
-# UI text helpers (keep original names if you already have these)
-from ui_texts import (
-    HELP_EN,
-    help_footer,
-    # In many of our previous builds we used welcome_full; we wrap to be compatible with your previous welcome_text usage.
-    welcome_full,
-)
+# Try to import ensure_keyword_unique; if missing in your db.py, use a no-op.
+try:
+    from db import ensure_keyword_unique  # type: ignore
+except Exception:
+    def ensure_keyword_unique():
+        try:
+            # optional: implement fallback constraint creation here if desired
+            logging.getLogger("bot").warning("ensure_keyword_unique() not found in db.py — skipping unique-keyword enforcement")
+        except Exception:
+            pass
+
+# UI text helpers
+try:
+    from ui_texts import (
+        HELP_EN,
+        help_footer,
+        welcome_full,
+    )
+except Exception:
+    # minimal fallbacks if ui_texts differs in your repo
+    HELP_EN = "<b>Help</b>\nUse /addkeyword to start receiving job alerts."
+    def help_footer(h:int)->str: return f"\n\nStats window: {h}h"
+    def welcome_full(trial_days: int = 10) -> str:
+        return f"<b>Welcome!</b> You have a {trial_days}-day trial. Use /addkeyword to begin."
 
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
@@ -73,16 +88,9 @@ def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
 
 
 def welcome_text(expiry: Optional[datetime]) -> str:
-    """
-    Keep same API the old code used (welcome_text(expiry)),
-    internally call your existing welcome_full() for consistency.
-    """
     try:
-        # If you prefer to show the exact trial end, format here and pass to welcome_full.
-        trial_days = TRIAL_DAYS if isinstance(TRIAL_DAYS, int) else 10
-        return welcome_full(trial_days=trial_days)
+        return welcome_full(trial_days=TRIAL_DAYS if isinstance(TRIAL_DAYS, int) else 10)
     except Exception:
-        # Fallback plain welcome if UI module differs
         return (
             "<b>Welcome!</b>\n"
             "Use <code>/addkeyword</code> to add search keywords and get curated job alerts.\n"
@@ -92,15 +100,8 @@ def welcome_text(expiry: Optional[datetime]) -> str:
 
 # ---------------- Commands ----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Start command:
-    - ensures user exists
-    - initializes / updates trial window (same logic signature as your older build)
-    - sends welcome + help and shows main menu keyboard
-    """
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
-        # Keep your existing SQL-style updates if schema supports them; ignore errors quietly to avoid breaking start.
         try:
             s.execute(
                 text(
@@ -236,7 +237,6 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  <b>📝</b> {description}"
     )
 
-    # For PPH we don't apply affiliate by default (unless you provide a prefix later)
     url = "https://www.peopleperhour.com/freelance-jobs/technology-programming/other/"
     kb = InlineKeyboardMarkup(
         [
@@ -254,9 +254,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("You are not an admin.")
         return
     with get_session() as s:
-        # Keep this compatible with your existing schema helper functions
         try:
-            # Show last users with keyword counts
             rows = s.execute(
                 text(
                     'SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200'
@@ -317,11 +315,11 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ---------------- Build Application (keep your existing shape) ----------------
+# ---------------- Build Application ----------------
 def build_application() -> Application:
     ensure_schema()
     ensure_feed_events_schema()
-    ensure_keyword_unique()
+    ensure_keyword_unique()  # no-op if missing
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -342,16 +340,12 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("unblock", unblock_cmd))
     app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
 
-    # (If you have callback queries in other modules, keep them there; we don’t change your UI wiring)
-
-    # Try to schedule any background tasks via JobQueue if you already use it elsewhere
     try:
         jq = app.job_queue or JobQueue()
         if app.job_queue is None:
             jq.set_application(app)
-        # Keep placeholders – your worker is a separate process; here we don't add new schedules
-        log.info("Scheduler: JobQueue ready")
+        logging.getLogger("bot").info("Scheduler: JobQueue ready")
     except Exception:
-        log.exception("JobQueue setup failed (non-fatal)")
+        logging.getLogger("bot").exception("JobQueue setup failed (non-fatal)")
 
     return app
