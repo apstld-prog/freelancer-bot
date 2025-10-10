@@ -91,7 +91,7 @@ def settings_text(keywords: List[str], countries: str|None, proposal_template: s
         "<i>For extension, contact the admin.</i>"
     )
 
-# ---------- /start (layout = Φωτο 1) ----------
+# ---------- /start (πληκτρολόγιο στο ΙΔΙΟ μήνυμα) ----------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     with get_session() as s:
@@ -114,11 +114,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Free trial ends:</b> {expiry.strftime('%Y-%m-%d %H:%M UTC') if isinstance(expiry, datetime) else '—'}\n\n"
         "Use <code>/help</code> for instructions."
     )
-    await update.effective_chat.send_message(first, parse_mode=ParseMode.HTML)
+    # ⬇️ Κουμπιά στο ΙΔΙΟ μήνυμα
     await update.effective_chat.send_message(
-        " ",  # κενό για να δέσει το πληκτρολόγιο όπως στη φωτό
+        first,
+        parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb(is_admin=is_admin_user(u.id))
     )
+    # Δεύτερο μήνυμα: Features block
     await update.effective_chat.send_message(FEATURES_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 # ---------- settings/help ----------
@@ -136,7 +138,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- keywords ----------
 def _parse_keywords(raw: str) -> List[str]:
-    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
+    parts = [p.strip() for chunk in raw split(",") for p in chunk.split() if p.strip()]
     seen, out = set(), []
     for p in parts:
         lp = p.lower()
@@ -271,5 +273,4 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:(addkw|settings|help|saved|contact|admin)$"))
     app.add_handler(CallbackQueryHandler(kw_clear_confirm_cb, pattern=r"^kw:clear:(yes|no)$"))
 
-    # Router για απλά μηνύματα προς admin παραμένει ίδιο όπως πριν (αν το χρειαστείς, το επαναφέρουμε)
     return app
