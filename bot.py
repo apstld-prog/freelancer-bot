@@ -1,4 +1,4 @@
-# bot.py — /start fix, Saved list, job:save/delete, anti-429
+# bot.py — /start fix (interval), Saved list, job:save/delete, anti-429
 import os, logging, asyncio, json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -165,16 +165,21 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     with get_session() as s:
         usr = get_or_create_user_by_tid(s, u.id)
-        s.execute(text('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'),
-                  {"id": usr.id})
+        s.execute(
+            text('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'),
+            {"id": usr.id}
+        )
+        # FIX: robust interval χωρίς make_interval ονοματισμένο arg
         s.execute(
             text("UPDATE \"user\" "
-                 "SET trial_end=COALESCE(trial_end, (NOW() AT TIME ZONE 'UTC') + make_interval(days=:d)) "
+                 "SET trial_end=COALESCE(trial_end, (NOW() AT TIME ZONE 'UTC') + (:d::text || ' days')::interval) "
                  "WHERE id=:id"),
             {"id": usr.id, "d": int(TRIAL_DAYS)},
         )
-        expiry = s.execute(text('SELECT COALESCE(license_until, trial_end) FROM "user" WHERE id=:id'),
-                           {"id": usr.id}).scalar()
+        expiry = s.execute(
+            text('SELECT COALESCE(license_until, trial_end) FROM "user" WHERE id=:id'),
+            {"id": usr.id}
+        ).scalar()
         s.commit()
 
     first = (
@@ -373,7 +378,6 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "act:help":
             return await safe_send(q.message.chat, HELP_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         if data == "act:saved":
-            # εμφάνιση saved εδώ απευθείας (για να μην χρειάζεται /saved)
             upd = SimpleNamespace(effective_user=q.from_user, effective_chat=q.message.chat)
             return await saved_cmd(upd, context)  # type: ignore
         if data == "act:contact":
