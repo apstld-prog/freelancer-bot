@@ -1,10 +1,9 @@
 
 import asyncio, logging, traceback
-from datetime import datetime
 from db import get_session
-from db_events import record_feed_event
-from db_jobs import insert_job_if_new, fetch_unsent_jobs_for_user, mark_job_sent
+from db_jobs import insert_job_if_new, mark_job_sent
 from db_users import get_active_users
+
 import platform_freelancer as pf
 import platform_peopleperhour as pph
 import platform_skywalker as psw
@@ -19,8 +18,9 @@ async def main():
     total = {}
     out = []
     try:
-        out += pf.fetch_freelancer()
-        total["freelancer"] = len(out)
+        r = pf.fetch_freelancer()
+        out += r
+        total["freelancer"] = len(r)
     except Exception as e:
         log.warning("Freelancer fetch error: %s", e)
     try:
@@ -51,7 +51,7 @@ async def main():
     log.info("Fetched summary: %s", total)
 
     if not out:
-        log.info("No jobs fetched; sleeping.")
+        log.info("No jobs fetched; exiting cycle.")
         return
 
     from telegram import Bot
@@ -63,20 +63,28 @@ async def main():
         log.info("Active users: %d", len(users))
         for user in users:
             try:
-                if KEYWORD_FILTER_MODE.lower() == "off":
-                    matched = out
+                # Keyword filter toggle
+                if str(getattr(__import__('config'), 'KEYWORD_FILTER_MODE', 'off')).lower() == 'on':
+                    kws = [k.lower() for k in user.keywords]
+                    matched = [j for j in out if any(k in (j.title.lower() + ' ' + j.description.lower()) for k in kws)]
                 else:
-                    kws = [kw.lower() for kw in user.keywords]
-                    matched = [j for j in out if any(k in (j.title.lower() + j.description.lower()) for k in kws)]
+                    matched = out
+
                 if not matched:
                     continue
 
                 for j in matched:
                     if not insert_job_if_new(s, j):
                         continue
-                    text_msg = f"<b>{j.title}</b>\n{j.description[:200]}...\n<a href='{j.url}'>View job</a>"
+                    text_msg = (
+                        f"<b>{getattr(j, 'title', '(no title)')}</b>\n"
+                        f"  <b>Source:</b> {getattr(j, 'source', '-')}" 
+                    )
+                    url = getattr(j, 'url', None) or '#'
+                    # simple body: keep style consistent; preview off
                     try:
-                        await bot.send_message(chat_id=user.telegram_id, text=text_msg, parse_mode='HTML', disable_web_page_preview=True)
+                        await bot.send_message(chat_id=user.telegram_id, text=text_msg + f"\n<a href='{url}'>Open</a>",
+                                               parse_mode='HTML', disable_web_page_preview=True)
                         mark_job_sent(s, j, user.id)
                     except Exception as e:
                         log.warning("Send failed to %s: %s", user.telegram_id, e)
