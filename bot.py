@@ -1,4 +1,4 @@
-# bot.py — EN-only code, preserves existing structure & UI
+# bot.py — fully compatible, keeps your UI; safe fallbacks if some db helpers are missing
 from __future__ import annotations
 
 import logging
@@ -26,13 +26,7 @@ from config import (
 from db import (
     get_session,
     ensure_schema,
-    # do not import is_admin_user from db — define locally
     get_or_create_user_by_tid,
-    list_keywords,
-    count_keywords,
-    add_keywords,
-    delete_keyword,
-    clear_keywords,
 )
 from db_events import ensure_feed_events_schema, get_platform_stats
 
@@ -42,6 +36,27 @@ try:
 except Exception:
     def ensure_keyword_unique():
         logging.getLogger("bot").warning("ensure_keyword_unique() not found in db.py — skipping")
+
+# Optional helper imports (provide fallbacks if missing)
+try:
+    from db import list_keywords as _list_keywords  # type: ignore
+except Exception:
+    _list_keywords = None
+
+try:
+    from db import add_keywords as _add_keywords  # type: ignore
+except Exception:
+    _add_keywords = None
+
+try:
+    from db import delete_keyword as _delete_keyword  # type: ignore
+except Exception:
+    _delete_keyword = None
+
+try:
+    from db import clear_keywords as _clear_keywords  # type: ignore
+except Exception:
+    _clear_keywords = None
 
 # UI texts
 try:
@@ -55,12 +70,80 @@ except Exception:
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
 
-# Local admin check (avoids missing db.is_admin_user)
+# Local admin check
 def is_admin_user(telegram_id: int) -> bool:
     try:
         return int(telegram_id) in ADMIN_IDS
     except Exception:
         return False
+
+# ---------------- Local SQL fallbacks for keyword helpers ----------------
+def list_keywords_fallback(user_id: int) -> List[str]:
+    with get_session() as s:
+        rows = s.execute(text('SELECT value FROM "keyword" WHERE user_id=:uid ORDER BY id ASC'), {"uid": user_id}).fetchall()
+        return [r[0] for r in rows if r and r[0]]
+
+def add_keywords_fallback(s, user_id: int, values: List[str]) -> int:
+    inserted = 0
+    for v in values:
+        v_norm = (v or "").strip()
+        if not v_norm:
+            continue
+        # check existence
+        exists = s.execute(text('SELECT 1 FROM "keyword" WHERE user_id=:uid AND value=:v LIMIT 1'),
+                           {"uid": user_id, "v": v_norm}).fetchone()
+        if exists:
+            continue
+        s.execute(text('INSERT INTO "keyword"(user_id, value) VALUES (:uid, :v)'), {"uid": user_id, "v": v_norm})
+        inserted += 1
+    if inserted:
+        s.commit()
+    return inserted
+
+def delete_keyword_fallback(s, user_id: int, value: str) -> bool:
+    res = s.execute(text('DELETE FROM "keyword" WHERE user_id=:uid AND value=:v'), {"uid": user_id, "v": value}).rowcount
+    if res:
+        s.commit()
+    return res > 0
+
+def clear_keywords_fallback(s, user_id: int) -> int:
+    res = s.execute(text('DELETE FROM "keyword" WHERE user_id=:uid'), {"uid": user_id}).rowcount
+    if res:
+        s.commit()
+    return int(res or 0)
+
+# Choose helpers (db-provided or fallbacks)
+def list_keywords_safe(user_id: int) -> List[str]:
+    try:
+        if _list_keywords:
+            return _list_keywords(user_id)  # type: ignore
+    except Exception:
+        log.exception("list_keywords (db) failed, using fallback")
+    return list_keywords_fallback(user_id)
+
+def add_keywords_safe(s, user_id: int, values: List[str]) -> int:
+    try:
+        if _add_keywords:
+            return _add_keywords(s, user_id, values)  # type: ignore
+    except Exception:
+        log.exception("add_keywords (db) failed, using fallback")
+    return add_keywords_fallback(s, user_id, values)
+
+def delete_keyword_safe(s, user_id: int, value: str) -> bool:
+    try:
+        if _delete_keyword:
+            return _delete_keyword(s, user_id, value)  # type: ignore
+    except Exception:
+        log.exception("delete_keyword (db) failed, using fallback")
+    return delete_keyword_fallback(s, user_id, value)
+
+def clear_keywords_safe(s, user_id: int) -> int:
+    try:
+        if _clear_keywords:
+            return _clear_keywords(s, user_id)  # type: ignore
+    except Exception:
+        log.exception("clear_keywords (db) failed, using fallback")
+    return clear_keywords_fallback(s, user_id)
 
 # ---------------- UI helpers ----------------
 def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
@@ -140,7 +223,7 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         user = get_or_create_user_by_tid(s, update.effective_user.id)
-        kws = list_keywords(user.id)
+        kws = list_keywords_safe(user.id)
         kw_str = ", ".join(kws) if kws else "(none)"
     await update.effective_chat.send_message(
         f"<b>My settings</b>\n• <b>Keywords:</b> {kw_str}\n\nUse /addkeyword, /delkeyword, /clearkeywords.",
@@ -165,7 +248,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
-            n = add_keywords(s, u.id, kws)
+            n = add_keywords_safe(s, u.id, kws)
         except Exception:
             log.exception("addkeyword failed")
             n = 0
@@ -180,7 +263,7 @@ async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
-            ok = delete_keyword(s, u.id, kw)
+            ok = delete_keyword_safe(s, u.id, kw)
         except Exception:
             log.exception("delkeyword failed")
             ok = False
@@ -190,7 +273,7 @@ async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
-            n = clear_keywords(s, u.id)
+            n = clear_keywords_safe(s, u.id)
         except Exception:
             log.exception("clearkeywords failed")
             n = 0
@@ -242,7 +325,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["<b>Users</b>"]
     for uid, tid, trial_end, lic, act, blk in rows:
         try:
-            kwc = count_keywords(uid)
+            kwc = len(list_keywords_safe(uid))
         except Exception:
             kwc = 0
         lines.append(
