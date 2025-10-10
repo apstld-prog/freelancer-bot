@@ -1,5 +1,6 @@
-# server.py — FastAPI + PTB application with webhook
-import os, logging
+# server.py — FastAPI + PTB application with proper lifecycle (initialize/start/stop/shutdown)
+import os
+import logging
 from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import Application
@@ -10,22 +11,38 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("server")
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
-BASE_URL = (os.getenv("EXTERNAL_URL")
-            or os.getenv("RENDER_EXTERNAL_URL")
-            or os.getenv("WEBHOOK_BASE_URL"))
+BASE_URL = (
+    os.getenv("EXTERNAL_URL")
+    or os.getenv("RENDER_EXTERNAL_URL")
+    or os.getenv("WEBHOOK_BASE_URL")
+)
 
+# Build the PTB application
 application: Application = build_application()
 
 app = FastAPI()
 
 @app.on_event("startup")
-async def startup():
+async def on_startup():
+    # IMPORTANT: initialize + start before processing updates
+    await application.initialize()
+    await application.start()
+
     if BASE_URL:
         url = f"{BASE_URL.rstrip('/')}/webhook/{WEBHOOK_SECRET}"
         await application.bot.set_webhook(url=url)
         log.info("Webhook set to %s", url)
     else:
-        log.info("No BASE_URL detected; running in polling-less webhook mode (Render will call us).")
+        log.info("No BASE_URL detected; webhook not set (dev mode).")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=False)
+    except Exception:
+        pass
+    await application.stop()
+    await application.shutdown()
 
 @app.get("/health")
 async def health():

@@ -170,7 +170,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'),
             {"id": usr.id}
         )
-        # Robust interval: CAST(:d AS text) || ' days'
         s.execute(
             text(
                 "UPDATE \"user\" "
