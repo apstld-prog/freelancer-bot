@@ -1,43 +1,47 @@
-
-import re
-import html
-import xml.etree.ElementTree as ET
+# platform_kariera.py
 import requests
-from typing import List, Dict
+from bs4 import BeautifulSoup
 
-def parse_rss(xml_text: str) -> List[Dict]:
-    items: List[Dict] = []
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return items
-    channel = root.find('channel') or root
-    for it in channel.findall('item'):
-        title = (it.findtext('title') or '').strip()
-        link = (it.findtext('link') or '').strip()
-        desc = (it.findtext('description') or '').strip()
-        desc = html.unescape(re.sub('<[^<]+?>', '', desc)).strip()
-        if not title or not link:
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
+
+def fetch(listing_url: str):
+    """
+    Αν το KARIERA_RSS που δίνεις είναι στην πραγματικότητα listing σελίδα HTML,
+    π.χ. https://www.kariera.gr/jobs , κάνουμε basic HTML scrape από τα job-cards.
+    Αν έχεις πραγματικό RSS, μπορείς να αλλάξεις αυτόν τον parser με XML parse.
+    """
+    out = []
+    if not listing_url:
+        return out
+    resp = requests.get(listing_url, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    # Συνήθη CSS selectors (ενδέχεται να θες προσαρμογή αν αλλάξει markup)
+    cards = soup.select("[data-test='job-result'], .job-card, article")
+    for c in cards[:50]:  # safeguard
+        a = c.find("a", href=True)
+        if not a:
             continue
-        items.append({
+        url = a["href"]
+        if url.startswith("/"):
+            # απόλυτο URL
+            url = "https://www.kariera.gr" + url
+        title = (a.get_text(strip=True) or "").strip()
+        if not title:
+            # δοκίμασε header
+            h = c.find(["h2", "h3"])
+            if h:
+                title = h.get_text(strip=True)
+        desc_tag = c.find(["p", "div"], class_=lambda x: x and "description" in x.lower()) or c.find("p")
+        desc = desc_tag.get_text(strip=True) if desc_tag else ""
+        if not title or not url:
+            continue
+        out.append({
             "title": title,
+            "url": url,
             "description": desc,
-            "url": link,
-            "budget_min": None,
-            "budget_max": None,
-            "currency": "EUR",
-            "source": "kariera",
-            "affiliate": False,
+            "source": "Kariera",
+            "platform": "kariera",
         })
-    return items
-
-def fetch(feed_url: str, timeout: int = 10) -> List[Dict]:
-    # Kariera δεν προσφέρει δημόσιο RSS από default· χρησιμοποιούμε όποιο URL μας δώσεις μέσω env.
-    if not feed_url:
-        return []
-    try:
-        resp = requests.get(feed_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        return parse_rss(resp.text)
-    except Exception:
-        return []
+    return out

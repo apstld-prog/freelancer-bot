@@ -1,42 +1,34 @@
-
-import re
-import html
-import xml.etree.ElementTree as ET
+# platform_careerjet.py
 import requests
-from typing import List, Dict
+from xml.etree import ElementTree as ET
+from html import unescape
 
-def parse_rss(xml_text: str) -> List[Dict]:
-    items: List[Dict] = []
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return items
-    channel = root.find('channel') or root
-    for it in channel.findall('item'):
-        title = (it.findtext('title') or '').strip()
-        link = (it.findtext('link') or '').strip()
-        desc = (it.findtext('description') or '').strip()
-        desc = html.unescape(re.sub('<[^<]+?>', '', desc)).strip()
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
+
+def fetch(rss_url: str):
+    """
+    Παίρνει RSS από Careerjet (π.χ. Ελλάδα).
+    Παράδειγμα rss_url:
+      - https://www.careerjet.gr/rss?s=&l=Ελλάδα
+      - ή άλλο feed URL της Careerjet
+    """
+    out = []
+    if not rss_url:
+        return out
+    resp = requests.get(rss_url, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    tree = ET.fromstring(resp.content)
+    for item in tree.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        desc = unescape((item.findtext("description") or "").strip())
         if not title or not link:
             continue
-        items.append({
+        out.append({
             "title": title,
-            "description": desc,
             "url": link,
-            "budget_min": None,
-            "budget_max": None,
-            "currency": "EUR",
-            "source": "careerjet",
-            "affiliate": False,
+            "description": desc,
+            "source": "Careerjet",
+            "platform": "careerjet",
         })
-    return items
-
-def fetch(feed_url: str, timeout: int = 10) -> List[Dict]:
-    if not feed_url:
-        return []
-    try:
-        resp = requests.get(feed_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        return parse_rss(resp.text)
-    except Exception:
-        return []
+    return out

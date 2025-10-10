@@ -1,40 +1,33 @@
-
-import re
-import html
-import xml.etree.ElementTree as ET
+# platform_skywalker.py
 import requests
-from typing import List, Dict
+from xml.etree import ElementTree as ET
+from html import unescape
 
-def parse_rss(xml_text: str) -> List[Dict]:
-    items = []
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return items
-    channel = root.find('channel') or root
-    for it in channel.findall('item'):
-        title = (it.findtext('title') or '').strip()
-        link = (it.findtext('link') or '').strip()
-        desc = html.unescape((it.findtext('description') or '').strip())
-        clean_desc = re.sub('<[^<]+?>', '', desc)
-        item = {
-            "external_id": link or title,
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
+
+def fetch(rss_url: str):
+    """
+    Παίρνει RSS όπως: https://www.skywalker.gr/jobs/feed
+    Επιστρέφει list[dict] με πεδία: title, url, description, source, platform
+    """
+    out = []
+    if not rss_url:
+        return out
+    resp = requests.get(rss_url, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    tree = ET.fromstring(resp.content)
+    # RSS 2.0: <item><title>..<link>..<description>..</item>
+    for item in tree.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        desc = unescape((item.findtext("description") or "").strip())
+        if not title or not link:
+            continue
+        out.append({
             "title": title,
-            "description": clean_desc,
             "url": link,
-            "budget_min": None,
-            "budget_max": None,
-            "currency": "EUR",
-            "source": "skywalker",
-            "affiliate": False,
-        }
-        items.append(item)
-    return items
-
-def fetch(feed_url: str, timeout: int = 10) -> List[Dict]:
-    try:
-        resp = requests.get(feed_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        return parse_rss(resp.text)
-    except Exception:
-        return []
+            "description": desc,
+            "source": "Skywalker",
+            "platform": "skywalker",
+        })
+    return out
