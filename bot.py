@@ -110,7 +110,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
-            # Activate user and init trial
             s.execute(_t("UPDATE \"user\" SET is_active=TRUE WHERE id=:id"), {"id": u.id})
             s.execute(_t("UPDATE \"user\" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE 'UTC') WHERE id=:id"), {"id": u.id})
             s.execute(_t("UPDATE \"user\" SET trial_end=COALESCE(trial_end, NOW() AT TIME ZONE 'UTC') + INTERVAL :days WHERE id=:id")
@@ -157,7 +156,7 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• License until: {lic_until or '-'}\n"
         f"• Keywords: {', '.join(kws) if kws else '(none)'}"
     )
-    await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML)
+    await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
@@ -167,6 +166,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_chat.send_message(
         f"<b>Your Settings</b>\n• <b>Keywords:</b> {kw_str}\n\nUsage: /addkeyword word1, word2.",
         parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
     )
 
 def _parse_kw_args(text: str) -> List[str]:
@@ -235,7 +235,10 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("⭐ Save", callback_data="job:save"),
         InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")
     ]])
-    await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    # IMPORTANT: disable_web_page_preview removes the banner
+    await update.effective_chat.send_message(
+        job_text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True
+    )
 
 async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; data = q.data if q else ""
@@ -257,6 +260,23 @@ async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("You're not an admin.")
     else:
         await q.message.reply_text("Unknown action.")
+
+async def cb_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles Save/Delete buttons from selftest and job cards."""
+    q = update.callback_query
+    data = q.data or ""
+    if data == "job:save":
+        await q.answer("Saved ⭐", show_alert=False)
+        await q.message.reply_text("Saved to favorites (demo).")
+    elif data == "job:delete":
+        await q.answer("Deleted 🗑️", show_alert=False)
+        try:
+            await q.message.delete()
+        except Exception:
+            # fallback if bot can't delete
+            await q.message.reply_text("Deleted (simulation).")
+    else:
+        await q.answer("Unknown action", show_alert=False)
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
@@ -296,5 +316,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("users", users_cmd))
     app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
     # Buttons
-    app.add_handler(CallbackQueryHandler(cb_mainmenu))
+    app.add_handler(CallbackQueryHandler(cb_mainmenu, pattern="^act:"))
+    app.add_handler(CallbackQueryHandler(cb_job, pattern="^job:"))
     return app
