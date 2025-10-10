@@ -1,6 +1,7 @@
 # bot.py — /start fix, Saved list, job:save/delete, anti-429
 import os, logging, asyncio, json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import List, Set, Dict, Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -166,7 +167,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         usr = get_or_create_user_by_tid(s, u.id)
         s.execute(text('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'),
                   {"id": usr.id})
-        # FIXED: make_interval + χωρίς έξτρα ')'
         s.execute(
             text("UPDATE \"user\" "
                  "SET trial_end=COALESCE(trial_end, (NOW() AT TIME ZONE 'UTC') + make_interval(days=:d)) "
@@ -196,12 +196,17 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
-        kws = [r[0] for r in s.execute(text("SELECT COALESCE(keyword,value) FROM keyword WHERE user_id=:u ORDER BY id")),
-               {"u": u.id}].fetchall()  # type: ignore
-    with get_session() as s:
-        row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE telegram_id=:tid'),
-                        {"tid": update.effective_user.id}).fetchone()
-    txt = settings_text([k[0] for k in kws], row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6]))
+        rows = s.execute(
+            text("SELECT COALESCE(keyword,value) AS kw FROM keyword WHERE user_id=:u ORDER BY id"),
+            {"u": u.id}
+        ).all()
+        kws = [r[0] for r in rows]
+        row = s.execute(text(
+            'SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked '
+            'FROM "user" WHERE id=:id'),
+            {"id": u.id}
+        ).fetchone()
+    txt = settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6]))
     await safe_send(update.effective_chat, txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,7 +328,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # δείξε τις τελευταίες 10 saved
     with get_session() as s:
         rows = s.execute(text("""
             SELECT sj.job_id, sj.saved_at,
@@ -358,7 +362,9 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "act:settings":
             with get_session() as s:
                 u = get_or_create_user_by_tid(s, q.from_user.id)
-                kws = [r[0] for r in s.execute(text("SELECT keyword FROM keyword WHERE user_id=:u ORDER BY id"), {"u": u.id}).fetchall()]
+                rows = s.execute(text("SELECT keyword FROM keyword WHERE user_id=:u ORDER BY id"),
+                                 {"u": u.id}).fetchall()
+                kws = [r[0] for r in rows]
                 row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'),
                                 {"id": u.id}).fetchone()
             return await safe_send(q.message.chat,
@@ -367,9 +373,9 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "act:help":
             return await safe_send(q.message.chat, HELP_EN, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         if data == "act:saved":
-            # forward to same logic
-            class DummyMsg: pass
-            return await saved_cmd(Update(update.update_id, message=q.message), context)  # type: ignore
+            # εμφάνιση saved εδώ απευθείας (για να μην χρειάζεται /saved)
+            upd = SimpleNamespace(effective_user=q.from_user, effective_chat=q.message.chat)
+            return await saved_cmd(upd, context)  # type: ignore
         if data == "act:contact":
             return await safe_send(q.message.chat, "Send your message here; it will be forwarded to the admin.")
         if data == "act:admin":
