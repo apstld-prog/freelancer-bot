@@ -12,6 +12,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from sqlalchemy import text
+from utils_fx import load_fx_rates, to_usd
 
 from config import BOT_TOKEN, ADMIN_IDS, STATS_WINDOW_HOURS, TRIAL_DAYS
 from db import get_session, save_job, list_saved_jobs, ensure_schema, get_or_create_user_by_tid
@@ -43,7 +44,8 @@ def is_admin_user(tid: int) -> bool:
         return False
 
 # -------- Keyword helpers (schema-agnostic) --------
-from sqlalchemy import text as _t
+from sqlalchemy import text
+from utils_fx import load_fx_rates, to_usd as _t
 
 def _kwexpr() -> str:
     return 'COALESCE(keyword, value)'
@@ -107,24 +109,42 @@ def welcome_text(expiry: Optional[datetime]) -> str:
 
 
 # -------- Commands --------
+
 async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Show saved jobs as full cards with buttons
+    from os import getenv
+    rates = load_fx_rates(getenv("FX_RATES",""))
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         rows = list_saved_jobs(s, u.id, limit=10)
     if not rows:
-        await update.effective_chat.send_message("No saved jobs yet."); return
-    lines = ["<b>⭐ Saved jobs (latest 10)</b>"]
+        await update.effective_chat.send_message("No saved jobs yet."); 
+        return
     for r in rows:
-        t = (r.title or "—").strip()
-        pr = r.proposal_url or r.original_url or ""
-        if pr:
-            lines.append(f"• <a href=\"{pr}\">{t}</a>")
-        else:
-            lines.append(f"• {t}")
-    await update.effective_chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        title = (r.title or "Saved Job").strip()
+        budget_line = ""
+        try:
+            amt = float(r.budget_amount) if r.budget_amount not in (None,"") else None
+        except Exception:
+            amt = None
+        ccy = (r.budget_currency or "").upper() if r.budget_currency else None
+        if amt is not None and ccy:
+            usd = to_usd(amt, ccy, rates)
+            if usd is not None and usd != amt:
+                budget_line = f"<b>Budget:</b> {amt:g} {ccy} ({usd:g} USD)"
+            else:
+                budget_line = f"<b>Budget:</b> {amt:g} {ccy}"
+        text_html = f"<b>{title}</b>"
+        if budget_line:
+            text_html += f"
+  {budget_line}"
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📄 Proposal", url=r.proposal_url or r.original_url or ""),
+            InlineKeyboardButton("🔗 Original", url=r.original_url or r.proposal_url or ""),
+        ]])
+        await update.effective_chat.send_message(text_html, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
 
-# -------- Commands --------
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
@@ -160,7 +180,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from sqlalchemy import text as _t
+    from sqlalchemy import text
+from utils_fx import load_fx_rates, to_usd as _t
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         row = s.execute(_t('SELECT trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'),
