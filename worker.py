@@ -63,7 +63,7 @@ def ensure_sent_table():
 
 
 def prune_sent_table(days: int = 7) -> None:
-    # ✅ Fix: υπολογίζουμε το cutoff σε Python αντί για INTERVAL binding
+    # compute cutoff timestamp in Python (avoid INTERVAL binding issues)
     from datetime import datetime, timedelta, timezone
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     with get_session() as s:
@@ -215,7 +215,7 @@ async def run_pipeline(keywords: List[str]) -> None:
 
 def get_keywords() -> List[str]:
     with get_session() as s:
-        rows = s.execute("SELECT DISTINCT value FROM keyword").fetchall()
+        rows = s.execute(sqltext("SELECT DISTINCT value FROM keyword")).fetchall()
         return [r[0] for r in rows]
 
 
