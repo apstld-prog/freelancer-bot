@@ -9,7 +9,7 @@ from dedup import make_key, prefer_affiliate
 import platform_skywalker as sky
 import platform_placeholders as ph
 import platform_freelancer as fr
-from db_events import ensure_schema, log_platform_event
+from db_events import ensure_feed_events_schema as ensure_schema, record_event as log_platform_event
 
 # Ensure the events table exists at import time (safe no-op if already there)
 ensure_schema()
