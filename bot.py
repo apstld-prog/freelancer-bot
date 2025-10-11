@@ -12,7 +12,27 @@ from telegram.ext import (
     ContextTypes,
 )
 from sqlalchemy import text
+import re
 from utils_fx import load_fx_rates, to_usd
+
+def _extract_budget_ccy_from_text(txt: str):
+    if not txt: 
+        return None, None
+    t = txt.replace(",", ".")
+    sym = {"$":"USD", "€":"EUR", "£":"GBP"}
+    import re as _re
+    m = _re.search(r'([\$€£])\s*(\d+(?:\.\d+)?)', t)
+    if m:
+        return float(m.group(2)), sym.get(m.group(1), None)
+    m = _re.search(r'(\d+(?:\.\d+)?)\s*(USD|EUR|GBP|AUD|CAD)\b', t, _re.I)
+    if m:
+        return float(m.group(1)), m.group(2).upper()
+    m = _re.search(r'(\d+(?:\.\d+)?)\s*[–-]\s*(\d+(?:\.\d+)?)', t)
+    if m:
+        return float(m.group(1)), None
+    return None, None
+
+
 
 from config import BOT_TOKEN, ADMIN_IDS, STATS_WINDOW_HOURS, TRIAL_DAYS
 from db import get_session, save_job, list_saved_jobs, ensure_schema, get_or_create_user_by_tid
@@ -45,6 +65,7 @@ def is_admin_user(tid: int) -> bool:
 
 # -------- Keyword helpers (schema-agnostic) --------
 from sqlalchemy import text
+import re
 from utils_fx import load_fx_rates, to_usd as _t
 
 def _kwexpr() -> str:
@@ -143,7 +164,7 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]])
         await update.effective_chat.send_message(text_html, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
 
-def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
@@ -180,6 +201,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from sqlalchemy import text as _t
     with get_session() as s:
@@ -203,15 +225,6 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     msg = "\n".join(parts)
     await update.effective_chat.send_message(msg, parse_mode=ParseMode.HTML)
-    # Optional lightweight reminder
-    try:
-        from datetime import datetime, timezone, timedelta
-        if hasattr(te, 'tzinfo'):
-            now = datetime.now(timezone.utc)
-            if now < te <= now + timedelta(hours=24):
-                await update.effective_chat.send_message("⏰ Reminder: your trial ends within 24 hours.")
-    except Exception:
-        pass
 
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -306,7 +319,8 @@ async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 with get_session() as s:
                     u = get_or_create_user_by_tid(s, update.effective_user.id)
-                    save_job(s, u.id, {"title": title, "proposal_url": prop_url, "original_url": orig_url})
+                    amt, ccy = _extract_budget_ccy_from_text(q.message.text_html or q.message.text or "")
+                    save_job(s, u.id, {"title": title, "proposal_url": prop_url, "original_url": orig_url, "budget_amount": amt, "budget_currency": ccy})
             except Exception:
                 pass
             try: await q.message.delete()
