@@ -88,6 +88,81 @@ def wrap_freelancer(url: str) -> str:
     return f"{AFFILIATE_PREFIX_FREELANCER}&dl={url}"
 
 
+
+# --------------------------------------------------------------
+# 🚀 Deliver new matching jobs to users
+# --------------------------------------------------------------
+def deliver_to_users(items: List[Dict]) -> None:
+    """Send job alerts to each user whose keywords match (minimal, no UI changes)."""
+    import os
+    import httpx
+    from db import get_session
+    from sqlalchemy import text as sqltext
+
+    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+    if not BOT_TOKEN:
+        return
+    TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    with get_session() as s:
+        rows = s.execute(sqltext('SELECT id, telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
+        users = [(int(r[0]), int(r[1])) for r in rows]
+
+    for uid, chat_id in users:
+        with get_session() as s:
+            kw_rows = s.execute(sqltext("SELECT value FROM keyword WHERE user_id=:u"), {"u": uid}).fetchall()
+            user_keywords = [r[0] for r in kw_rows if r and r[0]]
+
+        for it in items:
+            if not match_keywords(it, user_keywords):
+                continue
+
+            title = it.get("title", "Untitled")
+            bmin = it.get("budget_min_usd") or it.get("budget_min")
+            bmax = it.get("budget_max_usd") or it.get("budget_max")
+            cur  = "USD" if (it.get("budget_min_usd") or it.get("budget_max_usd")) else (it.get("currency") or "")
+            if bmin and bmax:
+                budget_str = f"{bmin}–{bmax} {cur}".strip()
+            elif bmin:
+                budget_str = f"{bmin} {cur}".strip()
+            elif bmax:
+                budget_str = f"{bmax} {cur}".strip()
+            else:
+                budget_str = "N/A"
+
+            orig = it.get("original_url") or it.get("url") or ""
+            aff  = it.get("affiliate_url") or (wrap_freelancer(orig) if (orig and it.get("source") == "freelancer") else orig)
+
+            text_msg = (
+                f"💼 <b>{title}</b>\n"
+                f"💰 <b>Budget:</b> {budget_str}\n"
+                f"📦 <b>Source:</b> {it.get('source','unknown').title()}\n"
+            )
+
+            kb = {
+                "inline_keyboard": [
+                    [{"text": "📄 Proposal", "url": aff or orig},
+                     {"text": "🔗 Original", "url": orig or aff}],
+                    [{"text": "⭐ Save", "callback_data": "job:save"},
+                     {"text": "🗑️ Delete", "callback_data": "job:delete"}]
+                ]
+            }
+
+            try:
+                httpx.post(
+                    TG_API,
+                    json={
+                        "chat_id": chat_id,
+                        "text": text_msg,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                        "reply_markup": kb,
+                    },
+                    timeout=20,
+                )
+            except Exception as e:
+                print(f"[deliver_to_users] send fail to {chat_id}: {e}")
+
 # --------------------------------------------------------------
 # 🧠 Worker main loop
 # --------------------------------------------------------------
@@ -111,6 +186,9 @@ if __name__ == "__main__":
 
             # Run the full pipeline (fetch, match, dedup, record events)
             _items = run_pipeline(keywords)
+
+            # deliver alerts to users
+            deliver_to_users(_items)
 
             log.info("[Worker] cycle completed — keywords=%d, items=%d",
                      len(keywords), len(_items))
