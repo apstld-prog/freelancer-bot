@@ -14,6 +14,23 @@ from db_events import ensure_schema, log_platform_event
 # Ensure the events table exists at import time (safe no-op if already there)
 ensure_schema()
 
+# --------------------------------------------------------------
+# 🧱 Ensure sent_job table (for deduped sending)
+# --------------------------------------------------------------
+def ensure_sent_table() -> None:
+    from db import get_session
+    from sqlalchemy import text as sqltext
+    with get_session() as s:
+        s.execute(sqltext("""
+        CREATE TABLE IF NOT EXISTS sent_job (
+            job_key TEXT PRIMARY KEY,
+            sent_at TIMESTAMPTZ DEFAULT NOW()
+        )
+        """))
+        s.commit()
+
+ensure_sent_table()
+
 def match_keywords(item: Dict, keywords: List[str]) -> bool:
     if not keywords:
         return True
@@ -90,10 +107,10 @@ def wrap_freelancer(url: str) -> str:
 
 
 # --------------------------------------------------------------
-# 🚀 Deliver new matching jobs to users
+# 🚀 Deliver new matching jobs to users (no duplicates)
 # --------------------------------------------------------------
 def deliver_to_users(items: List[Dict]) -> None:
-    """Send job alerts to each user whose keywords match (minimal, no UI changes)."""
+    """Send job alerts per user keywords, avoiding duplicates via sent_job table."""
     import os
     import httpx
     from db import get_session
@@ -104,16 +121,37 @@ def deliver_to_users(items: List[Dict]) -> None:
         return
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    with get_session() as s:
-        rows = s.execute(sqltext('SELECT id, telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
-        users = [(int(r[0]), int(r[1])) for r in rows]
+    for it in items:
+        # Build a stable key for this item (reuse existing dedup logic)
+        try:
+            job_key = make_key(it)
+        except Exception:
+            # Fallback: use URL or title
+            job_key = it.get("affiliate_url") or it.get("original_url") or it.get("url") or it.get("title") or "unknown"
 
-    for uid, chat_id in users:
+        # Try to reserve this job once globally (UPSERT). Only the first time proceeds.
+        inserted = False
         with get_session() as s:
-            kw_rows = s.execute(sqltext("SELECT value FROM keyword WHERE user_id=:u"), {"u": uid}).fetchall()
-            user_keywords = [r[0] for r in kw_rows if r and r[0]]
+            s.execute(sqltext("CREATE TABLE IF NOT EXISTS sent_job (job_key TEXT PRIMARY KEY, sent_at TIMESTAMPTZ DEFAULT NOW())"))
+            res = s.execute(sqltext("INSERT INTO sent_job(job_key) VALUES (:k) ON CONFLICT DO NOTHING"), { "k": job_key })
+            s.commit()
+            inserted = (res.rowcount == 1)
 
-        for it in items:
+        if not inserted:
+            # Already sent in a previous cycle; skip delivering to everyone
+            continue
+
+        # We will send to users for whom this item matches their personal keywords
+        with get_session() as s:
+            rows = s.execute(sqltext('SELECT id, telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
+            users = [(int(r[0]), int(r[1])) for r in rows]
+
+        for uid, chat_id in users:
+            # Load this user's keywords
+            with get_session() as s:
+                kw_rows = s.execute(sqltext("SELECT value FROM keyword WHERE user_id=:u"), {"u": uid}).fetchall()
+                user_keywords = [r[0] for r in kw_rows if r and r[0]]
+
             if not match_keywords(it, user_keywords):
                 continue
 
@@ -187,7 +225,7 @@ if __name__ == "__main__":
             # Run the full pipeline (fetch, match, dedup, record events)
             _items = run_pipeline(keywords)
 
-            # deliver alerts to users
+            # deliver alerts to users (deduped)
             deliver_to_users(_items)
 
             log.info("[Worker] cycle completed — keywords=%d, items=%d",
