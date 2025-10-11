@@ -21,6 +21,7 @@ from sqlalchemy import text
 from db import ensure_schema, get_session, get_or_create_user_by_tid
 from config import ADMIN_IDS, TRIAL_DAYS, STATS_WINDOW_HOURS
 from db_events import ensure_feed_events_schema, get_platform_stats
+from db_events import record_event
 from db_keywords import (
     list_keywords, add_keywords, count_keywords,
     ensure_keyword_unique, delete_keywords, clear_keywords
@@ -238,6 +239,12 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
     ])
     await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    # Log a synthetic event so /feedstatus has data
+    try:
+        record_event('freelancer', payload={'kind': 'selftest'})
+    except Exception:
+        pass
 
 # ---------- Admin ----------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
