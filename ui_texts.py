@@ -71,3 +71,5 @@ def settings_text(keywords, countries, proposal_template, trial_start, trial_end
 • Greece: <a href="https://www.jobfind.gr">JobFind.gr</a>, <a href="https://www.skywalker.gr">Skywalker.gr</a>, <a href="https://www.kariera.gr">Kariera.gr</a>
 
 <i>For extension, contact the admin.</i>"""
+
+# Note: /saved command added dynamically

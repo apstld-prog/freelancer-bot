@@ -14,7 +14,7 @@ from telegram.ext import (
 from sqlalchemy import text
 
 from config import BOT_TOKEN, ADMIN_IDS, STATS_WINDOW_HOURS, TRIAL_DAYS
-from db import get_session, ensure_schema, get_or_create_user_by_tid
+from db import get_session, save_job, list_saved_jobs, ensure_schema, get_or_create_user_by_tid
 from db_events import ensure_feed_events_schema, get_platform_stats
 
 log = logging.getLogger("bot")
@@ -104,6 +104,24 @@ def welcome_text(expiry: Optional[datetime]) -> str:
         return welcome_full(trial_days=TRIAL_DAYS if isinstance(TRIAL_DAYS, int) else 10)
     except Exception:
         return "<b>Welcome!</b>\nUse /addkeyword to add search keywords."
+
+
+# -------- Commands --------
+async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with get_session() as s:
+        u = get_or_create_user_by_tid(s, update.effective_user.id)
+        rows = list_saved_jobs(s, u.id, limit=10)
+    if not rows:
+        await update.effective_chat.send_message("No saved jobs yet."); return
+    lines = ["<b>⭐ Saved jobs (latest 10)</b>"]
+    for r in rows:
+        t = (r.title or "—").strip()
+        pr = r.proposal_url or r.original_url or ""
+        if pr:
+            lines.append(f"• <a href=\"{pr}\">{t}</a>")
+        else:
+            lines.append(f"• {t}")
+    await update.effective_chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 # -------- Commands --------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -255,7 +273,7 @@ async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "act:help":
         await help_cmd(update, context)
     elif data == "act:saved":
-        await q.message.reply_text("You haven't saved any jobs yet.")
+        await saved_cmd(update, context)
     elif data == "act:contact":
         await q.message.reply_text("Contact: @your_username")
     elif data == "act:admin":
@@ -265,7 +283,42 @@ async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await q.message.reply_text("You're not an admin.")
 
+
 elif data.startswith("job:"):
+        # Extract info from keyboard
+        title = (q.message.text_html or q.message.text or "").split("\n",1)[0].strip()
+        prop_url = None; orig_url = None
+        try:
+            km = q.message.reply_markup
+            for row in (km.inline_keyboard or []):
+                for b in row:
+                    txt = (getattr(b, "text", "") or "").lower()
+                    if txt.startswith("📄") and b.url:
+                        prop_url = b.url
+                    if txt.startswith("🔗") and b.url:
+                        orig_url = b.url
+        except Exception:
+            pass
+        if data == "job:save":
+            try:
+                with get_session() as s:
+                    u = get_or_create_user_by_tid(s, update.effective_user.id)
+                    save_job(s, u.id, {"title": title, "proposal_url": prop_url, "original_url": orig_url})
+            except Exception:
+                pass
+            try:
+                await q.message.delete()
+            except Exception:
+                pass
+            await q.message.chat.send_message("⭐ Saved to your list.")
+        elif data == "job:delete":
+            try:
+                await q.message.delete()
+            except Exception:
+                pass
+            await q.message.chat.send_message("🗑️ Deleted.")
+        else:
+            await q.message.chat.send_message("Unknown action.")
     # Save/Delete actions from selftest or job cards
     if data == "job:save":
         try:
@@ -308,6 +361,7 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_application() -> Application:
     ensure_schema(); ensure_feed_events_schema(); ensure_keyword_unique()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.job_queue.run_repeating(reminder_job, interval=60*60*12, first=60)
     # Commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -316,6 +370,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app.add_handler(CommandHandler("addkw", addkeyword_cmd))
     app.add_handler(CommandHandler("keywords", mysettings_cmd))
+    app.add_handler(CommandHandler("saved", saved_cmd))
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))

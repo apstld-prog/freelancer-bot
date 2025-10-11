@@ -23,8 +23,25 @@ def now_utc():
 
 # ------------------------- MODELS -------------------------
 
+
+class SavedJob(Base):
+    __tablename__ = "saved_job"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user.id"), nullable=False, index=True)
+    job_id = Column(Text, nullable=True)
+    title = Column(Text, nullable=True)
+    description = Column(Text, nullable=True)
+    proposal_url = Column(Text, nullable=True)
+    original_url = Column(Text, nullable=True)
+    budget_amount = Column(Text, nullable=True)
+    budget_currency = Column(Text, nullable=True)
+    saved_at = Column(TIMESTAMP(timezone=True), server_default=text("NOW() AT TIME ZONE 'UTC'"))
+
+    user = relationship("User", backref="saved_jobs")
+
 class User(Base):
     __tablename__ = "user"
+    trial_reminder_sent = Column(Boolean, nullable=False, server_default=text('false'))
     id = Column(Integer, primary_key=True)
     telegram_id = Column(BigInteger, unique=True, nullable=False)
 
@@ -170,3 +187,21 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
     if to_insert:
         db.commit()
     return len(to_insert)
+
+
+def save_job(db, user_id: int, data: dict) -> None:
+    sj = SavedJob(
+        user_id=user_id,
+        job_id=data.get("job_id"),
+        title=data.get("title"),
+        description=data.get("description"),
+        proposal_url=data.get("proposal_url"),
+        original_url=data.get("original_url"),
+        budget_amount=str(data.get("budget_amount") or ""),
+        budget_currency=str(data.get("budget_currency") or ""),
+    )
+    db.add(sj)
+    db.commit()
+
+def list_saved_jobs(db, user_id: int, limit: int = 10):
+    return db.query(SavedJob).filter(SavedJob.user_id==user_id).order_by(SavedJob.saved_at.desc()).limit(limit).all()
