@@ -1,6 +1,6 @@
 
 def welcome_full(trial_days: int = 10) -> str:
-    sec = f"""<b>👋 Welcome to Freelancer Alert Bot!</b>
+    return f"""<b>👋 Welcome to Freelancer Alert Bot!</b>
 
 🎁 You have a <b>{trial_days}-day free trial</b>.
 Automatically finds matching freelance jobs from top platforms and sends you instant alerts.
@@ -31,15 +31,12 @@ placeholders: <code>{jobtitle}</code>, <code>{experience}</code>, <code>{stack}<
 <b>/platforms</b> <i>CC</i> to see platforms by country (e.g., <code>/platforms GR</code>).
 """
 
-def help_footer(hours: int = 24, admin: bool=False) -> str:
-    base = f"""
+def help_footer(hours: int = 24) -> str:
+    return f"""
 <b>🛰 Platforms monitored:</b>
 • Global: <a href="https://www.freelancer.com">Freelancer.com</a> (affiliate links), PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap
   <i>(* referral/curated platforms)</i>
 • Greece: <a href="https://www.jobfind.gr">JobFind.gr</a>, <a href="https://www.skywalker.gr">Skywalker.gr</a>, <a href="https://www.kariera.gr">Kariera.gr</a>
-"""
-    if admin:
-        base += f"""
 
 <b>👑 Admin commands</b>:
 <code>/users</code> — list users
@@ -48,7 +45,6 @@ def help_footer(hours: int = 24, admin: bool=False) -> str:
 <code>/broadcast &lt;text&gt;</code> — to all active
 <code>/feedstatus</code> — last {hours}h by platform
 """
-    return base
 
 def settings_text(keywords, countries, proposal_template, trial_start, trial_end, license_until, active, blocked) -> str:
     def b(v): return "✅" if v else "❌"
@@ -59,7 +55,7 @@ def settings_text(keywords, countries, proposal_template, trial_start, trial_end
     te = trial_end.isoformat().replace("+00:00", "Z") if trial_end else "—"
     lic = "None" if not license_until else license_until.isoformat().replace("+00:00", "Z")
 
-    sec = f"""<b>🛠 Your Settings</b>
+    return f"""<b>🛠 Your Settings</b>
 • <b>Keywords:</b> {k}
 • <b>Countries:</b> {c}
 • <b>Proposal template:</b> {pt}
@@ -75,7 +71,3 @@ def settings_text(keywords, countries, proposal_template, trial_start, trial_end
 • Greece: <a href="https://www.jobfind.gr">JobFind.gr</a>, <a href="https://www.skywalker.gr">Skywalker.gr</a>, <a href="https://www.kariera.gr">Kariera.gr</a>
 
 <i>For extension, contact the admin.</i>"""
-
-
-def help_footer_wrapper(hours:int=24, admin:bool=False)->str:
-    pass

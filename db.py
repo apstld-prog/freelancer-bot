@@ -69,37 +69,6 @@ def _safe_exec(session, sql: str):
 def ensure_schema():
     Base.metadata.create_all(bind=engine)
 
-    # Ensure trial/license columns exist on user
-    _safe_exec(s, """
-    DO $$
-    BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name='user' AND column_name='trial_start'
-        ) THEN
-            ALTER TABLE "user" ADD COLUMN trial_start TIMESTAMPTZ NULL;
-        END IF;
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name='user' AND column_name='trial_end'
-        ) THEN
-            ALTER TABLE "user" ADD COLUMN trial_end TIMESTAMPTZ NULL;
-        END IF;
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name='user' AND column_name='license_until'
-        ) THEN
-            ALTER TABLE "user" ADD COLUMN license_until TIMESTAMPTZ NULL;
-        END IF;
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name='user' AND column_name='trial_reminder_sent'
-        ) THEN
-            ALTER TABLE "user" ADD COLUMN trial_reminder_sent BOOLEAN NOT NULL DEFAULT FALSE;
-        END IF;
-    END$$;
-    """ )
-
     # Migrate “value” column if table exists with legacy columns
     with SessionLocal() as s:
         _safe_exec(s, """

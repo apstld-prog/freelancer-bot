@@ -2,9 +2,8 @@
 import os
 
 # --- Core env ---
-BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///freelancer.db")
 
