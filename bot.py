@@ -242,6 +242,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Log a synthetic event so /feedstatus has data
     try:
+        ensure_feed_events_schema()
         record_event('freelancer', payload={'kind': 'selftest'})
     except Exception:
         pass
