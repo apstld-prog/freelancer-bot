@@ -186,25 +186,27 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
             s.execute(_t('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW()) WHERE id=:id'), {"id": u.id})
-            s.execute(_t('UPDATE "user" SET trial_end=COALESCE(trial_end, NOW() + INTERVAL :days) WHERE id=:id'),
-                     {"id": u.id, "days": f"{days} days"})
+            s.execute(_t('UPDATE "user" SET trial_end = COALESCE(trial_end, NOW() + (:d || \' days\')::interval) WHERE id=:id'),
+                     {"id": u.id, "d": str(days)})
             s.commit()
         except Exception:
             pass
-    await update.effective_chat.send_message(welcome_full(days), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=main_keyboard())
+    await update.effective_chat.send_message(welcome_full(days), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=main_keyboard(is_admin_user(update.effective_user.id)))
 
 
-# Show current trial dates to user
+
+
+# Also show the current trial dates
 try:
     row = None
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         row = s.execute(_t('SELECT trial_start, trial_end, license_until FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
     if row:
-        ts = row[0]; te = row[1]; lic = row[2]
+        ts, te, lic = row
         await update.effective_chat.send_message(
             f"<b>🧾 Your access</b>\n• Start: {ts}\n• Trial ends: {te} UTC\n• License until: {lic}",
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
         )
 except Exception:
     pass
