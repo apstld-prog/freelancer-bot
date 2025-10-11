@@ -130,22 +130,52 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True,
     )
 
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    is_admin = is_admin_user(update.effective_user.id)
+    base = HELP_EN + help_footer(STATS_WINDOW_HOURS, admin=is_admin)
     await update.effective_chat.send_message(
-        HELP_EN + help_footer(STATS_WINDOW_HOURS),
+        base,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
 
+
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from sqlalchemy import text as _t
     with get_session() as s:
-        user = get_or_create_user_by_tid(s, update.effective_user.id)
-    kws = list_keywords_safe(user.id)
+        u = get_or_create_user_by_tid(s, update.effective_user.id)
+        row = s.execute(_t('SELECT trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'),
+                        {"id": u.id}).fetchone()
+    kws = list_keywords_safe(u.id)
     kw_str = ", ".join(kws) if kws else "(none)"
-    await update.effective_chat.send_message(
-        f"<b>Your Settings</b>\n• <b>Keywords:</b> {kw_str}\n\nUsage: /addkeyword word1, word2 (English or Greek).",
-        parse_mode=ParseMode.HTML,
-    )
+    ts = row[0] or "—"
+    te = row[1] or "—"
+    lic = row[2] or "None"
+    active = bool(row[3]); blocked = bool(row[4])
+    def b(x): return "✅" if x else "❌"
+    msg = (f"<b>🛠 Your Settings</b>
+"
+           f"• <b>Keywords:</b> {kw_str}
+
+"
+           f"<b>●</b> Start date: {ts}
+"
+           f"<b>●</b> Trial ends: {te} UTC
+"
+           f"<b>🔑</b> License until: {lic}
+"
+           f"<b>✅ Active:</b> {b(active)}    <b>⛔ Blocked:</b> {b(blocked)}")
+    await update.effective_chat.send_message(msg, parse_mode=ParseMode.HTML)
+    # Reminder if expiring within 24h
+    try:
+        from datetime import datetime, timezone, timedelta
+        if isinstance(row[1], datetime):
+            now = datetime.now(timezone.utc)
+            if now < row[1] <= now + timedelta(hours=24):
+                await update.effective_chat.send_message("⏰ Reminder: your trial ends within 24 hours.")
+    except Exception:
+        pass
 
 def _parse_kw_args(text: str) -> List[str]:
     if not text: return []
@@ -230,11 +260,30 @@ async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Contact: @your_username")
     elif data == "act:admin":
         if is_admin_user(update.effective_user.id):
+            await q.message.reply_text("/users, /grant <id> <days>, /block <id>, /unblock <id>, /broadcast <text>, /feedstatus")
             await q.message.reply_text("Admin: /users, /feedstatus")
         else:
             await q.message.reply_text("You're not an admin.")
+
+elif data.startswith("job:"):
+    # Save/Delete actions from selftest or job cards
+    if data == "job:save":
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        await q.message.chat.send_message("⭐ Saved to your list.")
+    elif data == "job:delete":
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        await q.message.chat.send_message("🗑️ Deleted.")
     else:
-        await q.message.reply_text("Unknown action.")
+        await q.message.chat.send_message("Unknown action.")
+else:
+    await q.message.reply_text("Unknown action.")
+
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
