@@ -56,19 +56,18 @@ def ensure_sent_table():
         s.execute(sqltext("""
     CREATE TABLE IF NOT EXISTS sent_job (
         job_key TEXT PRIMARY KEY,
-        sent_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE \'UTC\')
+        sent_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC')
     );
 """))
         s.commit()
 
 
 def prune_sent_table(days: int = 7) -> None:
+    # ✅ Fix: υπολογίζουμε το cutoff σε Python αντί για INTERVAL binding
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     with get_session() as s:
-        s.execute(
-            sqltext(
-                "DELETE FROM sent_job WHERE sent_at < (NOW() AT TIME ZONE 'UTC') - INTERVAL :d || ' days'"
-            ).bindparams(d=days)
-        )
+        s.execute(sqltext("DELETE FROM sent_job WHERE sent_at < :cutoff"), {"cutoff": cutoff})
         s.commit()
 
 
@@ -90,17 +89,15 @@ def is_recent(item: Dict, days: int = 7) -> bool:
             try:
                 s = dt.replace("Z", "+00:00")
                 dti = datetime.fromisoformat(s)
-                if dti.tzinfo is None:
-                    dti = dti.replace(tzinfo=timezone.utc)
-                return dti >= cutoff
             except Exception:
                 try:
                     dti = parsedate_to_datetime(dt)
-                    if dti.tzinfo is None:
-                        dti = dti.replace(tzinfo=timezone.utc)
-                    return dti >= cutoff
                 except Exception:
-                    pass
+                    dti = None
+            if dti is not None:
+                if dti.tzinfo is None:
+                    dti = dti.replace(tzinfo=timezone.utc)
+                return dti >= cutoff
         try:
             ts = float(dt)
             dti = datetime.fromtimestamp(ts, tz=timezone.utc)
