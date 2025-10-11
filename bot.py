@@ -5,6 +5,19 @@ from datetime import datetime
 from typing import List, Optional
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+
+
+def main_keyboard(is_admin: bool=False) -> InlineKeyboardMarkup:
+    # Fallback keyboard (same layout as screenshots)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("+ Add Keywords", callback_data="act:addkw"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
+        [InlineKeyboardButton("🆘 Help", callback_data="act:help"),
+         InlineKeyboardButton("💾 Saved", callback_data="act:saved")],
+        [InlineKeyboardButton("📨 Contact", callback_data="act:contact"),
+         InlineKeyboardButton("🔥 Admin", callback_data="act:admin")]
+    ])
+
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder, Application,
@@ -179,6 +192,22 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     await update.effective_chat.send_message(welcome_full(days), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=main_keyboard())
+
+
+# Show current trial dates to user
+try:
+    row = None
+    with get_session() as s:
+        u = get_or_create_user_by_tid(s, update.effective_user.id)
+        row = s.execute(_t('SELECT trial_start, trial_end, license_until FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
+    if row:
+        ts = row[0]; te = row[1]; lic = row[2]
+        await update.effective_chat.send_message(
+            f"<b>🧾 Your access</b>\n• Start: {ts}\n• Trial ends: {te} UTC\n• License until: {lic}",
+            parse_mode=ParseMode.HTML
+        )
+except Exception:
+    pass
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin = is_admin_user(update.effective_user.id)
