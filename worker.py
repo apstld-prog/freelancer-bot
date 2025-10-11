@@ -1,14 +1,3 @@
-
-# --------------------------------------------------------------
-# 🧹 Prune sent_job entries older than N days
-# --------------------------------------------------------------
-def prune_sent_table(days: int = 7) -> None:
-    from db import get_session
-    from sqlalchemy import text as sqltext
-    with get_session() as s:
-        s.execute(sqltext("DELETE FROM sent_job WHERE sent_at < (NOW() AT TIME ZONE 'UTC') - INTERVAL :d || ' days'").bindparams(d=days))
-        s.commit()
-
 # worker.py
 from typing import List, Dict
 from config import (
@@ -81,54 +70,6 @@ def prepare_display(item: Dict, rates: dict) -> Dict:
         if item.get(fld) is not None and item.get("currency"):
             item[fld + "_usd"] = to_usd(item.get(fld), item.get("currency"), rates)
     return item
-
-
-# --------------------------------------------------------------
-# ⏱ Keep only items not older than N days (default 7)
-# --------------------------------------------------------------
-def is_recent(item: Dict, days: int = 7) -> bool:
-    from datetime import datetime, timezone, timedelta
-    from email.utils import parsedate_to_datetime
-
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    # Candidate fields commonly used by our sources
-    for key in ("created_at", "published_at", "pub_date", "date"):
-        dt = item.get(key)
-        if not dt:
-            continue
-        # If it's already a datetime
-        if hasattr(dt, 'tzinfo') or isinstance(dt, datetime):
-            try:
-                return dt >= cutoff
-            except Exception:
-                pass
-        # Try ISO 8601
-        if isinstance(dt, str):
-            try:
-                # Normalize Z
-                s = dt.replace("Z", "+00:00")
-                dti = datetime.fromisoformat(s)
-                if dti.tzinfo is None:
-                    dti = dti.replace(tzinfo=timezone.utc)
-                return dti >= cutoff
-            except Exception:
-                # Try RFC 2822 (RSS)
-                try:
-                    dti = parsedate_to_datetime(dt)
-                    if dti.tzinfo is None:
-                        dti = dti.replace(tzinfo=timezone.utc)
-                    return dti >= cutoff
-                except Exception:
-                    pass
-        # Try unix timestamp
-        try:
-            ts = float(dt)
-            dti = datetime.fromtimestamp(ts, tz=timezone.utc)
-            return dti >= cutoff
-        except Exception:
-            continue
-    # If no usable date found, keep it (don't discard)
-    return True
 
 def run_pipeline(keywords: List[str]) -> List[Dict]:
     rates = load_fx_rates(FX_USD_RATES)
