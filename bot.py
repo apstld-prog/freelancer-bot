@@ -136,8 +136,7 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 budget_line = f"<b>Budget:</b> {amt:g} {ccy}"
         text_html = f"<b>{title}</b>"
         if budget_line:
-            text_html += f"
-  {budget_line}"
+            text_html += f"\n  {budget_line}"
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("📄 Proposal", url=r.proposal_url or r.original_url or ""),
             InlineKeyboardButton("🔗 Original", url=r.original_url or r.proposal_url or ""),
@@ -282,9 +281,10 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("⭐ Save", callback_data="job:save"),
         InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")
     ]])
-    await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
 
 async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     q = update.callback_query; data = q.data if q else ""
     await q.answer()
     if data == "act:addkw":
@@ -300,13 +300,10 @@ async def cb_mainmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "act:admin":
         if is_admin_user(update.effective_user.id):
             await q.message.reply_text("/users, /grant <id> <days>, /block <id>, /unblock <id>, /broadcast <text>, /feedstatus")
-            await q.message.reply_text("Admin: /users, /feedstatus")
         else:
             await q.message.reply_text("You're not an admin.")
-
-
-elif data.startswith("job:"):
-        # Extract info from keyboard
+    elif data.startswith("job:"):
+        # Save/Delete actions from job cards
         title = (q.message.text_html or q.message.text or "").split("\n",1)[0].strip()
         prop_url = None; orig_url = None
         try:
@@ -314,10 +311,8 @@ elif data.startswith("job:"):
             for row in (km.inline_keyboard or []):
                 for b in row:
                     txt = (getattr(b, "text", "") or "").lower()
-                    if txt.startswith("📄") and b.url:
-                        prop_url = b.url
-                    if txt.startswith("🔗") and b.url:
-                        orig_url = b.url
+                    if txt.startswith("📄") and b.url: prop_url = b.url
+                    if txt.startswith("🔗") and b.url: orig_url = b.url
         except Exception:
             pass
         if data == "job:save":
@@ -327,37 +322,17 @@ elif data.startswith("job:"):
                     save_job(s, u.id, {"title": title, "proposal_url": prop_url, "original_url": orig_url})
             except Exception:
                 pass
-            try:
-                await q.message.delete()
-            except Exception:
-                pass
+            try: await q.message.delete()
+            except Exception: pass
             await q.message.chat.send_message("⭐ Saved to your list.")
         elif data == "job:delete":
-            try:
-                await q.message.delete()
-            except Exception:
-                pass
+            try: await q.message.delete()
+            except Exception: pass
             await q.message.chat.send_message("🗑️ Deleted.")
         else:
             await q.message.chat.send_message("Unknown action.")
-    # Save/Delete actions from selftest or job cards
-    if data == "job:save":
-        try:
-            await q.message.delete()
-        except Exception:
-            pass
-        await q.message.chat.send_message("⭐ Saved to your list.")
-    elif data == "job:delete":
-        try:
-            await q.message.delete()
-        except Exception:
-            pass
-        await q.message.chat.send_message("🗑️ Deleted.")
     else:
-        await q.message.chat.send_message("Unknown action.")
-else:
-    await q.message.reply_text("Unknown action.")
-
+        await q.message.reply_text("Unknown action.")
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
