@@ -10,5 +10,4 @@ set TS=%yyyy%-%mm%-%dd%_%hh%%nn%
 git add -A
 git commit -m "auto: %TS%"
 git push
-echo Done. Press any key to exit.
-pause >nul
+echo Done.
