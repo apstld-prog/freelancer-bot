@@ -355,6 +355,27 @@ async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message(f"No events in the last {STATS_WINDOW_HOURS} hours."); return
     await update.effective_chat.send_message("📊 Feed status (last %dh):\n%s" % (STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k, v in stats.items()])))
 
+
+async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    """Send a DM 24h before trial_end (once)."""
+    from datetime import datetime, timezone, timedelta
+    from sqlalchemy import text as _t
+    app: Application = context.application
+    with get_session() as s:
+        rows = s.execute(_t('SELECT id, telegram_id, trial_end, COALESCE(trial_reminder_sent,false) FROM "user" WHERE is_active=true AND is_blocked=false')).fetchall()
+        for uid, tid, te, sent in rows:
+            if not te or sent:
+                continue
+            now = datetime.now(timezone.utc)
+            if now < te <= now + timedelta(hours=24):
+                try:
+                    await app.bot.send_message(tid, "⏰ Heads-up: your trial ends within 24 hours. Reply /contact if you need an extension.")
+                    s.execute(_t('UPDATE "user" SET trial_reminder_sent=true WHERE id=:id'), {"id": uid})
+                    s.commit()
+                except Exception:
+                    pass
+
+
 def build_application() -> Application:
     ensure_schema(); ensure_feed_events_schema(); ensure_keyword_unique()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
