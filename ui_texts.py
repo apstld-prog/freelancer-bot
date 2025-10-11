@@ -12,13 +12,16 @@ def welcome_full(days: int) -> str:
 
 
 def help_footer(hours: int, admin: bool = False) -> str:
-    """Footer with optional admin commands."""
-    block = f"""
-\n\n<b>👑 Admin commands</b>
-/users — list users
-/grant <telegram_id> <days>
-/block <telegram_id> / /unblock <telegram_id>
-/broadcast <text>
-/feedstatus — show last {hours}h per platform
-"""
-    return block if admin else ""
+    """Footer με admin εντολές – ασφαλές για HTML parse_mode."""
+    if not admin:
+        return ""
+    return (
+        "\n\n<b>👑 Admin commands</b>\n"
+        "<code>"
+        "/users\n"
+        "/grant &lt;telegram_id&gt; &lt;days&gt;\n"
+        "/block &lt;telegram_id&gt; / /unblock &lt;telegram_id&gt;\n"
+        "/broadcast &lt;text&gt;\n"
+        f"/feedstatus — show last {hours}h per platform"
+        "</code>"
+    )
