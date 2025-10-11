@@ -104,7 +104,7 @@ def ensure_schema():
             original_url TEXT NULL,
             budget_amount TEXT NULL,
             budget_currency TEXT NULL,
-            saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW() AT TIME ZONE 'UTC'
+            saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_saved_job_user ON saved_job(user_id);
         ''')

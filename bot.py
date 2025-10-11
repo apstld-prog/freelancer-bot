@@ -164,30 +164,21 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]])
         await update.effective_chat.send_message(text_html, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
 
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Ensure trial dates initialized
+    from os import getenv
+    days = int(getenv("TRIAL_DAYS", "10"))
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         try:
-            s.execute(_t("UPDATE \"user\" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE 'UTC') WHERE id=:id"), {"id": u.id})
-            s.execute(_t("UPDATE \"user\" SET trial_end=COALESCE(trial_end, NOW() AT TIME ZONE 'UTC') + INTERVAL :days WHERE id=:id")
-                      .bindparams(days=f"{TRIAL_DAYS} days"), {"id": u.id})
-            expiry = s.execute(_t('SELECT COALESCE(license_until, trial_end) FROM "user" WHERE id=:id'), {"id": u.id}).scalar()
+            s.execute(_t('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW()) WHERE id=:id'), {"id": u.id})
+            s.execute(_t('UPDATE "user" SET trial_end=COALESCE(trial_end, NOW() + INTERVAL :days) WHERE id=:id'),
+                     {"id": u.id, "days": f"{days} days"})
             s.commit()
         except Exception:
-            logging.getLogger("bot").exception("start_cmd: trial init failed")
-            expiry = None
-
-    await update.effective_chat.send_message(
-        welcome_text(expiry if isinstance(expiry, datetime) else None),
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
-    )
-    await update.effective_chat.send_message(
-        HELP_EN + help_footer(STATS_WINDOW_HOURS),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-
+            pass
+    await update.effective_chat.send_message(welcome_full(days), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=main_keyboard())
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin = is_admin_user(update.effective_user.id)
@@ -339,7 +330,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
         await update.message.reply_text("You're not an admin."); return
     with get_session() as s:
-        rows = s.execute(text('SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200')).fetchall()
+        rows = s.execute(_t('SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200')).fetchall()
     lines = ["<b>Users</b>"]
     for uid, tid, trial_end, lic, act, blk in rows:
         kwc = len(list_keywords_safe(uid))
