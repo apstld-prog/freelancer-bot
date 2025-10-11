@@ -7,18 +7,40 @@ from typing import Dict, List
 
 import httpx
 
-# ✅ FIXED IMPORT
+# ✅ FIXED IMPORT (db_events API)
 from db_events import ensure_feed_events_schema as ensure_schema, record_event as log_platform_event
 
 from db import get_session
-from platform_freelancer import fetch_freelancer_jobs
-from platform_skywalker import fetch_skywalker_jobs
 from job_logic import match_keywords, make_key
 from sqlalchemy import text as sqltext
 from telegram_bot import send_job_to_user
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
+
+# --- Flexible imports for platform fetchers (handle different function names) ---
+try:
+    from platform_freelancer import fetch_freelancer_jobs as _fetch_freelancer
+except Exception:
+    try:
+        from platform_freelancer import fetch_jobs as _fetch_freelancer
+    except Exception:
+        from platform_freelancer import fetch as _fetch_freelancer  # last fallback
+
+try:
+    from platform_skywalker import fetch_skywalker_jobs as _fetch_skywalker
+except Exception:
+    try:
+        from platform_skywalker import fetch_jobs as _fetch_skywalker
+    except Exception:
+        from platform_skywalker import fetch as _fetch_skywalker  # last fallback
+
+
+async def maybe_await(result):
+    """Await if coroutine, else return value."""
+    if asyncio.iscoroutine(result):
+        return await result
+    return result
 
 
 def ensure_sent_table():
@@ -80,27 +102,32 @@ def deliver_to_users(items: List[Dict]):
 
 
 async def run_pipeline(keywords: List[str]):
-    all_items = []
+    all_items: List[Dict] = []
+
+    # Freelancer
     try:
-        fl_items = await fetch_freelancer_jobs(keywords)
-        all_items.extend(fl_items)
+        fl_items = await maybe_await(_fetch_freelancer(keywords))
+        all_items.extend(fl_items or [])
     except Exception as e:
         log.error(f"[freelancer] fetch error: {e}")
 
+    # Skywalker
     try:
-        sk_items = await fetch_skywalker_jobs(keywords)
-        all_items.extend(sk_items)
+        sk_items = await maybe_await(_fetch_skywalker(keywords))
+        all_items.extend(sk_items or [])
     except Exception as e:
         log.error(f"[skywalker] fetch error: {e}")
 
+    # Match με τα global keywords
     filtered = [i for i in all_items if match_keywords(i, keywords)]
     log.info(f"[Worker] cycle completed — keywords={len(keywords)}, items={len(filtered)}")
     deliver_to_users(filtered)
 
 
 def get_keywords() -> List[str]:
+    # Διόρθωση: η στήλη είναι 'value' (κρατάμε DISTINCT για καθαρό σύνολο)
     with get_session() as s:
-        rows = s.execute("SELECT keyword FROM keyword").fetchall()
+        rows = s.execute("SELECT DISTINCT value FROM keyword").fetchall()
         return [r[0] for r in rows]
 
 
