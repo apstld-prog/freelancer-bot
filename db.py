@@ -86,7 +86,29 @@ def _safe_exec(session, sql: str):
 def ensure_schema():
     Base.metadata.create_all(bind=engine)
 
-    # Migrate “value” column if table exists with legacy columns
+    
+
+    # ---- Migrations ----
+    with SessionLocal() as s:
+        # Add trial_reminder_sent to user (boolean, default false)
+        _safe_exec(s, 'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS trial_reminder_sent BOOLEAN NOT NULL DEFAULT FALSE;')
+        # Create saved_job table if not exists (in case metadata missed)
+        _safe_exec(s, '''
+        CREATE TABLE IF NOT EXISTS saved_job (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES "user"(id),
+            job_id TEXT NULL,
+            title TEXT NULL,
+            description TEXT NULL,
+            proposal_url TEXT NULL,
+            original_url TEXT NULL,
+            budget_amount TEXT NULL,
+            budget_currency TEXT NULL,
+            saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW() AT TIME ZONE 'UTC'
+        );
+        CREATE INDEX IF NOT EXISTS idx_saved_job_user ON saved_job(user_id);
+        ''')
+# Migrate “value” column if table exists with legacy columns
     with SessionLocal() as s:
         _safe_exec(s, """
         DO $$

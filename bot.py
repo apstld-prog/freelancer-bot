@@ -362,7 +362,16 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
     from sqlalchemy import text as _t
     app: Application = context.application
     with get_session() as s:
-        rows = s.execute(_t('SELECT id, telegram_id, trial_end, COALESCE(trial_reminder_sent,false) FROM "user" WHERE is_active=true AND is_blocked=false')).fetchall()
+        rows = []
+        try:
+            rows = s.execute(_t('SELECT id, telegram_id, trial_end, COALESCE(trial_reminder_sent,false) FROM "user" WHERE is_active=true AND is_blocked=false')).fetchall()
+        except Exception:
+            try:
+                s.execute(_t('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS trial_reminder_sent BOOLEAN NOT NULL DEFAULT FALSE'))
+                s.commit()
+                rows = s.execute(_t('SELECT id, telegram_id, trial_end, COALESCE(trial_reminder_sent,false) FROM "user" WHERE is_active=true AND is_blocked=false')).fetchall()
+            except Exception:
+                rows = []
         for uid, tid, te, sent in rows:
             if not te or sent:
                 continue
