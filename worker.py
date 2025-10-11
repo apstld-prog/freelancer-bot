@@ -53,14 +53,12 @@ async def maybe_await(result):
 
 def ensure_sent_table():
     with get_session() as s:
-        s.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sent_job (
-                job_key TEXT PRIMARY KEY,
-                sent_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC')
-            );
-            """
-        )
+        s.execute(sqltext("""
+    CREATE TABLE IF NOT EXISTS sent_job (
+        job_key TEXT PRIMARY KEY,
+        sent_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE \'UTC\')
+    );
+"""))
         s.commit()
 
 
