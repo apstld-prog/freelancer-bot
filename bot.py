@@ -243,9 +243,11 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Log a synthetic event so /feedstatus has data
     try:
         ensure_feed_events_schema()
-        record_event('freelancer', payload={'kind': 'selftest'})
-    except Exception:
-        pass
+        # Log a minimal row (no JSON payload) to avoid any driver/JSON issues
+        record_event('freelancer')
+        log.info("selftest: feed_events row recorded for 'freelancer'")
+    except Exception as e:
+        log.exception("selftest: could not record feed_event: %s", e)
 
 # ---------- Admin ----------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
