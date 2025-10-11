@@ -1,3 +1,14 @@
+
+# --------------------------------------------------------------
+# 🧹 Prune sent_job entries older than N days
+# --------------------------------------------------------------
+def prune_sent_table(days: int = 7) -> None:
+    from db import get_session
+    from sqlalchemy import text as sqltext
+    with get_session() as s:
+        s.execute(sqltext("DELETE FROM sent_job WHERE sent_at < (NOW() AT TIME ZONE 'UTC') - INTERVAL :d || ' days'").bindparams(d=days))
+        s.commit()
+
 # worker.py
 from typing import List, Dict
 from config import (
@@ -13,23 +24,6 @@ from db_events import ensure_schema, log_platform_event
 
 # Ensure the events table exists at import time (safe no-op if already there)
 ensure_schema()
-
-# --------------------------------------------------------------
-# 🧱 Ensure sent_job table (for deduped sending)
-# --------------------------------------------------------------
-def ensure_sent_table() -> None:
-    from db import get_session
-    from sqlalchemy import text as sqltext
-    with get_session() as s:
-        s.execute(sqltext("""
-        CREATE TABLE IF NOT EXISTS sent_job (
-            job_key TEXT PRIMARY KEY,
-            sent_at TIMESTAMPTZ DEFAULT NOW()
-        )
-        """))
-        s.commit()
-
-ensure_sent_table()
 
 def match_keywords(item: Dict, keywords: List[str]) -> bool:
     if not keywords:
@@ -88,6 +82,54 @@ def prepare_display(item: Dict, rates: dict) -> Dict:
             item[fld + "_usd"] = to_usd(item.get(fld), item.get("currency"), rates)
     return item
 
+
+# --------------------------------------------------------------
+# ⏱ Keep only items not older than N days (default 7)
+# --------------------------------------------------------------
+def is_recent(item: Dict, days: int = 7) -> bool:
+    from datetime import datetime, timezone, timedelta
+    from email.utils import parsedate_to_datetime
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    # Candidate fields commonly used by our sources
+    for key in ("created_at", "published_at", "pub_date", "date"):
+        dt = item.get(key)
+        if not dt:
+            continue
+        # If it's already a datetime
+        if hasattr(dt, 'tzinfo') or isinstance(dt, datetime):
+            try:
+                return dt >= cutoff
+            except Exception:
+                pass
+        # Try ISO 8601
+        if isinstance(dt, str):
+            try:
+                # Normalize Z
+                s = dt.replace("Z", "+00:00")
+                dti = datetime.fromisoformat(s)
+                if dti.tzinfo is None:
+                    dti = dti.replace(tzinfo=timezone.utc)
+                return dti >= cutoff
+            except Exception:
+                # Try RFC 2822 (RSS)
+                try:
+                    dti = parsedate_to_datetime(dt)
+                    if dti.tzinfo is None:
+                        dti = dti.replace(tzinfo=timezone.utc)
+                    return dti >= cutoff
+                except Exception:
+                    pass
+        # Try unix timestamp
+        try:
+            ts = float(dt)
+            dti = datetime.fromtimestamp(ts, tz=timezone.utc)
+            return dti >= cutoff
+        except Exception:
+            continue
+    # If no usable date found, keep it (don't discard)
+    return True
+
 def run_pipeline(keywords: List[str]) -> List[Dict]:
     rates = load_fx_rates(FX_USD_RATES)
     query = ",".join([k.strip() for k in keywords if k and k.strip()]) if keywords else None
@@ -104,102 +146,6 @@ def wrap_freelancer(url: str) -> str:
     # Ensure consistent deep-linking for both Proposal and Original
     return f"{AFFILIATE_PREFIX_FREELANCER}&dl={url}"
 
-
-
-# --------------------------------------------------------------
-# 🚀 Deliver new matching jobs to users (no duplicates)
-# --------------------------------------------------------------
-def deliver_to_users(items: List[Dict]) -> None:
-    """Send job alerts per user keywords, avoiding duplicates via sent_job table."""
-    import os
-    import httpx
-    from db import get_session
-    from sqlalchemy import text as sqltext
-
-    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
-    if not BOT_TOKEN:
-        return
-    TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-    for it in items:
-        # Build a stable key for this item (reuse existing dedup logic)
-        try:
-            job_key = make_key(it)
-        except Exception:
-            # Fallback: use URL or title
-            job_key = it.get("affiliate_url") or it.get("original_url") or it.get("url") or it.get("title") or "unknown"
-
-        # Try to reserve this job once globally (UPSERT). Only the first time proceeds.
-        inserted = False
-        with get_session() as s:
-            s.execute(sqltext("CREATE TABLE IF NOT EXISTS sent_job (job_key TEXT PRIMARY KEY, sent_at TIMESTAMPTZ DEFAULT NOW())"))
-            res = s.execute(sqltext("INSERT INTO sent_job(job_key) VALUES (:k) ON CONFLICT DO NOTHING"), { "k": job_key })
-            s.commit()
-            inserted = (res.rowcount == 1)
-
-        if not inserted:
-            # Already sent in a previous cycle; skip delivering to everyone
-            continue
-
-        # We will send to users for whom this item matches their personal keywords
-        with get_session() as s:
-            rows = s.execute(sqltext('SELECT id, telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
-            users = [(int(r[0]), int(r[1])) for r in rows]
-
-        for uid, chat_id in users:
-            # Load this user's keywords
-            with get_session() as s:
-                kw_rows = s.execute(sqltext("SELECT value FROM keyword WHERE user_id=:u"), {"u": uid}).fetchall()
-                user_keywords = [r[0] for r in kw_rows if r and r[0]]
-
-            if not match_keywords(it, user_keywords):
-                continue
-
-            title = it.get("title", "Untitled")
-            bmin = it.get("budget_min_usd") or it.get("budget_min")
-            bmax = it.get("budget_max_usd") or it.get("budget_max")
-            cur  = "USD" if (it.get("budget_min_usd") or it.get("budget_max_usd")) else (it.get("currency") or "")
-            if bmin and bmax:
-                budget_str = f"{bmin}–{bmax} {cur}".strip()
-            elif bmin:
-                budget_str = f"{bmin} {cur}".strip()
-            elif bmax:
-                budget_str = f"{bmax} {cur}".strip()
-            else:
-                budget_str = "N/A"
-
-            orig = it.get("original_url") or it.get("url") or ""
-            aff  = it.get("affiliate_url") or (wrap_freelancer(orig) if (orig and it.get("source") == "freelancer") else orig)
-
-            text_msg = (
-                f"💼 <b>{title}</b>\n"
-                f"💰 <b>Budget:</b> {budget_str}\n"
-                f"📦 <b>Source:</b> {it.get('source','unknown').title()}\n"
-            )
-
-            kb = {
-                "inline_keyboard": [
-                    [{"text": "📄 Proposal", "url": aff or orig},
-                     {"text": "🔗 Original", "url": orig or aff}],
-                    [{"text": "⭐ Save", "callback_data": "job:save"},
-                     {"text": "🗑️ Delete", "callback_data": "job:delete"}]
-                ]
-            }
-
-            try:
-                httpx.post(
-                    TG_API,
-                    json={
-                        "chat_id": chat_id,
-                        "text": text_msg,
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": True,
-                        "reply_markup": kb,
-                    },
-                    timeout=20,
-                )
-            except Exception as e:
-                print(f"[deliver_to_users] send fail to {chat_id}: {e}")
 
 # --------------------------------------------------------------
 # 🧠 Worker main loop
@@ -224,9 +170,6 @@ if __name__ == "__main__":
 
             # Run the full pipeline (fetch, match, dedup, record events)
             _items = run_pipeline(keywords)
-
-            # deliver alerts to users (deduped)
-            deliver_to_users(_items)
 
             log.info("[Worker] cycle completed — keywords=%d, items=%d",
                      len(keywords), len(_items))
