@@ -11,7 +11,7 @@ from telegram.ext import (
     CommandHandler, CallbackQueryHandler,
     ContextTypes,
 )
-from sqlalchemy import text
+from sqlalchemy import text as _t
 import re
 from utils_fx import load_fx_rates, to_usd
 
@@ -64,9 +64,9 @@ def is_admin_user(tid: int) -> bool:
         return False
 
 # -------- Keyword helpers (schema-agnostic) --------
-from sqlalchemy import text
+from sqlalchemy import text as _t
 import re
-from utils_fx import load_fx_rates, to_usd as _t
+from utils_fx import load_fx_rates, to_usd
 
 def _kwexpr() -> str:
     return 'COALESCE(keyword, value)'
