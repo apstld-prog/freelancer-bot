@@ -86,3 +86,31 @@ def run_pipeline(keywords: List[str]) -> List[Dict]:
 def wrap_freelancer(url: str) -> str:
     # Ensure consistent deep-linking for both Proposal and Original
     return f"{AFFILIATE_PREFIX_FREELANCER}&dl={url}"
+if __name__ == "__main__":
+    import os, time, logging
+    from sqlalchemy import text
+    from db import get_session
+
+    logging.basicConfig(level=logging.INFO)
+    log = logging.getLogger("worker")
+
+    interval = int(os.getenv("WORKER_INTERVAL", "120"))
+    log.info("[Worker] ✅ Running (interval=%ss)", interval)
+
+    while True:
+        try:
+            # Pull ALL distinct keywords from DB
+            with get_session() as s:
+                rows = s.execute(text("SELECT DISTINCT value FROM keyword")).fetchall()
+            keywords = [r[0] for r in rows if r and r[0]]
+
+            # Run fetch → match → dedup → record platform events
+            _items = run_pipeline(keywords)
+
+            log.info("[Worker] cycle completed — keywords=%d, items=%d",
+                     len(keywords), len(_items))
+        except Exception as e:
+            log.exception("[Worker] cycle error: %s", e)
+
+        time.sleep(interval)
+
