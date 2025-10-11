@@ -9,7 +9,7 @@ from dedup import make_key, prefer_affiliate
 import platform_skywalker as sky
 import platform_placeholders as ph
 import platform_freelancer as fr
-from db_events import ensure_feed_events_schema as ensure_schema, record_event as log_platform_event
+from db_events import ensure_schema, log_platform_event
 
 # Ensure the events table exists at import time (safe no-op if already there)
 ensure_schema()
@@ -86,6 +86,11 @@ def run_pipeline(keywords: List[str]) -> List[Dict]:
 def wrap_freelancer(url: str) -> str:
     # Ensure consistent deep-linking for both Proposal and Original
     return f"{AFFILIATE_PREFIX_FREELANCER}&dl={url}"
+
+
+# --------------------------------------------------------------
+# 🧠 Worker main loop
+# --------------------------------------------------------------
 if __name__ == "__main__":
     import os, time, logging
     from sqlalchemy import text
@@ -99,12 +104,12 @@ if __name__ == "__main__":
 
     while True:
         try:
-            # Pull ALL distinct keywords from DB
+            # Fetch all distinct keywords from DB
             with get_session() as s:
                 rows = s.execute(text("SELECT DISTINCT value FROM keyword")).fetchall()
             keywords = [r[0] for r in rows if r and r[0]]
 
-            # Run fetch → match → dedup → record platform events
+            # Run the full pipeline (fetch, match, dedup, record events)
             _items = run_pipeline(keywords)
 
             log.info("[Worker] cycle completed — keywords=%d, items=%d",
@@ -113,4 +118,3 @@ if __name__ == "__main__":
             log.exception("[Worker] cycle error: %s", e)
 
         time.sleep(interval)
-
