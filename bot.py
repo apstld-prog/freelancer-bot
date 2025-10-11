@@ -178,13 +178,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from sqlalchemy import text
-from utils_fx import load_fx_rates, to_usd as _t
+    from sqlalchemy import text as _t
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
-        row = s.execute(_t('SELECT trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'),
-                        {"id": u.id}).fetchone()
+        row = s.execute(_t('SELECT trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
     kws = list_keywords_safe(u.id)
     kw_str = ", ".join(kws) if kws else "(none)"
     ts = row[0] or "—"
@@ -192,40 +192,27 @@ from utils_fx import load_fx_rates, to_usd as _t
     lic = row[2] or "None"
     active = bool(row[3]); blocked = bool(row[4])
     def b(x): return "✅" if x else "❌"
-    msg = (f"<b>🛠 Your Settings</b>
-"
-           f"• <b>Keywords:</b> {kw_str}
-
-"
-           f"<b>●</b> Start date: {ts}
-"
-           f"<b>●</b> Trial ends: {te} UTC
-"
-           f"<b>🔑</b> License until: {lic}
-"
-           f"<b>✅ Active:</b> {b(active)}    <b>⛔ Blocked:</b> {b(blocked)}")
+    parts = [
+        "<b>🛠 Your Settings</b>",
+        f"• <b>Keywords:</b> {kw_str}",
+        "",
+        f"<b>●</b> Start date: {ts}",
+        f"<b>●</b> Trial ends: {te} UTC",
+        f"<b>🔑</b> License until: {lic}",
+        f"<b>✅ Active:</b> {b(active)}    <b>⛔ Blocked:</b> {b(blocked)}",
+    ]
+    msg = "\n".join(parts)
     await update.effective_chat.send_message(msg, parse_mode=ParseMode.HTML)
-    # Reminder if expiring within 24h
+    # Optional lightweight reminder
     try:
         from datetime import datetime, timezone, timedelta
-        if isinstance(row[1], datetime):
+        if hasattr(te, 'tzinfo'):
             now = datetime.now(timezone.utc)
-            if now < row[1] <= now + timedelta(hours=24):
+            if now < te <= now + timedelta(hours=24):
                 await update.effective_chat.send_message("⏰ Reminder: your trial ends within 24 hours.")
     except Exception:
         pass
 
-def _parse_kw_args(text: str) -> List[str]:
-    if not text: return []
-    txt = text.replace(";", ",").replace("  ", " ")
-    parts = [p.strip() for p in txt.split(",") if p.strip()]
-    if not parts:
-        parts = [p.strip() for p in txt.split() if p.strip()]
-    seen, out = set(), []
-    for p in parts:
-        if p not in seen:
-            seen.add(p); out.append(p)
-    return out
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.effective_message.text or ""
