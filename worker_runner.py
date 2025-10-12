@@ -1,10 +1,11 @@
+
 #!/usr/bin/env python3
 # worker_runner.py — async runner: send-to-all + per-user/global dedup (PTB v20+)
-# - Displays "Match: ..." like /selftest
-# - Uses ui_keyboards.job_action_kb with signature detection (so Save works)
-# - Dedup safe with legacy UNIQUE(job_key) schemas (no crashes)
+# - Safe dedup for legacy schemas (UNIQUE/PK on job_key only)
+# - Shows "Match: …" (like /selftest) and "Posted: 3m ago"
+# - Uses project's ui_keyboards.job_action_kb when available
 
-import os, logging, asyncio, inspect
+import os, logging, asyncio, inspect, datetime as _dt
 from typing import Dict, List, Optional, Set
 
 import worker as _worker
@@ -61,7 +62,7 @@ def _ensure_sent_schema():
             END $$;
         """))
         s.commit()
-    log.info("[dedup] sent_job ensured (no schema changes to constraints)")
+    log.info("[dedup] sent_job ensured (no constraint changes)")
 
 def _already_sent(_uid: int, job_key: str) -> bool:
     """Return True if this job_key already exists (handles legacy UNIQUE(job_key))."""
@@ -73,26 +74,35 @@ def _already_sent(_uid: int, job_key: str) -> bool:
         return row is not None
 
 def _mark_sent(uid: int, job_key: str):
-    """Insert row safely; ignore duplicate errors from legacy UNIQUE(job_key)."""
+    """Insert row safely; prefer ON CONFLICT on job_key, else fall back to exists-check.
+       Never raises (so it can't look like send_message failed)."""
     with _get_session() as s:
+        # try upsert by job_key (works if there is PK/UNIQUE on job_key)
         try:
             s.execute(
-                _sql_text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k)"),
+                _sql_text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k) ON CONFLICT (job_key) DO NOTHING;"),
                 {"u": uid, "k": job_key},
             )
             s.commit()
-        except IntegrityError:
-            s.rollback()
-            # Row with the same job_key already exists under legacy UNIQUE(job_key) → ignore
             return
+        except Exception:
+            s.rollback()
+        # fallback: exists then insert
+        try:
+            row = s.execute(_sql_text("SELECT 1 FROM sent_job WHERE job_key=:k LIMIT 1;"), {"k": job_key}).fetchone()
+            if row is None:
+                s.execute(_sql_text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k)"), {"u": uid, "k": job_key})
+                s.commit()
+        except Exception:
+            s.rollback()
+            # swallow
 
-# ---------- compose + keyboard ----------
+# ---------- "Match" & "Posted" helpers ----------
 def _detect_match(it: Dict) -> Optional[str]:
     for k in ("match", "matched", "match_keyword"):
         v = it.get(k)
         if v:
             return str(v)
-    # Optional env-based detection
     csv = os.getenv("KEYWORDS_CSV", "").strip()
     if not csv:
         return None
@@ -102,6 +112,50 @@ def _detect_match(it: Dict) -> Optional[str]:
             return w
     return None
 
+def _parse_timestamp(val) -> Optional[_dt.datetime]:
+    if val is None:
+        return None
+    try:
+        if isinstance(val, (int, float)):
+            return _dt.datetime.fromtimestamp(float(val), tz=_dt.timezone.utc)
+        s = str(val).strip()
+        # try ISO
+        try:
+            dt = _dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_dt.timezone.utc)
+            return dt.astimezone(_dt.timezone.utc)
+        except Exception:
+            pass
+        # try integer seconds in string
+        if s.isdigit():
+            return _dt.datetime.fromtimestamp(int(s), tz=_dt.timezone.utc)
+    except Exception:
+        return None
+    return None
+
+def _posted_ago(it: Dict) -> Optional[str]:
+    if os.getenv("SHOW_RELATIVE_AGE", "on").lower() in ("0","off","false","no"):
+        return None
+    for key in ("posted_at","created_at","published_at","date","timestamp","ts"):
+        dt = _parse_timestamp(it.get(key))
+        if dt:
+            now = _dt.datetime.now(_dt.timezone.utc)
+            diff = now - dt
+            secs = int(diff.total_seconds())
+            if secs < 60:
+                return f"{secs}s ago"
+            mins = secs // 60
+            if mins < 60:
+                return f"{mins}m ago"
+            hours = mins // 60
+            if hours < 24:
+                return f"{hours}h ago"
+            days = hours // 24
+            return f"{days}d ago"
+    return None
+
+# ---------- compose + keyboard ----------
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
@@ -125,10 +179,13 @@ def _compose_message(it: Dict) -> str:
     if desc:
         lines.append(desc)
 
-    # Show Match: ... line like selftest (plain text label)
     m = _detect_match(it)
     if m:
         lines.append(f"Match: {m}")
+
+    age = _posted_ago(it)
+    if age:
+        lines.append(f"Posted: {age}")
 
     lines.append(f"🏷️ <i>{src}</i>")
     return "\n".join(lines)
@@ -145,29 +202,23 @@ def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
     return {"original": original, "proposal": proposal, "affiliate": affiliate}
 
 def _build_keyboard(it: Dict, links: Dict[str, Optional[str]]):
-    """Use project's keyboard if possible so Save/Delete handlers get the expected payload."""
     if _job_kb is not None:
         try:
             sig = inspect.signature(_job_kb)
             params = list(sig.parameters.keys())
-            # common patterns in the codebase
             if len(params) == 1:
                 return _job_kb(it)
-            # item + options
             if "item" in params:
                 return _job_kb(item=it)
-            # three urls (original, proposal, affiliate)
             if len(params) >= 3:
                 try:
                     return _job_kb(links["original"], links["proposal"], links["affiliate"])
                 except Exception:
                     pass
-            # dict-based
             return _job_kb({"item": it, **links})
         except Exception as e:
             log.warning("job_action_kb fallback: %s", e)
 
-    # Last-resort fallback (labels identical; Save/Delete minimal callbacks)
     row1 = [
         InlineKeyboardButton("📝 Proposal", url=links["proposal"] or links["original"] or ""),
         InlineKeyboardButton("🔗 Original",  url=links["original"] or ""),
@@ -242,11 +293,12 @@ async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch:
                 reply_markup=kb,
                 disable_web_page_preview=False
             )
-            _mark_sent(chat_id, k)
-            sent += 1
-            await asyncio.sleep(0.35)
         except Exception as e:
             log.warning("send_message failed for %s: %s", chat_id, e)
+        # never treat dedup insert as send failure
+        _mark_sent(chat_id, k)
+        sent += 1
+        await asyncio.sleep(0.35)
 
 # ---------- main loop ----------
 async def amain():
