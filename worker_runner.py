@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 # worker_runner.py — async runner: send-to-all + per-user dedup (PTB v20+)
-# Robust dedup schema: supports sent_job.{user_id|chat_id}
-# Env:
-#   TELEGRAM_BOT_TOKEN (required)
-#   WORKER_INTERVAL=60 (optional)
-#   WORKER_CLEANUP_DAYS=7 (optional)
-#   BATCH_PER_TICK=5 (optional)
+# Safer schema handling for sent_job (no PK enforcement; supports chat_id or user_id).
 
 import os, logging, asyncio
 from typing import Dict, List, Optional, Set
@@ -32,95 +27,85 @@ def _get_env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
-# ---------- sent_job schema + helpers (per-user dedup, robust) ----------
+# ---------- sent_job schema + helpers (per-user dedup, robust & non-intrusive) ----------
 def _sent_user_col() -> str:
-    """
-    Detect which id column exists for sent_job: prefer user_id, else chat_id.
-    If table doesn't exist or has none, default to 'user_id' (the creator will add it).
-    """
+    """Return preferred id column present in sent_job: chat_id > user_id; create chat_id if none exists."""
     with _get_session() as s:
         row = s.execute(_sql_text("""
             SELECT column_name
             FROM information_schema.columns
-            WHERE table_name = 'sent_job'
-              AND column_name IN ('user_id','chat_id')
-            ORDER BY CASE WHEN column_name='user_id' THEN 0 ELSE 1 END
+            WHERE table_schema='public' AND table_name='sent_job'
+              AND column_name IN ('chat_id','user_id')
+            ORDER BY CASE WHEN column_name='chat_id' THEN 0 ELSE 1 END
             LIMIT 1
         """)).fetchone()
         if row:
             return row[0]
-    return "user_id"
-
-def _ensure_sent_schema():
-    """
-    Create/normalize sent_job so that it has (idcol, job_key, sent_at) and a PK on (idcol, job_key).
-    - If the table exists with chat_id only, we keep chat_id.
-    - If the table doesn't have any id column, we add user_id.
-    """
-    with _get_session() as s:
-        # Ensure table exists
-        s.execute(_sql_text("""
-            CREATE TABLE IF NOT EXISTS sent_job (
-                user_id BIGINT,
-                job_key TEXT,
-                sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')
-            );
-        """))
-
-        # Determine id column (prefer existing user_id/chat_id)
-        row = s.execute(_sql_text("""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_name='sent_job' AND column_name IN ('user_id','chat_id')
-            ORDER BY CASE WHEN column_name='user_id' THEN 0 ELSE 1 END
-            LIMIT 1
-        """)).fetchone()
-
-        if row:
-            idcol = row[0]
-        else:
-            # No id column at all → add user_id
-            s.execute(_sql_text("ALTER TABLE sent_job ADD COLUMN user_id BIGINT;"))
-            idcol = "user_id"
-
-        # Ensure job_key exists
-        has_job_key = s.execute(_sql_text("""
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name='sent_job' AND column_name='job_key' LIMIT 1
-        """)).fetchone()
-        if not has_job_key:
-            s.execute(_sql_text("ALTER TABLE sent_job ADD COLUMN job_key TEXT;"))
-
-        # Recreate PK on (idcol, job_key)
+        # No id column at all → add chat_id
+        s.execute(_sql_text("CREATE TABLE IF NOT EXISTS sent_job (chat_id BIGINT, job_key TEXT, sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'));"))
         s.execute(_sql_text("""
             DO $$ BEGIN
-                IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='sent_job_pkey') THEN
-                    ALTER TABLE sent_job DROP CONSTRAINT sent_job_pkey;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='sent_job' AND column_name='chat_id'
+                ) THEN
+                    ALTER TABLE sent_job ADD COLUMN chat_id BIGINT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='sent_job' AND column_name='job_key'
+                ) THEN
+                    ALTER TABLE sent_job ADD COLUMN job_key TEXT;
                 END IF;
             END $$;
         """))
-        s.execute(_sql_text(f"ALTER TABLE sent_job ADD CONSTRAINT sent_job_pkey PRIMARY KEY ({idcol}, job_key);"))
         s.commit()
-    log.info("[dedup] sent_job schema ensured (id column: %s)", _sent_user_col())
+        return "chat_id"
+
+def _ensure_sent_schema():
+    """Ensure table exists and has at least (idcol, job_key, sent_at). Do NOT enforce PK to avoid legacy nulls."""
+    with _get_session() as s:
+        s.execute(_sql_text("CREATE TABLE IF NOT EXISTS sent_job (chat_id BIGINT, job_key TEXT, sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'));"))
+        # Ensure both columns exist if possible
+        s.execute(_sql_text("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='sent_job' AND column_name='chat_id'
+                ) THEN
+                    ALTER TABLE sent_job ADD COLUMN chat_id BIGINT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='sent_job' AND column_name='user_id'
+                ) THEN
+                    ALTER TABLE sent_job ADD COLUMN user_id BIGINT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='sent_job' AND column_name='job_key'
+                ) THEN
+                    ALTER TABLE sent_job ADD COLUMN job_key TEXT;
+                END IF;
+            END $$;
+        """))
+        s.commit()
+    log.info("[dedup] sent_job schema ensured (id column chosen: %s)", _sent_user_col())
 
 def _already_sent(user_id: int, job_key: str) -> bool:
-    idcol = _sent_user_col()
+    col = _sent_user_col()
     with _get_session() as s:
         row = s.execute(
-            _sql_text(f"SELECT 1 FROM sent_job WHERE {idcol}=:u AND job_key=:k LIMIT 1;"),
+            _sql_text(f"SELECT 1 FROM sent_job WHERE {col}=:u AND job_key=:k LIMIT 1;"),
             {"u": user_id, "k": job_key},
         ).fetchone()
         return row is not None
 
 def _mark_sent(user_id: int, job_key: str):
-    idcol = _sent_user_col()
+    col = _sent_user_col()
     with _get_session() as s:
         s.execute(
-            _sql_text(f"""
-                INSERT INTO sent_job ({idcol}, job_key)
-                VALUES (:u, :k)
-                ON CONFLICT ({idcol}, job_key) DO NOTHING;
-            """),
+            _sql_text(f"INSERT INTO sent_job ({col}, job_key) VALUES (:u, :k)"),
             {"u": user_id, "k": job_key},
         )
         s.commit()
