@@ -123,11 +123,14 @@ def find_match_keyword(item: Dict, keywords: List[str]) -> str | None:
     return None
 
 
-def send_job_to_user(chat_id: int, item: Dict):
+# -------------------------------------------------
+# SEND: επιστρέφει True/False και ΔΕΝ καταχωρεί τίποτα στη βάση
+# -------------------------------------------------
+def send_job_to_user(chat_id: int, item: Dict) -> bool:
     BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
     if not BOT_TOKEN:
         log.warning("No BOT_TOKEN set; skipping send.")
-        return
+        return False
 
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     title = (item.get("title") or "Untitled").strip()
@@ -165,7 +168,7 @@ def send_job_to_user(chat_id: int, item: Dict):
     }
 
     try:
-        httpx.post(
+        r = httpx.post(
             TG_API,
             json={
                 "chat_id": chat_id,
@@ -176,14 +179,25 @@ def send_job_to_user(chat_id: int, item: Dict):
             },
             timeout=20,
         )
+        ok = (r.status_code == 200) and (r.json().get("ok") is True)
+        if not ok:
+            log.warning("[send] to %s failed: %s %s", chat_id, r.status_code, r.text[:200])
+        return ok
     except Exception as e:
-        log.warning("[send] to %s failed: %s", chat_id, e)
+        log.warning("[send] to %s exception: %s", chat_id, e)
+        return False
 
 
+# -------------------------------------------------
+# DELIVER: αποστολή πρώτα • καταχώριση sent_job ΜΟΝΟ αν υπήρξε επιτυχία
+# -------------------------------------------------
 def deliver_to_users(items: List[Dict]):
     if not items:
         return
+
     ensure_sent_table()
+
+    # users
     with get_session() as s:
         rows = s.execute(sqltext('SELECT id, telegram_id FROM "user" WHERE is_blocked=FALSE')).fetchall()
         users = [(int(r[0]), int(r[1])) for r in rows]
@@ -191,20 +205,23 @@ def deliver_to_users(items: List[Dict]):
 
     for item in items:
         key = make_key(item)
+
+        # αν υπάρχει ήδη, προχώρα στο επόμενο
         with get_session() as s:
-            res = s.execute(
-                sqltext("INSERT INTO sent_job(job_key) VALUES (:k) ON CONFLICT DO NOTHING RETURNING job_key"),
-                {"k": key},
-            ).fetchone()
-            s.commit()
-        if not res:
+            exists = s.execute(sqltext("SELECT 1 FROM sent_job WHERE job_key=:k"), {"k": key}).fetchone()
+        if exists:
             continue
+
+        success_any = False
         for _, tid in users:
-            try:
-                send_job_to_user(tid, item)
-                time.sleep(0.3)
-            except Exception as e:
-                log.warning("[deliver] send fail user=%s err=%s", tid, e)
+            if send_job_to_user(tid, item):
+                success_any = True
+            time.sleep(0.3)
+
+        if success_any:
+            with get_session() as s:
+                s.execute(sqltext("INSERT INTO sent_job(job_key) VALUES (:k) ON CONFLICT DO NOTHING"), {"k": key})
+                s.commit()
 
 
 # -------------------------------------------------
