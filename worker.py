@@ -14,6 +14,36 @@ from db_events import ensure_feed_events_schema as ensure_schema, record_event a
 # Ensure the events table exists at import time (safe no-op if already there)
 ensure_schema()
 
+from sqlalchemy import text as _sql_text
+from db import get_session as _get_session
+
+def _cleanup_old_sent_jobs(_days:int=7):
+    """
+    Delete old sent_job rows older than `_days` days.
+    Uses make_interval(days => :d) to avoid SQL injection / interval concat errors.
+    Runs once on worker import/startup.
+    """
+    try:
+        with _get_session() as s:
+            s.execute(
+                _sql_text(
+                    "DELETE FROM sent_job "
+                    "WHERE sent_at < (NOW() AT TIME ZONE 'UTC') - make_interval(days => :d)"
+                ),
+                {"d": int(_days)}
+            )
+            s.commit()
+    except Exception as _e:
+        # silent: don't crash worker if table missing or other non-critical error
+        pass
+
+# run once on import
+try:
+    _cleanup_old_sent_jobs(7)
+except Exception:
+    pass
+
+
 def match_keywords(item: Dict, keywords: List[str]) -> bool:
     if not keywords:
         return True
