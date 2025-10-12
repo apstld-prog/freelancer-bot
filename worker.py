@@ -63,7 +63,7 @@ def ensure_sent_table():
 
 
 def prune_sent_table(days: int = 7) -> None:
-    # compute cutoff timestamp in Python (avoid INTERVAL binding issues)
+    # Python-computed cutoff (αποφεύγουμε INTERVAL binding)
     from datetime import datetime, timedelta, timezone
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     with get_session() as s:
@@ -172,7 +172,7 @@ def deliver_to_users(items: List[Dict]):
     ensure_sent_table()
     with get_session() as s:
         rows = s.execute(
-            'SELECT id, telegram_id FROM "user" WHERE is_blocked=FALSE'
+            sqltext('SELECT id, telegram_id FROM "user" WHERE is_blocked=FALSE')
         ).fetchall()
         users = [(int(r[0]), int(r[1])) for r in rows]
         log.info("[deliver] users loaded: %d", len(users))
@@ -201,12 +201,20 @@ async def run_pipeline(keywords: List[str]) -> None:
 
     for src, fetcher in PLATFORMS:
         try:
+            # Κλήση με λίστα keywords (κανονική ροή)
             items = await maybe_await(fetcher(keywords))
-            for it in items or []:
-                it.setdefault("source", src)
-            all_items.extend(items or [])
         except Exception as e:
-            log.error("[%s] fetch error: %s", src, e)
+            # Fallback για fetchers που θέλουν string (π.χ. careerjet)
+            try:
+                items = await maybe_await(fetcher(" ".join(keywords)))
+                log.info("[%s] retried with string keywords", src)
+            except Exception as e2:
+                log.error("[%s] fetch error: %s", src, e2)
+                items = []
+
+        for it in items or []:
+            it.setdefault("source", src)
+        all_items.extend(items or [])
 
     filtered = [i for i in all_items if match_keywords(i, keywords) and is_recent(i, 7)]
     log.info("[Worker] cycle completed — keywords=%d, items=%d", len(keywords), len(filtered))
