@@ -1,43 +1,78 @@
-# db_events.py — feed events schema + stats
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional
-
+import logging
 from sqlalchemy import text
 from db import get_session
 
-DDL = """
-CREATE TABLE IF NOT EXISTS feed_events (
-  id BIGSERIAL PRIMARY KEY,
-  ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  source VARCHAR(120) NOT NULL,
-  payload JSONB
-);
-CREATE INDEX IF NOT EXISTS idx_feed_events_ts ON feed_events (ts);
-CREATE INDEX IF NOT EXISTS idx_feed_events_source ON feed_events (source);
-"""
+log = logging.getLogger("db_events")
 
-def ensure_feed_events_schema() -> None:
-    """Create feed_events table & indexes if they don't exist."""
-    with get_session() as s:
-        s.execute(text(DDL))
-        s.commit()
+# ======================================================
+#  Βοηθητικές συναρτήσεις για feed events & jobs
+# ======================================================
 
-def record_event(source: str, payload: Optional[dict] = None) -> None:
-    """Optional helper to insert an event (call this όταν φτάνει job από πηγή)."""
-    with get_session() as s:
-        s.execute(
-            text("INSERT INTO feed_events (source, payload) VALUES (:source, :payload)"),
-            {"source": source, "payload": payload},
-        )
-        s.commit()
+def ensure_schema():
+    """Ελέγχει/δημιουργεί τον πίνακα feed_events αν δεν υπάρχει."""
+    try:
+        with get_session() as s:
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS feed_events (
+                    id SERIAL PRIMARY KEY,
+                    platform TEXT,
+                    created_at TIMESTAMP DEFAULT NOW() AT TIME ZONE 'UTC'
+                )
+            """))
+            s.commit()
+            log.info("✅ Table feed_events ensured")
+    except Exception as e:
+        log.warning("Failed to ensure schema: %s", e)
 
-def get_platform_stats(window_hours: int = 24) -> Dict[str, int]:
-    """Return counts per source for last `window_hours`."""
-    with get_session() as s:
-        q = text(
-            "SELECT source, COUNT(*) FROM feed_events "
-            "WHERE ts >= :ts_from GROUP BY source ORDER BY 2 DESC"
-        )
-        ts_from = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-        rows = s.execute(q, {"ts_from": ts_from}).fetchall()
-        return {r[0]: int(r[1]) for r in rows}
+
+def log_platform_event(platform: str):
+    """Καταγράφει ένα γεγονός feed/selftest για συγκεκριμένη πλατφόρμα."""
+    try:
+        ensure_schema()
+        with get_session() as s:
+            s.execute(
+                text("""
+                    INSERT INTO feed_events (platform, created_at)
+                    VALUES (:p, NOW() AT TIME ZONE 'UTC')
+                """),
+                {"p": platform}
+            )
+            s.commit()
+        log.info("feed_events row recorded for '%s'", platform)
+    except Exception as e:
+        log.warning("Failed to log platform event: %s", e)
+
+
+def get_recent_event_count(hours: int = 24):
+    """Επιστρέφει πόσα feed events υπήρξαν τις τελευταίες X ώρες."""
+    try:
+        with get_session() as s:
+            rows = s.execute(
+                text("""
+                    SELECT COUNT(*) 
+                    FROM feed_events 
+                    WHERE created_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL :h || ' hours'
+                """),
+                {"h": hours}
+            ).scalar()
+        return rows or 0
+    except Exception as e:
+        log.warning("Failed to count feed events: %s", e)
+        return 0
+
+
+def cleanup_old_events(days: int = 30):
+    """Διαγράφει πολύ παλιά γεγονότα για καθαριότητα."""
+    try:
+        with get_session() as s:
+            s.execute(
+                text("""
+                    DELETE FROM feed_events 
+                    WHERE created_at < (NOW() AT TIME ZONE 'UTC') - INTERVAL :d || ' days'
+                """),
+                {"d": days}
+            )
+            s.commit()
+        log.info("🧹 Old feed_events older than %d days deleted", days)
+    except Exception as e:
+        log.warning("Failed to cleanup old feed events: %s", e)
