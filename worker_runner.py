@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # worker_runner.py — async runner: send-to-all + per-user dedup (PTB v20+)
+# Robust dedup schema: supports sent_job.{user_id|chat_id}
 # Env:
 #   TELEGRAM_BOT_TOKEN (required)
 #   WORKER_INTERVAL=60 (optional)
 #   WORKER_CLEANUP_DAYS=7 (optional)
 #   BATCH_PER_TICK=5 (optional)
 
-import os, time, logging, asyncio
+import os, logging, asyncio
 from typing import Dict, List, Optional, Set
 
 import worker as _worker
@@ -26,38 +27,99 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
 
 def _get_env_int(name: str, default: int) -> int:
-    try: return int(str(os.getenv(name, default)).strip())
-    except Exception: return default
+    try:
+        return int(str(os.getenv(name, default)).strip())
+    except Exception:
+        return default
 
-# ---------- sent_job schema + helpers (sync SQL) ----------
-def _ensure_sent_schema():
+# ---------- sent_job schema + helpers (per-user dedup, robust) ----------
+def _sent_user_col() -> str:
+    """
+    Detect which id column exists for sent_job: prefer user_id, else chat_id.
+    If table doesn't exist or has none, default to 'user_id' (the creator will add it).
+    """
     with _get_session() as s:
+        row = s.execute(_sql_text("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'sent_job'
+              AND column_name IN ('user_id','chat_id')
+            ORDER BY CASE WHEN column_name='user_id' THEN 0 ELSE 1 END
+            LIMIT 1
+        """)).fetchone()
+        if row:
+            return row[0]
+    return "user_id"
+
+def _ensure_sent_schema():
+    """
+    Create/normalize sent_job so that it has (idcol, job_key, sent_at) and a PK on (idcol, job_key).
+    - If the table exists with chat_id only, we keep chat_id.
+    - If the table doesn't have any id column, we add user_id.
+    """
+    with _get_session() as s:
+        # Ensure table exists
         s.execute(_sql_text("""
             CREATE TABLE IF NOT EXISTS sent_job (
-                user_id BIGINT NOT NULL,
-                job_key TEXT NOT NULL,
-                sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'),
-                PRIMARY KEY (user_id, job_key)
+                user_id BIGINT,
+                job_key TEXT,
+                sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')
             );
         """))
+
+        # Determine id column (prefer existing user_id/chat_id)
+        row = s.execute(_sql_text("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name='sent_job' AND column_name IN ('user_id','chat_id')
+            ORDER BY CASE WHEN column_name='user_id' THEN 0 ELSE 1 END
+            LIMIT 1
+        """)).fetchone()
+
+        if row:
+            idcol = row[0]
+        else:
+            # No id column at all → add user_id
+            s.execute(_sql_text("ALTER TABLE sent_job ADD COLUMN user_id BIGINT;"))
+            idcol = "user_id"
+
+        # Ensure job_key exists
+        has_job_key = s.execute(_sql_text("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name='sent_job' AND column_name='job_key' LIMIT 1
+        """)).fetchone()
+        if not has_job_key:
+            s.execute(_sql_text("ALTER TABLE sent_job ADD COLUMN job_key TEXT;"))
+
+        # Recreate PK on (idcol, job_key)
+        s.execute(_sql_text("""
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='sent_job_pkey') THEN
+                    ALTER TABLE sent_job DROP CONSTRAINT sent_job_pkey;
+                END IF;
+            END $$;
+        """))
+        s.execute(_sql_text(f"ALTER TABLE sent_job ADD CONSTRAINT sent_job_pkey PRIMARY KEY ({idcol}, job_key);"))
         s.commit()
-    log.info("[dedup] sent_job schema ensured")
+    log.info("[dedup] sent_job schema ensured (id column: %s)", _sent_user_col())
 
 def _already_sent(user_id: int, job_key: str) -> bool:
+    idcol = _sent_user_col()
     with _get_session() as s:
         row = s.execute(
-            _sql_text("SELECT 1 FROM sent_job WHERE user_id=:u AND job_key=:k LIMIT 1;"),
+            _sql_text(f"SELECT 1 FROM sent_job WHERE {idcol}=:u AND job_key=:k LIMIT 1;"),
             {"u": user_id, "k": job_key},
         ).fetchone()
         return row is not None
 
 def _mark_sent(user_id: int, job_key: str):
+    idcol = _sent_user_col()
     with _get_session() as s:
         s.execute(
-            _sql_text("""
-                INSERT INTO sent_job (user_id, job_key)
+            _sql_text(f"""
+                INSERT INTO sent_job ({idcol}, job_key)
                 VALUES (:u, :k)
-                ON CONFLICT (user_id, job_key) DO NOTHING;
+                ON CONFLICT ({idcol}, job_key) DO NOTHING;
             """),
             {"u": user_id, "k": job_key},
         )
@@ -67,7 +129,8 @@ def _mark_sent(user_id: int, job_key: str):
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
-    if len(desc) > 700: desc = desc[:700] + "…"
+    if len(desc) > 700:
+        desc = desc[:700] + "…"
     src = it.get("source", "freelancer")
     budget_min, budget_max = it.get("budget_min"), it.get("budget_max")
     currency = it.get("currency") or ""
@@ -80,8 +143,10 @@ def _compose_message(it: Dict) -> str:
         elif budget_max is not None:
             budget_str = f"up to {budget_max} {currency}"
     lines = [f"<b>{title}</b>"]
-    if budget_str: lines.append(f"💰 <i>{budget_str}</i>")
-    if desc: lines.append(desc)
+    if budget_str:
+        lines.append(f"💰 <i>{budget_str}</i>")
+    if desc:
+        lines.append(desc)
     lines.append(f"🏷️ <i>{src}</i>")
     return "\n".join(lines)
 
@@ -90,16 +155,21 @@ def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
     proposal = it.get("proposal_url") or original or ""
     affiliate = it.get("affiliate_url") or ""
     if (it.get("source") or "").lower() == "freelancer" and original and not affiliate:
-        try: affiliate = _worker.wrap_freelancer(original)
-        except Exception: pass
+        try:
+            affiliate = _worker.wrap_freelancer(original)
+        except Exception:
+            pass
     return {"original": original, "proposal": proposal, "affiliate": affiliate}
 
 def _build_keyboard(links: Dict[str, Optional[str]]):
     if _job_kb is not None:
-        try: return _job_kb(links["original"], links["proposal"], links["affiliate"])
+        try:
+            return _job_kb(links["original"], links["proposal"], links["affiliate"])
         except TypeError:
-            try: return _job_kb(links)
-            except Exception: pass
+            try:
+                return _job_kb(links)
+            except Exception:
+                pass
     row1 = [
         InlineKeyboardButton("📝 Proposal", url=links["proposal"] or links["original"] or ""),
         InlineKeyboardButton("🔗 Original", url=links["original"] or ""),
@@ -147,8 +217,10 @@ except Exception:
 
 def _job_key(it: Dict) -> str:
     if _make_key:
-        try: return _make_key(it)
-        except Exception: pass
+        try:
+            return _make_key(it)
+        except Exception:
+            pass
     sid = str(it.get("id") or it.get("original_url") or it.get("url") or it.get("title") or "")[:512]
     return f"{it.get('source','unknown')}::{sid}"
 
@@ -156,9 +228,11 @@ def _job_key(it: Dict) -> str:
 async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
     sent = 0
     for it in items:
-        if sent >= per_user_batch: break
+        if sent >= per_user_batch:
+            break
         k = _job_key(it)
-        if _already_sent(chat_id, k): continue
+        if _already_sent(chat_id, k):
+            continue
         text = _compose_message(it)
         links = _resolve_links(it)
         kb = _build_keyboard(links)
@@ -201,15 +275,16 @@ async def amain():
 
     while True:
         try:
-            # τρέξε sync pipeline σε ξεχωριστό thread για να μην μπλοκάρει event loop
             items = await asyncio.to_thread(_worker.run_pipeline, [])
             users = await asyncio.to_thread(_fetch_all_users)
             if items and users:
                 for uid in users:
                     await _send_items(bot, uid, items, per_user_batch)
             else:
-                if not items: log.info("[pipeline] no items this tick")
-                if not users: log.info("[users] no receivers")
+                if not items:
+                    log.info("[pipeline] no items this tick")
+                if not users:
+                    log.info("[users] no receivers")
         except Exception as e:
             log.error("[runner] pipeline/send error: %s", e)
 
