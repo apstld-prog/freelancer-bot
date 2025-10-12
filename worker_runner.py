@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-# worker_runner.py — async runner: send-to-all + per-user dedup (PTB v20+)
-# Safer schema handling for sent_job (no PK enforcement; supports chat_id or user_id).
+# worker_runner.py — async runner: send-to-all + per-user/global dedup (PTB v20+)
+# - Displays "Match: ..." like /selftest
+# - Uses ui_keyboards.job_action_kb with signature detection (so Save works)
+# - Dedup safe with legacy UNIQUE(job_key) schemas (no crashes)
 
-import os, logging, asyncio
+import os, logging, asyncio, inspect
 from typing import Dict, List, Optional, Set
 
 import worker as _worker
 from sqlalchemy import text as _sql_text
+from sqlalchemy.exc import IntegrityError
 from db import get_session as _get_session
 
+# Prefer project keyboard (keeps UI/handlers intact)
 try:
     from ui_keyboards import job_action_kb as _job_kb
 except Exception:
@@ -27,90 +31,77 @@ def _get_env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
-# ---------- sent_job schema + helpers (per-user dedup, robust & non-intrusive) ----------
-def _sent_user_col() -> str:
-    """Return preferred id column present in sent_job: chat_id > user_id; create chat_id if none exists."""
-    with _get_session() as s:
-        row = s.execute(_sql_text("""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema='public' AND table_name='sent_job'
-              AND column_name IN ('chat_id','user_id')
-            ORDER BY CASE WHEN column_name='chat_id' THEN 0 ELSE 1 END
-            LIMIT 1
-        """)).fetchone()
-        if row:
-            return row[0]
-        # No id column at all → add chat_id
-        s.execute(_sql_text("CREATE TABLE IF NOT EXISTS sent_job (chat_id BIGINT, job_key TEXT, sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'));"))
-        s.execute(_sql_text("""
-            DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema='public' AND table_name='sent_job' AND column_name='chat_id'
-                ) THEN
-                    ALTER TABLE sent_job ADD COLUMN chat_id BIGINT;
-                END IF;
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema='public' AND table_name='sent_job' AND column_name='job_key'
-                ) THEN
-                    ALTER TABLE sent_job ADD COLUMN job_key TEXT;
-                END IF;
-            END $$;
-        """))
-        s.commit()
-        return "chat_id"
-
+# ---------- sent_job schema + helpers (robust, non-intrusive) ----------
 def _ensure_sent_schema():
-    """Ensure table exists and has at least (idcol, job_key, sent_at). Do NOT enforce PK to avoid legacy nulls."""
+    """Ensure sent_job exists with columns for id & job_key. Do not enforce PK to respect legacy data."""
     with _get_session() as s:
-        s.execute(_sql_text("CREATE TABLE IF NOT EXISTS sent_job (chat_id BIGINT, job_key TEXT, sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'));"))
-        # Ensure both columns exist if possible
+        s.execute(_sql_text("""
+            CREATE TABLE IF NOT EXISTS sent_job (
+                chat_id BIGINT,
+                user_id BIGINT,
+                job_key TEXT,
+                sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')
+            );
+        """))
+        # Ensure columns exist (no rename/migration of existing data)
         s.execute(_sql_text("""
             DO $$ BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
                     WHERE table_schema='public' AND table_name='sent_job' AND column_name='chat_id'
-                ) THEN
-                    ALTER TABLE sent_job ADD COLUMN chat_id BIGINT;
-                END IF;
+                ) THEN ALTER TABLE sent_job ADD COLUMN chat_id BIGINT; END IF;
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
                     WHERE table_schema='public' AND table_name='sent_job' AND column_name='user_id'
-                ) THEN
-                    ALTER TABLE sent_job ADD COLUMN user_id BIGINT;
-                END IF;
+                ) THEN ALTER TABLE sent_job ADD COLUMN user_id BIGINT; END IF;
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
                     WHERE table_schema='public' AND table_name='sent_job' AND column_name='job_key'
-                ) THEN
-                    ALTER TABLE sent_job ADD COLUMN job_key TEXT;
-                END IF;
+                ) THEN ALTER TABLE sent_job ADD COLUMN job_key TEXT; END IF;
             END $$;
         """))
         s.commit()
-    log.info("[dedup] sent_job schema ensured (id column chosen: %s)", _sent_user_col())
+    log.info("[dedup] sent_job ensured (no schema changes to constraints)")
 
-def _already_sent(user_id: int, job_key: str) -> bool:
-    col = _sent_user_col()
+def _already_sent(_uid: int, job_key: str) -> bool:
+    """Return True if this job_key already exists (handles legacy UNIQUE(job_key))."""
     with _get_session() as s:
         row = s.execute(
-            _sql_text(f"SELECT 1 FROM sent_job WHERE {col}=:u AND job_key=:k LIMIT 1;"),
-            {"u": user_id, "k": job_key},
+            _sql_text("SELECT 1 FROM sent_job WHERE job_key=:k LIMIT 1;"),
+            {"k": job_key},
         ).fetchone()
         return row is not None
 
-def _mark_sent(user_id: int, job_key: str):
-    col = _sent_user_col()
+def _mark_sent(uid: int, job_key: str):
+    """Insert row safely; ignore duplicate errors from legacy UNIQUE(job_key)."""
     with _get_session() as s:
-        s.execute(
-            _sql_text(f"INSERT INTO sent_job ({col}, job_key) VALUES (:u, :k)"),
-            {"u": user_id, "k": job_key},
-        )
-        s.commit()
+        try:
+            s.execute(
+                _sql_text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k)"),
+                {"u": uid, "k": job_key},
+            )
+            s.commit()
+        except IntegrityError:
+            s.rollback()
+            # Row with the same job_key already exists under legacy UNIQUE(job_key) → ignore
+            return
 
 # ---------- compose + keyboard ----------
+def _detect_match(it: Dict) -> Optional[str]:
+    for k in ("match", "matched", "match_keyword"):
+        v = it.get(k)
+        if v:
+            return str(v)
+    # Optional env-based detection
+    csv = os.getenv("KEYWORDS_CSV", "").strip()
+    if not csv:
+        return None
+    hay = f"{it.get('title','')} {it.get('description','')}".lower()
+    for w in [x.strip() for x in csv.split(",") if x.strip()]:
+        if w.lower() in hay:
+            return w
+    return None
+
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
@@ -118,20 +109,27 @@ def _compose_message(it: Dict) -> str:
         desc = desc[:700] + "…"
     src = it.get("source", "freelancer")
     budget_min, budget_max = it.get("budget_min"), it.get("budget_max")
-    currency = it.get("currency") or ""
+    currency = (it.get("currency") or "").strip()
     budget_str = ""
     if budget_min is not None or budget_max is not None:
         if budget_min is not None and budget_max is not None:
-            budget_str = f"{budget_min}–{budget_max} {currency}"
+            budget_str = f"{budget_min}–{budget_max} {currency}".strip()
         elif budget_min is not None:
-            budget_str = f"from {budget_min} {currency}"
+            budget_str = f"from {budget_min} {currency}".strip()
         elif budget_max is not None:
-            budget_str = f"up to {budget_max} {currency}"
+            budget_str = f"up to {budget_max} {currency}".strip()
+
     lines = [f"<b>{title}</b>"]
     if budget_str:
         lines.append(f"💰 <i>{budget_str}</i>")
     if desc:
         lines.append(desc)
+
+    # Show Match: ... line like selftest (plain text label)
+    m = _detect_match(it)
+    if m:
+        lines.append(f"Match: {m}")
+
     lines.append(f"🏷️ <i>{src}</i>")
     return "\n".join(lines)
 
@@ -146,21 +144,36 @@ def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
             pass
     return {"original": original, "proposal": proposal, "affiliate": affiliate}
 
-def _build_keyboard(links: Dict[str, Optional[str]]):
+def _build_keyboard(it: Dict, links: Dict[str, Optional[str]]):
+    """Use project's keyboard if possible so Save/Delete handlers get the expected payload."""
     if _job_kb is not None:
         try:
-            return _job_kb(links["original"], links["proposal"], links["affiliate"])
-        except TypeError:
-            try:
-                return _job_kb(links)
-            except Exception:
-                pass
+            sig = inspect.signature(_job_kb)
+            params = list(sig.parameters.keys())
+            # common patterns in the codebase
+            if len(params) == 1:
+                return _job_kb(it)
+            # item + options
+            if "item" in params:
+                return _job_kb(item=it)
+            # three urls (original, proposal, affiliate)
+            if len(params) >= 3:
+                try:
+                    return _job_kb(links["original"], links["proposal"], links["affiliate"])
+                except Exception:
+                    pass
+            # dict-based
+            return _job_kb({"item": it, **links})
+        except Exception as e:
+            log.warning("job_action_kb fallback: %s", e)
+
+    # Last-resort fallback (labels identical; Save/Delete minimal callbacks)
     row1 = [
         InlineKeyboardButton("📝 Proposal", url=links["proposal"] or links["original"] or ""),
-        InlineKeyboardButton("🔗 Original", url=links["original"] or ""),
+        InlineKeyboardButton("🔗 Original",  url=links["original"] or ""),
     ]
     row2 = [
-        InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+        InlineKeyboardButton("⭐ Save",   callback_data="job:save"),
         InlineKeyboardButton("🗑️ Delete", callback_data="job:delete"),
     ]
     return InlineKeyboardMarkup([row1, row2])
@@ -220,7 +233,7 @@ async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch:
             continue
         text = _compose_message(it)
         links = _resolve_links(it)
-        kb = _build_keyboard(links)
+        kb = _build_keyboard(it, links)
         try:
             await bot.send_message(
                 chat_id=chat_id,
