@@ -1,7 +1,8 @@
 fastapi
 uvicorn
 python-telegram-bot==20.8
-sqlalchemy
+SQLAlchemy==2.0.25
 httpx
 requests
 beautifulsoup4
+psycopg2-binary
