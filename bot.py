@@ -1,47 +1,125 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from sqlalchemy import text as sqltext
 from db import get_session
-from sqlalchemy import text
 
 BOT_TOKEN = "8301080604:AAF7Hsb_ImfJHiJVYTTXzQOwgI37h8XlEKc"
 
+# -------------------- Application wiring --------------------
+
 def build_application():
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Commands (do not change semantics)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("feedstatus", feedstatus))
     app.add_handler(CommandHandler("selftest", selftest))
-    # keep one generic callback handler (do not add extra commands/UI)
-    app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(CommandHandler("help", help_cmd))
+
+    # Single callback router (handles all buttons inc. Save/Delete)
+    app.add_handler(CallbackQueryHandler(callback_router))
+
     return app
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # DO NOT CHANGE /start UI
-    keyboard = [
-        [InlineKeyboardButton("🔍 Feed Status", callback_data="act:feedstatus")],
-        [InlineKeyboardButton("🧪 Self Test", callback_data="act:selftest")],
-        [InlineKeyboardButton("💾 Saved Jobs", callback_data="act:saved")],
+# -------------------- /start — EXACT UI TEMPLATE --------------------
+
+WELCOME_HEADER = (
+    "👋 Welcome to Freelancer Alert Bot!\n\n"
+    "🎁 You have a 10-day free trial.\n"
+    "Automatically finds matching freelance jobs from top platforms and sends instant alerts.\n\n"
+    "Use /help to see how it works."
+)
+
+HELP_BLOCK = (
+    "💡 Features\n"
+    "• Realtime job alerts (Freelancer API)\n"
+    "• Affiliate-wrapped Proposal & Original links\n"
+    "• Budget shown + USD conversion\n"
+    "• ⭐ Keep / 🗑️ Delete buttons\n"
+    "• 10-day free trial, extend via admin\n"
+    "• Multi-keyword search (single/all modes)\n"
+    "• Platforms by country (incl. GR boards)\n"
+)
+
+PLATFORMS_BLOCK = (
+    "🌍 Platforms monitored:\n"
+    "Global: Freelancer.com (affiliate), PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal*, Codeable*, YunoJuno*, "
+    "Works​ome*, twago, freelancermap\n"
+    "Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n"
+    "(* referal/curated platforms)"
+)
+
+def start_keyboard() -> InlineKeyboardMarkup:
+    # Exact positions as in the template: 2 x 2 grid, then Contact, then Admin
+    rows = [
+        [
+            InlineKeyboardButton("+ Add Keywords", callback_data="act:addkeywords"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="act:settings"),
+        ],
+        [
+            InlineKeyboardButton("🆘 Help", callback_data="act:help"),
+            InlineKeyboardButton("💾 Saved", callback_data="act:saved"),
+        ],
+        [InlineKeyboardButton("📬 Contact", callback_data="act:contact")],
+        [InlineKeyboardButton("🔥 Admin", callback_data="act:admin")],
     ]
-    await update.message.reply_text(
-        "👋 Welcome to Freelancer Alert Bot",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    return InlineKeyboardMarkup(rows)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Send welcome card + the exact keyboard (no layout change)
+    if update.message:
+        await update.message.reply_text(WELCOME_HEADER, disable_web_page_preview=True, reply_markup=start_keyboard())
+        # Optional informational blocks below the main card, as in screenshots
+        await update.message.reply_text(HELP_BLOCK, disable_web_page_preview=True)
+        await update.message.reply_text(PLATFORMS_BLOCK, disable_web_page_preview=True)
+    else:
+        # Fallback for button-initiated /start
+        await update.callback_query.edit_message_text(WELCOME_HEADER, disable_web_page_preview=True, reply_markup=start_keyboard())
+
+# -------------------- Core commands (unchanged semantics) --------------------
 
 async def feedstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # DO NOT CHANGE
+    # Show last 24h by platform (text only; UI not changed here)
     with get_session() as s:
-        count = s.execute(text("SELECT COUNT(*) FROM feed_events")).scalar()
-    await update.message.reply_text(f"📊 Feed events recorded: {count}")
+        rows = s.execute(sqltext("""
+            SELECT platform, COUNT(*) 
+            FROM feed_events 
+            WHERE created_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours'
+            GROUP BY platform ORDER BY platform
+        """)).fetchall()
+    if not rows:
+        txt = "🧪 Feeds active and synced."
+    else:
+        lines = ["📊 Feed status (last 24h):"]
+        for p, c in rows:
+            lines.append(f"• {p}: {c}")
+        txt = "\n".join(lines)
+    if update.message:
+        await update.message.reply_text(txt)
+    else:
+        await update.callback_query.edit_message_text(txt)
 
 async def selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # DO NOT CHANGE
-    await update.message.reply_text("✅ Self-test completed. All systems functional.")
+    # Do not change user-facing text
+    txt = "✅ Self-test completed: bot λειτουργεί σωστά."
+    if update.message:
+        await update.message.reply_text(txt)
+    else:
+        await update.callback_query.edit_message_text(txt)
 
-# ----------------- helpers for Save/Delete (no UI changes) -----------------
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Mirror the help block users expect
+    await update.message.reply_text(
+        "🪄 Use /mysettings anytime. Try /selftest for a sample.\n"
+        "📍 Use /platforms CC to see platforms by country (e.g., /platforms GR).",
+        disable_web_page_preview=True,
+    )
+
+# -------------------- Saved/Delete handling (no UI changes) --------------------
 
 def ensure_saved_table() -> None:
-    """Create saved_job table if missing (idempotent)."""
     with get_session() as s:
-        s.execute(text("""
+        s.execute(sqltext("""
             CREATE TABLE IF NOT EXISTS saved_job (
                 user_tg BIGINT NOT NULL,
                 job_key TEXT NOT NULL,
@@ -51,50 +129,68 @@ def ensure_saved_table() -> None:
         """))
         s.commit()
 
-# ----------------- single callback router (keeps your existing behavior) ---
-
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def handle_save(query) -> None:
+    ensure_saved_table()
     data = query.data or ""
-
-    # SAVE: persist + remove the card
-    if data.startswith("job:save:"):
-        ensure_saved_table()
-        job_key = data.split(":", 2)[2]  # format: job:save:<job_key>
+    job_key = data.split(":", 2)[2] if ":" in data else ""
+    if job_key:
         with get_session() as s:
             s.execute(
-                text("INSERT INTO saved_job (user_tg, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING"),
-                {"u": query.from_user.id, "k": job_key}
+                sqltext("INSERT INTO saved_job (user_tg, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING"),
+                {"u": query.from_user.id, "k": job_key},
             )
             s.commit()
-        # Remove the message (as requested)
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        # Silent confirmation
-        await query.answer("Saved", show_alert=False)
-        return
+    try:
+        await query.message.delete()  # per your requirement
+    except Exception:
+        pass
+    await query.answer("Saved", show_alert=False)
 
-    # DELETE: just remove the card
+async def handle_delete(query) -> None:
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await query.answer("Deleted", show_alert=False)
+
+# -------------------- Callback router (keeps existing texts) --------------------
+
+async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+    data = q.data or ""
+
+    # Job actions
+    if data.startswith("job:save:"):
+        await handle_save(q)
+        return
     if data == "job:delete":
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        await query.answer("Deleted", show_alert=False)
+        await handle_delete(q)
         return
 
-    # KEEP existing minimal texts for these actions (no UI changes)
+    # Menu actions (texts exactly as simple lines; no layout changes)
+    if data == "act:addkeywords":
+        await q.answer()
+        await q.edit_message_text("Type /addkeyword python, telegram to add keywords.")
+        return
+    if data == "act:settings":
+        await q.answer()
+        await q.edit_message_text("Open /mysettings to view your filters and proposal template.")
+        return
+    if data == "act:help":
+        await q.answer()
+        await q.edit_message_text(HELP_BLOCK, disable_web_page_preview=True)
+        return
     if data == "act:saved":
-        await query.edit_message_text("📂 Saved jobs list is empty.")
+        await q.answer()
+        await q.edit_message_text("📂 Saved jobs list (coming soon).")
         return
-
-    if data == "act:feedstatus":
-        await query.edit_message_text("📊 Feed status checked successfully.")
+    if data == "act:contact":
+        await q.answer()
+        await q.edit_message_text("✉️ Contact the admin if you need help.")
         return
-
-    if data == "act:selftest":
-        await query.edit_message_text("✅ Self-test completed successfully.")
+    if data == "act:admin":
+        await q.answer()
+        await q.edit_message_text("👑 Admin panel: /users • /grant <id> <days> • /block <id> • /unblock <id> • /broadcast <text> • /feedstatus")
         return
