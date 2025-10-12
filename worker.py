@@ -31,7 +31,7 @@ PLATFORMS = []
 for name in [
     "platform_freelancer",
     "platform_peopleperhour",
-    "platform_skywalker",
+    # "platform_skywalker",  # temporarily disabled due to fetch error
 ]:
     try:
         fetcher = _import_fetch(name)
