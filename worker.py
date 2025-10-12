@@ -16,15 +16,32 @@ ensure_schema()
 
 from sqlalchemy import text as _sql_text
 from db import get_session as _get_session
+import os as _os, logging as _logging
+
+_wlog = _logging.getLogger("worker")
 
 def _cleanup_old_sent_jobs(_days:int=7):
     """
     Delete old sent_job rows older than `_days` days.
-    Uses make_interval(days => :d) to avoid SQL injection / interval concat errors.
-    Runs once on worker import/startup.
+    1) Try param-safe make_interval(days => :d)
+    2) Fallback to constant INTERVAL '{days} days' (after int cast)
+    Supports env override: WORKER_CLEANUP_DAYS=0 to disable silently.
     """
     try:
+        _days = int(_days)
+    except Exception:
+        _days = 7
+
+    # Allow disabling via env (0/false)
+    _toggle = str(_os.getenv("WORKER_CLEANUP_DAYS", _days)).strip().lower()
+    if _toggle in ("0", "false"):
+        _wlog.info("[cleanup] skipped via WORKER_CLEANUP_DAYS=0")
+        return
+
+    # First attempt: make_interval
+    try:
         with _get_session() as s:
+            _wlog.info("[cleanup] using make_interval days=%s", _days)
             s.execute(
                 _sql_text(
                     "DELETE FROM sent_job "
@@ -33,15 +50,29 @@ def _cleanup_old_sent_jobs(_days:int=7):
                 {"d": int(_days)}
             )
             s.commit()
+            return
     except Exception as _e:
-        # silent: don't crash worker if table missing or other non-critical error
-        pass
+        _wlog.error("[cleanup] make_interval failed: %s", _e)
+
+    # Fallback (constant INTERVAL)
+    try:
+        with _get_session() as s:
+            _wlog.info("[cleanup] fallback constant interval days=%s", _days)
+            s.execute(
+                _sql_text(
+                    "DELETE FROM sent_job "
+                    f"WHERE sent_at < (NOW() AT TIME ZONE 'UTC') - INTERVAL '{int(_days)} days'"
+                )
+            )
+            s.commit()
+    except Exception as _e2:
+        _wlog.error("[cleanup] fallback failed: %s", _e2)
 
 # run once on import
 try:
     _cleanup_old_sent_jobs(7)
-except Exception:
-    pass
+except Exception as _e:
+    _wlog.error("[cleanup] unexpected error: %s", _e)
 
 
 def match_keywords(item: Dict, keywords: List[str]) -> bool:
