@@ -2,8 +2,8 @@ import time, logging
 from db import get_session
 from sqlalchemy import text
 from platform_freelancer import fetch_freelancer_jobs
-from platform_skywalker import fetch_skywalker_jobs
 from platform_peopleperhour import fetch_peopleperhour_jobs
+from platform_skywalker import fetch_skywalker_jobs
 from job_logic import make_key, match_keywords
 from telegram import Bot
 
@@ -30,8 +30,7 @@ def get_keywords():
 
 def already_sent(key):
     with get_session() as s:
-        row = s.execute(text("SELECT 1 FROM sent_job WHERE job_key=:k"), {"k": key}).fetchone()
-        return bool(row)
+        return s.execute(text("SELECT 1 FROM sent_job WHERE job_key=:k"), {"k": key}).fetchone() is not None
 
 def mark_sent(key):
     with get_session() as s:
@@ -39,12 +38,12 @@ def mark_sent(key):
         s.commit()
 
 def send_to_users(job):
-    text_msg = f"💼 <b>{job['title']}</b>\n\n{job['description']}\n\n🔗 {job['url']}"
+    msg = f"💼 <b>{job['title']}</b>\n\n{job['description']}\n\n🔗 {job['url']}"
     with get_session() as s:
         users = s.execute(text("SELECT telegram_id FROM \"user\"")).fetchall()
     for u in users:
         try:
-            bot.send_message(chat_id=u[0], text=text_msg, parse_mode="HTML")
+            bot.send_message(chat_id=u[0], text=msg, parse_mode="HTML")
         except Exception as e:
             logger.warning(f"send fail: {e}")
 
@@ -61,10 +60,8 @@ def main_loop():
                 logger.error(f"[{fn.__name__}] fetch error: {e}")
         for job in jobs:
             key = make_key(job)
-            if already_sent(key):
-                continue
-            if not match_keywords(job, keywords):
-                continue
+            if already_sent(key): continue
+            if not match_keywords(job, keywords): continue
             send_to_users(job)
             mark_sent(key)
         logger.info(f"[Worker] cycle completed — keywords={len(keywords)}, items={len(jobs)}")
