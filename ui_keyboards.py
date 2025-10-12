@@ -22,7 +22,7 @@ def job_action_kb(proposal_url: str, original_url: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🔗 Original", url=original_url),
     ]
     row2 = [
-        InlineKeyboardButton("⭐ Save", callback_data="save"),
-        InlineKeyboardButton("🗑️ Delete", callback_data="delete"),
+        InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+        InlineKeyboardButton("🗑️ Delete", callback_data="job:delete"),
     ]
     return InlineKeyboardMarkup([row1, row2])

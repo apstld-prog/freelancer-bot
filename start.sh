@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-echo "======================================================"
-echo "🚀 Starting Freelancer Alert Bot full service"
-echo "======================================================"
-date
-echo "Environment check:"
-echo "WORKER_INTERVAL=${WORKER_INTERVAL:-60}"
-echo "Render Service: freelancer-bot-ns7s"
-echo "------------------------------------------------------"
+set -euo pipefail
+
+# Respect Render's PORT (defaults to 10000 locally)
+export PORT="${PORT:-10000}"
+
+echo "==> launching web(server) + worker..."
 
 # Start worker in background
-python3 /opt/render/project/src/worker.py &
+python -u worker.py &
+WORKER_PID=$!
 
-# Start FastAPI server
-exec python3 -m uvicorn server:app --host 0.0.0.0 --port 10000
+cleanup() {
+  echo "==> stopping..."
+  kill -TERM "$WORKER_PID" 2>/dev/null || true
+  wait "$WORKER_PID" 2>/dev/null || true
+}
+trap cleanup SIGINT SIGTERM
+
+# Run Uvicorn in foreground so Render detects the open port
+python -m uvicorn server:app --host 0.0.0.0 --port "${PORT}" --no-access-log
