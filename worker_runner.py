@@ -1,19 +1,28 @@
 
 #!/usr/bin/env python3
-# worker_runner.py — async runner: send-to-all + per-user/global dedup (PTB v20+)
-# - Safe dedup for legacy schemas (UNIQUE/PK on job_key only)
-# - Shows "Match: …" (like /selftest) and "Posted: 3m ago"
-# - Uses project's ui_keyboards.job_action_kb when available
+# worker_runner.py — async runner: send-to-all + dedup (PTB v20+)
+# Adds:
+#   - Budget line shows original currency AND (~ USD)
+#   - "Match: ..." support (incl. KEYWORDS_CSV)
+#   - "Posted: ..." relative age
+#   - Robust job_action_kb signature handling (original_url/proposal/affiliate or item)
 
 import os, logging, asyncio, inspect, datetime as _dt
 from typing import Dict, List, Optional, Set
 
 import worker as _worker
 from sqlalchemy import text as _sql_text
-from sqlalchemy.exc import IntegrityError
 from db import get_session as _get_session
 
-# Prefer project keyboard (keeps UI/handlers intact)
+# FX conversion (reuse your project's utilities)
+try:
+    from utils_fx import load_fx_rates, to_usd as _to_usd
+    from config import FX_USD_RATES as _FX_URL
+    _RATES = load_fx_rates(_FX_URL)
+except Exception:
+    _RATES, _to_usd = {}, lambda x, c: None  # graceful fallback
+
+# Prefer project keyboard
 try:
     from ui_keyboards import job_action_kb as _job_kb
 except Exception:
@@ -32,9 +41,8 @@ def _get_env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
-# ---------- sent_job schema + helpers (robust, non-intrusive) ----------
+# ---------- sent_job helpers (do not touch legacy constraints) ----------
 def _ensure_sent_schema():
-    """Ensure sent_job exists with columns for id & job_key. Do not enforce PK to respect legacy data."""
     with _get_session() as s:
         s.execute(_sql_text("""
             CREATE TABLE IF NOT EXISTS sent_job (
@@ -44,50 +52,37 @@ def _ensure_sent_schema():
                 sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')
             );
         """))
-        # Ensure columns exist (no rename/migration of existing data)
         s.execute(_sql_text("""
             DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema='public' AND table_name='sent_job' AND column_name='chat_id'
-                ) THEN ALTER TABLE sent_job ADD COLUMN chat_id BIGINT; END IF;
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema='public' AND table_name='sent_job' AND column_name='user_id'
-                ) THEN ALTER TABLE sent_job ADD COLUMN user_id BIGINT; END IF;
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema='public' AND table_name='sent_job' AND column_name='job_key'
-                ) THEN ALTER TABLE sent_job ADD COLUMN job_key TEXT; END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                               WHERE table_schema='public' AND table_name='sent_job' AND column_name='chat_id')
+                THEN ALTER TABLE sent_job ADD COLUMN chat_id BIGINT; END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                               WHERE table_schema='public' AND table_name='sent_job' AND column_name='user_id')
+                THEN ALTER TABLE sent_job ADD COLUMN user_id BIGINT; END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                               WHERE table_schema='public' AND table_name='sent_job' AND column_name='job_key')
+                THEN ALTER TABLE sent_job ADD COLUMN job_key TEXT; END IF;
             END $$;
         """))
         s.commit()
-    log.info("[dedup] sent_job ensured (no constraint changes)")
+    log.info("[dedup] sent_job ensured")
 
 def _already_sent(_uid: int, job_key: str) -> bool:
-    """Return True if this job_key already exists (handles legacy UNIQUE(job_key))."""
     with _get_session() as s:
-        row = s.execute(
-            _sql_text("SELECT 1 FROM sent_job WHERE job_key=:k LIMIT 1;"),
-            {"k": job_key},
-        ).fetchone()
+        row = s.execute(_sql_text("SELECT 1 FROM sent_job WHERE job_key=:k LIMIT 1;"), {"k": job_key}).fetchone()
         return row is not None
 
 def _mark_sent(uid: int, job_key: str):
-    """Insert row safely; prefer ON CONFLICT on job_key, else fall back to exists-check.
-       Never raises (so it can't look like send_message failed)."""
     with _get_session() as s:
-        # try upsert by job_key (works if there is PK/UNIQUE on job_key)
+        # try ON CONFLICT by job_key (if constraint exists); otherwise ignore error and fallback
         try:
-            s.execute(
-                _sql_text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k) ON CONFLICT (job_key) DO NOTHING;"),
-                {"u": uid, "k": job_key},
-            )
+            s.execute(_sql_text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k) ON CONFLICT (job_key) DO NOTHING;"),
+                     {"u": uid, "k": job_key})
             s.commit()
             return
         except Exception:
             s.rollback()
-        # fallback: exists then insert
         try:
             row = s.execute(_sql_text("SELECT 1 FROM sent_job WHERE job_key=:k LIMIT 1;"), {"k": job_key}).fetchone()
             if row is None:
@@ -95,9 +90,8 @@ def _mark_sent(uid: int, job_key: str):
                 s.commit()
         except Exception:
             s.rollback()
-            # swallow
 
-# ---------- "Match" & "Posted" helpers ----------
+# ---------- Match & Posted helpers ----------
 def _detect_match(it: Dict) -> Optional[str]:
     for k in ("match", "matched", "match_keyword"):
         v = it.get(k)
@@ -119,7 +113,6 @@ def _parse_timestamp(val) -> Optional[_dt.datetime]:
         if isinstance(val, (int, float)):
             return _dt.datetime.fromtimestamp(float(val), tz=_dt.timezone.utc)
         s = str(val).strip()
-        # try ISO
         try:
             dt = _dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
             if dt.tzinfo is None:
@@ -127,7 +120,6 @@ def _parse_timestamp(val) -> Optional[_dt.datetime]:
             return dt.astimezone(_dt.timezone.utc)
         except Exception:
             pass
-        # try integer seconds in string
         if s.isdigit():
             return _dt.datetime.fromtimestamp(int(s), tz=_dt.timezone.utc)
     except Exception:
@@ -143,17 +135,66 @@ def _posted_ago(it: Dict) -> Optional[str]:
             now = _dt.datetime.now(_dt.timezone.utc)
             diff = now - dt
             secs = int(diff.total_seconds())
-            if secs < 60:
-                return f"{secs}s ago"
+            if secs < 60: return f"{secs}s ago"
             mins = secs // 60
-            if mins < 60:
-                return f"{mins}m ago"
+            if mins < 60: return f"{mins}m ago"
             hours = mins // 60
-            if hours < 24:
-                return f"{hours}h ago"
+            if hours < 24: return f"{hours}h ago"
             days = hours // 24
             return f"{days}d ago"
     return None
+
+# ---------- FX helpers ----------
+def _fmt_amount(val) -> Optional[str]:
+    try:
+        if val is None:
+            return None
+        if float(val).is_integer():
+            return f"{int(float(val))}"
+        return f"{float(val):.1f}"
+    except Exception:
+        return None
+
+def _usd(amount, currency) -> Optional[float]:
+    if amount is None or not currency:
+        return None
+    try:
+        if currency.upper() == "USD":
+            return float(amount)
+        return float(_to_usd(amount, currency, _RATES))
+    except Exception:
+        return None
+
+def _budget_line(it: Dict) -> Optional[str]:
+    cur = (it.get("currency") or "").upper().strip()
+    bmin, bmax = it.get("budget_min"), it.get("budget_max")
+    if bmin is None and bmax is None:
+        return None
+
+    # Original string
+    def with_cur(x):
+        s = _fmt_amount(x)
+        return f"{s} {cur}".strip() if s else None
+
+    if bmin is not None and bmax is not None:
+        orig = f"{with_cur(bmin)}–{with_cur(bmax)}" if cur else f"{_fmt_amount(bmin)}–{_fmt_amount(bmax)}"
+    elif bmin is not None:
+        orig = f"from {with_cur(bmin) if cur else _fmt_amount(bmin)}"
+    else:
+        orig = f"up to {with_cur(bmax) if cur else _fmt_amount(bmax)}"
+
+    # USD conversion
+    umin = _usd(bmin, cur) if bmin is not None else None
+    umax = _usd(bmax, cur) if bmax is not None else None
+    if cur and cur != "USD" and (umin is not None or umax is not None):
+        if umin is not None and umax is not None:
+            usd = f"(~ {int(round(umin))}–{int(round(umax))} USD)"
+        elif umin is not None:
+            usd = f"(~ {int(round(umin))} USD)"
+        else:
+            usd = f"(~ {int(round(umax))} USD)"
+        return f"{orig} {usd}"
+    return orig
 
 # ---------- compose + keyboard ----------
 def _compose_message(it: Dict) -> str:
@@ -162,20 +203,13 @@ def _compose_message(it: Dict) -> str:
     if len(desc) > 700:
         desc = desc[:700] + "…"
     src = it.get("source", "freelancer")
-    budget_min, budget_max = it.get("budget_min"), it.get("budget_max")
-    currency = (it.get("currency") or "").strip()
-    budget_str = ""
-    if budget_min is not None or budget_max is not None:
-        if budget_min is not None and budget_max is not None:
-            budget_str = f"{budget_min}–{budget_max} {currency}".strip()
-        elif budget_min is not None:
-            budget_str = f"from {budget_min} {currency}".strip()
-        elif budget_max is not None:
-            budget_str = f"up to {budget_max} {currency}".strip()
 
     lines = [f"<b>{title}</b>"]
-    if budget_str:
-        lines.append(f"💰 <i>{budget_str}</i>")
+
+    bl = _budget_line(it)
+    if bl:
+        lines.append(f"💰 <i>{bl}</i>")
+
     if desc:
         lines.append(desc)
 
@@ -206,19 +240,22 @@ def _build_keyboard(it: Dict, links: Dict[str, Optional[str]]):
         try:
             sig = inspect.signature(_job_kb)
             params = list(sig.parameters.keys())
-            if len(params) == 1:
+            # (original_url) only
+            if len(params) == 1 and params[0] == "original_url":
+                return _job_kb(links["original"])
+            # (item) only
+            if len(params) == 1 and params[0] == "item":
                 return _job_kb(it)
+            # (original, proposal, affiliate)
+            if len(params) >= 3:
+                return _job_kb(links["original"], links["proposal"], links["affiliate"])
+            # (item=...) signature
             if "item" in params:
                 return _job_kb(item=it)
-            if len(params) >= 3:
-                try:
-                    return _job_kb(links["original"], links["proposal"], links["affiliate"])
-                except Exception:
-                    pass
-            return _job_kb({"item": it, **links})
         except Exception as e:
             log.warning("job_action_kb fallback: %s", e)
 
+    # fallback – same labels
     row1 = [
         InlineKeyboardButton("📝 Proposal", url=links["proposal"] or links["original"] or ""),
         InlineKeyboardButton("🔗 Original",  url=links["original"] or ""),
@@ -286,16 +323,9 @@ async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch:
         links = _resolve_links(it)
         kb = _build_keyboard(it, links)
         try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb,
-                disable_web_page_preview=False
-            )
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=False)
         except Exception as e:
             log.warning("send_message failed for %s: %s", chat_id, e)
-        # never treat dedup insert as send failure
         _mark_sent(chat_id, k)
         sent += 1
         await asyncio.sleep(0.35)
