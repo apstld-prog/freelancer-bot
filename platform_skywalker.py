@@ -1,9 +1,12 @@
-
 import re
 import html
 import xml.etree.ElementTree as ET
 import requests
 from typing import List, Dict
+
+
+SKYWALKER_FEED_URL = "https://www.skywalker.gr/rss/jobs"  # σταθερό RSS feed όλων των αγγελιών
+
 
 def parse_rss(xml_text: str) -> List[Dict]:
     items = []
@@ -11,12 +14,13 @@ def parse_rss(xml_text: str) -> List[Dict]:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return items
-    channel = root.find('channel') or root
-    for it in channel.findall('item'):
-        title = (it.findtext('title') or '').strip()
-        link = (it.findtext('link') or '').strip()
-        desc = html.unescape((it.findtext('description') or '').strip())
-        clean_desc = re.sub('<[^<]+?>', '', desc)
+
+    channel = root.find("channel") or root
+    for it in channel.findall("item"):
+        title = (it.findtext("title") or "").strip()
+        link = (it.findtext("link") or "").strip()
+        desc = html.unescape((it.findtext("description") or "").strip())
+        clean_desc = re.sub("<[^<]+?>", "", desc)
         item = {
             "external_id": link or title,
             "title": title,
@@ -31,10 +35,29 @@ def parse_rss(xml_text: str) -> List[Dict]:
         items.append(item)
     return items
 
-def fetch(feed_url: str, timeout: int = 10) -> List[Dict]:
+
+def fetch(keywords: List[str] | str = None, timeout: int = 10) -> List[Dict]:
+    """Fetch Skywalker RSS feed (ignores query, filters locally)."""
     try:
-        resp = requests.get(feed_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(SKYWALKER_FEED_URL, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
-        return parse_rss(resp.text)
-    except Exception:
+        all_items = parse_rss(resp.text)
+
+        # Filter τοπικά με keywords
+        if keywords:
+            if isinstance(keywords, str):
+                kw_list = [keywords.lower()]
+            else:
+                kw_list = [k.lower() for k in keywords if k]
+            filtered = []
+            for item in all_items:
+                text = (item.get("title", "") + " " + item.get("description", "")).lower()
+                if any(k in text for k in kw_list):
+                    filtered.append(item)
+            return filtered
+        else:
+            return all_items
+
+    except Exception as e:
+        print("[skywalker] fetch error:", e)
         return []
