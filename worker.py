@@ -13,6 +13,9 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
 
 
+# -------------------------------------------------
+# Import μόνο σταθερές πλατφόρμες που δουλεύουν
+# -------------------------------------------------
 def _import_fetch(module_name: str):
     mod = __import__(module_name, fromlist=["*"])
     for fn in ("fetch", "fetch_jobs", f"fetch_{module_name.split('_', 1)[1]}_jobs"):
@@ -28,9 +31,7 @@ PLATFORMS = []
 for name in [
     "platform_freelancer",
     "platform_peopleperhour",
-    "platform_kariera",
     "platform_skywalker",
-    "platform_careerjet",
 ]:
     try:
         fetcher = _import_fetch(name)
@@ -62,7 +63,6 @@ def ensure_sent_table():
 
 def prune_sent_table(days: int = 7):
     from datetime import datetime, timedelta, timezone
-
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     with get_session() as s:
         s.execute(sqltext("DELETE FROM sent_job WHERE sent_at < :cutoff"), {"cutoff": cutoff})
@@ -124,25 +124,16 @@ def find_match_keyword(item: Dict, keywords: List[str]) -> str | None:
 
 
 def send_job_to_user(chat_id: int, item: Dict):
-    BOT_TOKEN = (
-        os.getenv("TELEGRAM_BOT_TOKEN")
-        or os.getenv("BOT_TOKEN")
-        or os.getenv("TELEGRAM_TOKEN")
-    )
+    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
     if not BOT_TOKEN:
         log.warning("No BOT_TOKEN set; skipping send.")
         return
 
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
     title = (item.get("title") or "Untitled").strip()
     bmin = item.get("budget_min_usd") or item.get("budget_min")
     bmax = item.get("budget_max_usd") or item.get("budget_max")
-    cur = (
-        "USD"
-        if (item.get("budget_min_usd") or item.get("budget_max_usd"))
-        else (item.get("currency") or "")
-    )
+    cur = "USD" if (item.get("budget_min_usd") or item.get("budget_max_usd")) else (item.get("currency") or "")
     if bmin and bmax:
         budget_str = f"{bmin}–{bmax} {cur}".strip()
     elif bmin:
@@ -168,14 +159,8 @@ def send_job_to_user(chat_id: int, item: Dict):
 
     kb = {
         "inline_keyboard": [
-            [
-                {"text": "Proposal", "url": aff or orig},
-                {"text": "Original", "url": orig or aff},
-            ],
-            [
-                {"text": "Save", "callback_data": "job:save"},
-                {"text": "Delete", "callback_data": "job:delete"},
-            ],
+            [{"text": "Proposal", "url": aff or orig}, {"text": "Original", "url": orig or aff}],
+            [{"text": "Save", "callback_data": "job:save"}, {"text": "Delete", "callback_data": "job:delete"}],
         ]
     }
 
@@ -208,9 +193,7 @@ def deliver_to_users(items: List[Dict]):
         key = make_key(item)
         with get_session() as s:
             res = s.execute(
-                sqltext(
-                    "INSERT INTO sent_job(job_key) VALUES (:k) ON CONFLICT DO NOTHING RETURNING job_key"
-                ),
+                sqltext("INSERT INTO sent_job(job_key) VALUES (:k) ON CONFLICT DO NOTHING RETURNING job_key"),
                 {"k": key},
             ).fetchone()
             s.commit()
@@ -224,31 +207,28 @@ def deliver_to_users(items: List[Dict]):
                 log.warning("[deliver] send fail user=%s err=%s", tid, e)
 
 
-# ---------------- FIXED MULTIFORMAT PIPELINE ----------------
-async def run_pipeline(keywords: List[str]) -> None:
-    all_items: List[Dict] = []
-
+# -------------------------------------------------
+# Main pipeline with multi-format retry
+# -------------------------------------------------
+async def run_pipeline(keywords: List[str]):
+    all_items = []
     for src, fetcher in PLATFORMS:
         items = []
-        try:
-            items = await maybe_await(fetcher(keywords))
-        except Exception:
+        for form in (keywords, " ".join(keywords), [" ".join(keywords)]):
             try:
-                items = await maybe_await(fetcher(" ".join(keywords)))
-                log.info("[%s] retried with string keywords", src)
-            except Exception:
-                try:
-                    items = await maybe_await(fetcher([" ".join(keywords)]))
-                    log.info("[%s] retried with single-item list", src)
-                except Exception as e3:
-                    log.error("[%s] fetch error: %s", src, e3)
-                    items = []
-
-        for it in items or []:
+                items = await maybe_await(fetcher(form))
+                if items:
+                    break
+            except Exception as e:
+                log.warning("[%s] fetch try failed (%s): %s", src, type(form).__name__, e)
+        if not items:
+            log.error("[%s] fetch error after retries.", src)
+            continue
+        for it in items:
             it.setdefault("source", src)
-        all_items.extend(items or [])
+        all_items.extend(items)
 
-    filtered: List[Dict] = []
+    filtered = []
     for it in all_items:
         mk = find_match_keyword(it, keywords)
         if mk and is_recent(it, 7):
@@ -257,7 +237,6 @@ async def run_pipeline(keywords: List[str]) -> None:
 
     log.info("[Worker] cycle completed — keywords=%d, items=%d", len(keywords), len(filtered))
     deliver_to_users(filtered)
-# ------------------------------------------------------------
 
 
 def get_keywords() -> List[str]:
