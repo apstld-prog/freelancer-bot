@@ -12,14 +12,12 @@ echo "KEYWORD_FILTER_MODE=${KEYWORD_FILTER_MODE}"
 echo "Render Service: ${RENDER_SERVICE_NAME:-unknown}"
 echo "------------------------------------------------------"
 
-# Start background worker (Gorgel)
+# 1️⃣ Start background worker (Gorgel)
 echo "[Worker] Starting background process..."
 python -u worker.py &
-
-# Confirm worker started
 sleep 2
 pgrep -fa 'python.*worker.py' || echo "[Worker] Warning: process not detected (may have crashed early)"
 
-# Start main FastAPI + Telegram bot
-echo "[Server] Starting FastAPI + Telegram bot..."
-python -u server.py
+# 2️⃣ Start main FastAPI + Telegram bot via uvicorn (Render web process)
+echo "[Server] Starting FastAPI + Telegram bot via uvicorn..."
+exec uvicorn server:app --host 0.0.0.0 --port ${PORT:-10000} --log-level info
