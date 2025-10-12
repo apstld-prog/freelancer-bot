@@ -1,278 +1,118 @@
-import asyncio
-import logging
 import os
 import time
-from typing import Dict, List
-import httpx
-from sqlalchemy import text as sqltext
+import logging
+from datetime import datetime
+from sqlalchemy import text
 from db import get_session
-from db_events import ensure_feed_events_schema as ensure_schema
-from job_logic import match_keywords, make_key
+from job_logic import make_key, match_keywords
+from platform_freelancer import fetch_freelancer_jobs
+from platform_peopleperhour import fetch_peopleperhour_jobs
+from platform_kariera import fetch_kariera_jobs
+from platform_careerjet import fetch_careerjet_jobs
+from platform_skywalker import fetch_skywalker_jobs
+from db_events import log_platform_event
+from telegram import Bot
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("worker")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:worker:%(message)s")
+logger = logging.getLogger("worker")
 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+bot = Bot(token=BOT_TOKEN)
+WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "60"))
 
-# -------------------------------------------------
-# Import μόνο σταθερές πλατφόρμες που δουλεύουν
-# -------------------------------------------------
-def _import_fetch(module_name: str):
-    mod = __import__(module_name, fromlist=["*"])
-    for fn in ("fetch", "fetch_jobs", f"fetch_{module_name.split('_', 1)[1]}_jobs"):
-        if hasattr(mod, fn):
-            return getattr(mod, fn)
-    for name in dir(mod):
-        if name.startswith("fetch") and callable(getattr(mod, name)):
-            return getattr(mod, name)
-    raise ImportError(f"No fetcher found in {module_name}")
-
-
-PLATFORMS = []
-for name in [
-    "platform_freelancer",
-    "platform_peopleperhour",
-    # "platform_skywalker",  # temporarily disabled due to fetch error
-]:
-    try:
-        fetcher = _import_fetch(name)
-        PLATFORMS.append((name.replace("platform_", ""), fetcher))
-    except Exception as e:
-        log.warning("Platform %s not available: %s", name, e)
-
-
-async def maybe_await(result):
-    if asyncio.iscoroutine(result):
-        return await result
-    return result
-
+def cleanup_old_jobs():
+    with get_session() as s:
+        s.execute(text("DELETE FROM sent_job WHERE sent_at < (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'"))
+        s.commit()
 
 def ensure_sent_table():
     with get_session() as s:
-        s.execute(
-            sqltext(
-                """
+        s.execute(text("""
             CREATE TABLE IF NOT EXISTS sent_job (
-                job_key TEXT PRIMARY KEY,
-                sent_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC')
-            );
-        """
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                job_key TEXT NOT NULL,
+                sent_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
             )
-        )
+        """))
         s.commit()
 
-
-def prune_sent_table(days: int = 7):
-    from datetime import datetime, timedelta, timezone
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+def get_all_users():
     with get_session() as s:
-        s.execute(sqltext("DELETE FROM sent_job WHERE sent_at < :cutoff"), {"cutoff": cutoff})
-        s.commit()
+        return s.execute(text("SELECT id, telegram_id FROM \"user\" WHERE is_active = TRUE")).fetchall()
 
+def get_keywords():
+    with get_session() as s:
+        return [r[0] for r in s.execute(text("SELECT DISTINCT value FROM keyword")).fetchall()]
 
-def is_recent(item: Dict, days: int = 7) -> bool:
-    from datetime import datetime, timezone, timedelta
-    from email.utils import parsedate_to_datetime
-
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    for key in ("created_at", "published_at", "pub_date", "date"):
-        dt = item.get(key)
-        if not dt:
-            continue
-        if hasattr(dt, "tzinfo"):
-            try:
-                return dt >= cutoff
-            except Exception:
-                pass
-        if isinstance(dt, str):
-            try:
-                s = dt.replace("Z", "+00:00")
-                dti = datetime.fromisoformat(s)
-            except Exception:
-                try:
-                    dti = parsedate_to_datetime(dt)
-                except Exception:
-                    dti = None
-            if dti is not None:
-                if dti.tzinfo is None:
-                    dti = dti.replace(tzinfo=timezone.utc)
-                return dti >= cutoff
-        try:
-            ts = float(dt)
-            dti = datetime.fromtimestamp(ts, tz=timezone.utc)
-            return dti >= cutoff
-        except Exception:
-            continue
-    return True
-
-
-def find_match_keyword(item: Dict, keywords: List[str]) -> str | None:
-    text_parts = []
-    for k in ("title", "description", "summary", "text"):
-        v = item.get(k)
-        if isinstance(v, str):
-            text_parts.append(v.lower())
-    if not text_parts:
-        return None
-    full = " ".join(text_parts)
-    for kw in keywords:
-        if not kw:
-            continue
-        k = kw.strip().lower()
-        if k and k in full:
-            return kw
-    return None
-
-
-# -------------------------------------------------
-# SEND: επιστρέφει True/False και ΔΕΝ καταχωρεί τίποτα στη βάση
-# -------------------------------------------------
-def send_job_to_user(chat_id: int, item: Dict) -> bool:
-    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
-    if not BOT_TOKEN:
-        log.warning("No BOT_TOKEN set; skipping send.")
-        return False
-
-    TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    title = (item.get("title") or "Untitled").strip()
-    bmin = item.get("budget_min_usd") or item.get("budget_min")
-    bmax = item.get("budget_max_usd") or item.get("budget_max")
-    cur = "USD" if (item.get("budget_min_usd") or item.get("budget_max_usd")) else (item.get("currency") or "")
-    if bmin and bmax:
-        budget_str = f"{bmin}–{bmax} {cur}".strip()
-    elif bmin:
-        budget_str = f"{bmin} {cur}".strip()
-    elif bmax:
-        budget_str = f"{bmax} {cur}".strip()
-    else:
-        budget_str = "N/A"
-
-    source = (item.get("source") or "unknown").title()
-    match_kw = item.get("match") or "-"
-    desc = (item.get("description") or item.get("summary") or item.get("text") or "").strip()
-    orig = item.get("original_url") or item.get("url") or ""
-    aff = item.get("affiliate_url") or orig
-
-    text_msg = (
-        f"{title}\n"
-        f"<b>Budget:</b> {budget_str}\n"
-        f"<b>Source:</b> {source}\n"
-        f"<b>Match:</b> {match_kw}\n\n"
-        f"✏️ {desc}"
-    )
-
-    kb = {
-        "inline_keyboard": [
-            [{"text": "Proposal", "url": aff or orig}, {"text": "Original", "url": orig or aff}],
-            [{"text": "Save", "callback_data": "job:save"}, {"text": "Delete", "callback_data": "job:delete"}],
-        ]
-    }
-
+def send_job_to_user(user_tg, job):
     try:
-        r = httpx.post(
-            TG_API,
-            json={
-                "chat_id": chat_id,
-                "text": text_msg,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-                "reply_markup": kb,
-            },
-            timeout=20,
+        text_msg = (
+            f"🧩 <b>{job['title']}</b>\n\n"
+            f"💰 <b>Budget:</b> {job.get('budget', 'N/A')}\n"
+            f"🌐 <b>Source:</b> {job.get('platform', 'Unknown')}\n"
+            f"📅 <b>Date:</b> {job.get('created_at', 'N/A')}\n\n"
+            f"{job.get('description', '')[:500]}...\n\n"
+            f"<a href='{job.get('affiliate_url', job.get('original_url', '#'))}'>🔗 Open Project</a>"
         )
-        ok = (r.status_code == 200) and (r.json().get("ok") is True)
-        if not ok:
-            log.warning("[send] to %s failed: %s %s", chat_id, r.status_code, r.text[:200])
-        return ok
+        bot.send_message(chat_id=user_tg, text=text_msg, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
-        log.warning("[send] to %s exception: %s", chat_id, e)
-        return False
+        logger.error(f"[deliver] send error: {e}")
 
-
-# -------------------------------------------------
-# DELIVER: αποστολή πρώτα • καταχώριση sent_job ΜΟΝΟ αν υπήρξε επιτυχία
-# -------------------------------------------------
-def deliver_to_users(items: List[Dict]):
-    if not items:
-        return
-
-    ensure_sent_table()
-
-    # users
-    with get_session() as s:
-        rows = s.execute(sqltext('SELECT id, telegram_id FROM "user" WHERE is_blocked=FALSE')).fetchall()
-        users = [(int(r[0]), int(r[1])) for r in rows]
-        log.info("[deliver] users loaded: %d", len(users))
-
-    for item in items:
-        key = make_key(item)
-
-        # αν υπάρχει ήδη, προχώρα στο επόμενο
-        with get_session() as s:
-            exists = s.execute(sqltext("SELECT 1 FROM sent_job WHERE job_key=:k"), {"k": key}).fetchone()
-        if exists:
-            continue
-
-        success_any = False
-        for _, tid in users:
-            if send_job_to_user(tid, item):
-                success_any = True
-            time.sleep(0.3)
-
-        if success_any:
-            with get_session() as s:
-                s.execute(sqltext("INSERT INTO sent_job(job_key) VALUES (:k) ON CONFLICT DO NOTHING"), {"k": key})
-                s.commit()
-
-
-# -------------------------------------------------
-# Main pipeline with multi-format retry
-# -------------------------------------------------
-async def run_pipeline(keywords: List[str]):
-    all_items = []
-    for src, fetcher in PLATFORMS:
-        items = []
-        for form in (keywords, " ".join(keywords), [" ".join(keywords)]):
-            try:
-                items = await maybe_await(fetcher(form))
-                if items:
-                    break
-            except Exception as e:
-                log.warning("[%s] fetch try failed (%s): %s", src, type(form).__name__, e)
-        if not items:
-            log.error("[%s] fetch error after retries.", src)
-            continue
-        for it in items:
-            it.setdefault("source", src)
-        all_items.extend(items)
-
-    filtered = []
-    for it in all_items:
-        mk = find_match_keyword(it, keywords)
-        if mk and is_recent(it, 7):
-            it["match"] = mk
-            filtered.append(it)
-
-    log.info("[Worker] cycle completed — keywords=%d, items=%d", len(keywords), len(filtered))
-    deliver_to_users(filtered)
-
-
-def get_keywords() -> List[str]:
-    with get_session() as s:
-        rows = s.execute(sqltext("SELECT DISTINCT value FROM keyword")).fetchall()
-        return [r[0] for r in rows]
-
-
-if __name__ == "__main__":
-    interval = int(os.getenv("WORKER_INTERVAL", "120"))
-    log.info("[Worker] ✅ Running (interval=%ss)", interval)
-    ensure_schema()
+def main_worker():
+    logger.info(f"[Worker] ✅ Running (interval={WORKER_INTERVAL}s)")
     ensure_sent_table()
 
     while True:
         try:
-            prune_sent_table(7)
-            kw = get_keywords()
-            asyncio.run(run_pipeline(kw))
+            cleanup_old_jobs()
+            keywords = get_keywords()
+            if not keywords:
+                time.sleep(WORKER_INTERVAL)
+                continue
+
+            all_jobs = []
+            platforms = [
+                ("freelancer", fetch_freelancer_jobs),
+                ("peopleperhour", fetch_peopleperhour_jobs),
+                ("kariera", fetch_kariera_jobs),
+                ("careerjet", fetch_careerjet_jobs),
+                ("skywalker", fetch_skywalker_jobs)
+            ]
+
+            for name, func in platforms:
+                try:
+                    jobs = func(keywords)
+                    all_jobs.extend(jobs)
+                    log_platform_event(name, len(jobs))
+                except Exception as e:
+                    logger.error(f"[{name}] fetch error: {e}")
+
+            logger.info(f"[Worker] cycle completed — keywords={len(keywords)}, items={len(all_jobs)}")
+            users = get_all_users()
+            logger.info(f"[deliver] users loaded: {len(users)}")
+
+            with get_session() as s:
+                for job in all_jobs:
+                    key = make_key(job)
+                    for user in users:
+                        exists = s.execute(
+                            text("SELECT 1 FROM sent_job WHERE user_id=:u AND job_key=:k"),
+                            {"u": user.id, "k": key}
+                        ).fetchone()
+                        if exists:
+                            continue
+                        send_job_to_user(user.telegram_id, job)
+                        s.execute(
+                            text("INSERT INTO sent_job (user_id, job_key) VALUES (:u, :k)"),
+                            {"u": user.id, "k": key}
+                        )
+                s.commit()
+
         except Exception as e:
-            log.error("[Worker] error: %s", e)
-        time.sleep(interval)
+            logger.error(f"[Worker] error: {e}")
+        time.sleep(WORKER_INTERVAL)
+
+if __name__ == "__main__":
+    logger.info("[Worker] Launching...")
+    main_worker()
