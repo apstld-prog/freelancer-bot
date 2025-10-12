@@ -13,9 +13,6 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
 
 
-# -------------------------------------------------
-# Dynamic import για τα modules πλατφορμών
-# -------------------------------------------------
 def _import_fetch(module_name: str):
     mod = __import__(module_name, fromlist=["*"])
     for fn in ("fetch", "fetch_jobs", f"fetch_{module_name.split('_', 1)[1]}_jobs"):
@@ -48,9 +45,6 @@ async def maybe_await(result):
     return result
 
 
-# -------------------------------------------------
-# Database setup & cleanup
-# -------------------------------------------------
 def ensure_sent_table():
     with get_session() as s:
         s.execute(
@@ -75,9 +69,6 @@ def prune_sent_table(days: int = 7):
         s.commit()
 
 
-# -------------------------------------------------
-# Helpers
-# -------------------------------------------------
 def is_recent(item: Dict, days: int = 7) -> bool:
     from datetime import datetime, timezone, timedelta
     from email.utils import parsedate_to_datetime
@@ -132,9 +123,6 @@ def find_match_keyword(item: Dict, keywords: List[str]) -> str | None:
     return None
 
 
-# -------------------------------------------------
-# Telegram Delivery (template ίδιο με SelfTest)
-# -------------------------------------------------
 def send_job_to_user(chat_id: int, item: Dict):
     BOT_TOKEN = (
         os.getenv("TELEGRAM_BOT_TOKEN")
@@ -166,9 +154,7 @@ def send_job_to_user(chat_id: int, item: Dict):
 
     source = (item.get("source") or "unknown").title()
     match_kw = item.get("match") or "-"
-
     desc = (item.get("description") or item.get("summary") or item.get("text") or "").strip()
-
     orig = item.get("original_url") or item.get("url") or ""
     aff = item.get("affiliate_url") or orig
 
@@ -209,9 +195,6 @@ def send_job_to_user(chat_id: int, item: Dict):
         log.warning("[send] to %s failed: %s", chat_id, e)
 
 
-# -------------------------------------------------
-# Delivery Logic
-# -------------------------------------------------
 def deliver_to_users(items: List[Dict]):
     if not items:
         return
@@ -233,7 +216,6 @@ def deliver_to_users(items: List[Dict]):
             s.commit()
         if not res:
             continue
-
         for _, tid in users:
             try:
                 send_job_to_user(tid, item)
@@ -242,26 +224,31 @@ def deliver_to_users(items: List[Dict]):
                 log.warning("[deliver] send fail user=%s err=%s", tid, e)
 
 
-# -------------------------------------------------
-# Main Pipeline
-# -------------------------------------------------
-async def run_pipeline(keywords: List[str]):
-    all_items = []
+# ---------------- FIXED MULTIFORMAT PIPELINE ----------------
+async def run_pipeline(keywords: List[str]) -> None:
+    all_items: List[Dict] = []
+
     for src, fetcher in PLATFORMS:
+        items = []
         try:
             items = await maybe_await(fetcher(keywords))
         except Exception:
             try:
                 items = await maybe_await(fetcher(" ".join(keywords)))
                 log.info("[%s] retried with string keywords", src)
-            except Exception as e2:
-                log.error("[%s] fetch error: %s", src, e2)
-                items = []
+            except Exception:
+                try:
+                    items = await maybe_await(fetcher([" ".join(keywords)]))
+                    log.info("[%s] retried with single-item list", src)
+                except Exception as e3:
+                    log.error("[%s] fetch error: %s", src, e3)
+                    items = []
+
         for it in items or []:
             it.setdefault("source", src)
         all_items.extend(items or [])
 
-    filtered = []
+    filtered: List[Dict] = []
     for it in all_items:
         mk = find_match_keyword(it, keywords)
         if mk and is_recent(it, 7):
@@ -270,6 +257,7 @@ async def run_pipeline(keywords: List[str]):
 
     log.info("[Worker] cycle completed — keywords=%d, items=%d", len(keywords), len(filtered))
     deliver_to_users(filtered)
+# ------------------------------------------------------------
 
 
 def get_keywords() -> List[str]:
@@ -278,9 +266,6 @@ def get_keywords() -> List[str]:
         return [r[0] for r in rows]
 
 
-# -------------------------------------------------
-# Run Loop
-# -------------------------------------------------
 if __name__ == "__main__":
     interval = int(os.getenv("WORKER_INTERVAL", "120"))
     log.info("[Worker] ✅ Running (interval=%ss)", interval)
