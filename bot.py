@@ -223,6 +223,24 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_chat.send_message(HELP_EN + help_footer(STATS_WINDOW_HOURS),
                                              parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
+
+async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        from db_saved import ensure_saved_schema, list_saved_jobs
+        ensure_saved_schema()
+        items = list_saved_jobs(user_id, limit=20)
+    except Exception:
+        items = []
+    if not items:
+        await update.message.reply_text("Saved list is empty.")
+        return
+    lines = ["<b>Saved jobs</b>"]
+    for i, it in enumerate(items, 1):
+        title = (it.get("title") or "(no title)").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        url = it.get("url") or ""
+        lines.append(f"{i}. <a href=\"{url}\">{title}</a>")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_text = (
         "<b>Email Signature from Existing Logo</b>\n"
@@ -340,7 +358,19 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(HELP_EN + help_footer(STATS_WINDOW_HOURS),
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
-        await q.message.reply_text("Saved list: (demo)"); await q.answer(); return
+        try:
+            from db_saved import ensure_saved_schema, list_saved_jobs
+            ensure_saved_schema()
+            items = list_saved_jobs(q.from_user.id, limit=20)
+        except Exception:
+            items = []
+        if not items:
+            await q.message.reply_text("Saved list is empty."); await q.answer(); return
+        lines = ["<b>Saved jobs</b>"]
+        for i, it in enumerate(items, 1):
+            title = (it.get("title") or "(no title)").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            url = it.get("url") or ""
+            await q.message.reply_text("\n".join(lines + [f"{i}. <a href=\"{url}\">{title}</a>" for i, it in enumerate(items, 1)]), parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:contact":
         await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.")
         await q.answer(); return
@@ -559,6 +589,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
+    app.add_handler(CommandHandler("saved", saved_cmd))
 
     # admin
     app.add_handler(CommandHandler("users", users_cmd))

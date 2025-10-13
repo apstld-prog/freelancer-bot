@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-echo "======================================================"
-echo "🚀 Starting Freelancer Alert Bot full service"
-echo "======================================================"
-date
+# Respect Render's PORT (defaults to 10000 locally)
+export PORT="${PORT:-10000}"
 
-echo "Environment check:"
-echo "WORKER_INTERVAL=${WORKER_INTERVAL}"
-echo "KEYWORD_FILTER_MODE=${KEYWORD_FILTER_MODE}"
-echo "Render Service: ${RENDER_SERVICE_NAME:-unknown}"
-echo "------------------------------------------------------"
+echo "==> launching web(server) + worker..."
 
-# 1️⃣ Start background worker (Gorgel) μέσω Runner
-echo "[Worker] Starting background process..."
-python -u worker_runner.py &
-sleep 2
-pgrep -fa 'python.*worker_runner.py' || echo "[Worker] Warning: process not detected (may have crashed early)"
+# Start worker in background
+python -u worker.py &
+WORKER_PID=$!
 
-# 2️⃣ Start main FastAPI + Telegram bot via uvicorn (Render web process)
-echo "[Server] Starting FastAPI + Telegram bot via uvicorn..."
-exec uvicorn server:app --host 0.0.0.0 --port ${PORT:-10000} --log-level info
+cleanup() {
+  echo "==> stopping..."
+  kill -TERM "$WORKER_PID" 2>/dev/null || true
+  wait "$WORKER_PID" 2>/dev/null || true
+}
+trap cleanup SIGINT SIGTERM
+
+# Run Uvicorn in foreground so Render detects the open port
+python -m uvicorn server:app --host 0.0.0.0 --port "${PORT}" --no-access-log
