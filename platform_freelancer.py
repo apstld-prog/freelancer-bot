@@ -1,7 +1,3 @@
-cd ~/project/src
-cp platform_freelancer.py platform_freelancer.py.bak
-
-cat > platform_freelancer.py <<'PY'
 import requests, re
 from typing import List, Dict, Optional
 
@@ -15,6 +11,7 @@ DEFAULT_PARAMS = {
     "full_description": "true",
 }
 
+# Χαρτογράφηση συμβόλων/ονόματων σε ISO
 _ALIAS = {
     "IND": "INR", "RUPEE": "INR", "₹": "INR",
     "EURO": "EUR", "€": "EUR",
@@ -24,6 +21,7 @@ _ALIAS = {
     "R$": "BRL",
 }
 
+# regex για ανίχνευση από τίτλο/περιγραφή όταν λείπει από το API
 _SYM_RE = [
     (re.compile(r"₹|\bINR\b|\bRUPEE\S*\b", re.I), "INR"),
     (re.compile(r"€|\bEURO\b", re.I), "EUR"),
@@ -76,7 +74,10 @@ def _extract_currency_from_any(p: Dict) -> Optional[str]:
         if code:
             return code
 
-    code = _infer_currency_from_text(p.get("title", ""), p.get("description", "") or p.get("preview_description", ""))
+    code = _infer_currency_from_text(
+        p.get("title", ""),
+        p.get("description", "") or p.get("preview_description", "")
+    )
     return code
 
 def _extract_budget(p: Dict) -> Dict:
@@ -95,6 +96,10 @@ def _extract_budget(p: Dict) -> Dict:
     return {"currency": code, "budget_min": minb, "budget_max": maxb}
 
 def _project_url(p: Dict) -> str:
+    """
+    Φτιάχνει πάντα absolute URL: https://www.freelancer.com/projects/<cat>/<slug>
+    Αποφεύγουμε SEO paths που λείπει το /projects/ (αλλιώς 404).
+    """
     raw = (p.get("seo_url") or p.get("url") or "").strip()
     if raw:
         if not raw.startswith("http"):
@@ -137,4 +142,3 @@ def fetch(query: Optional[str] = None, limit: int = 50) -> List[Dict]:
         return [_item_from_project(p) for p in projects]
     except Exception:
         return []
-PY

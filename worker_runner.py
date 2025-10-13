@@ -1,12 +1,9 @@
-cd ~/project/src
-cp worker_runner.py worker_runner.py.bak
-
-cat > worker_runner.py <<'PY'
 import os
 import logging
 import hashlib
 import datetime as _dt
 import asyncio
+import re
 from typing import List, Dict
 
 from sqlalchemy import text
@@ -83,12 +80,18 @@ def _fmt(x):
     return f"{x:.2f}".rstrip("0").rstrip(".")
 
 def _cur_to_usd(amount, cur, fx):
+    """
+    Υπολογισμός USD με υποστήριξη ΚΑΙ των 2 formats ισοτιμιών:
+      - CUR_PER_USD (π.χ. INR=83.0, JPY=145.0)  -> USD = amount / rate
+      - USD_PER_CUR (π.χ. EUR=1.08, GBP=1.25)  -> USD = amount * rate
+    Χρησιμοποιούμε ένα απλό heuristic ώστε να δουλεύει σωστά ό,τι κι αν φορτωθεί.
+    """
     try:
-        r = fx.get((cur or "").upper())
-        if not r or r <= 0:
+        rate = fx.get((cur or "").upper())
+        if not rate or rate <= 0:
             return None
-        # FX dict είναι "πόσα CUR για 1 USD" → USD = amount / rate
-        return round(amount / r, 2)
+        # μεγάλα rates ⇒ CUR_PER_USD (divide), μικρά ⇒ USD_PER_CUR (multiply)
+        return round((amount / rate) if rate >= 5 else (amount * rate), 2)
     except Exception:
         return None
 
@@ -154,6 +157,48 @@ def _kb(proposal_url: str, original_url: str) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup([row1, row2])
 
+# --------- optional per-user keywords (best-effort) ---------
+def _load_user_keywords(s, uid: int) -> List[str]:
+    """
+    Προσπάθεια ανάγνωσης keywords από:
+    - user_keywords(telegram_id, keyword)
+    - users_keywords(telegram_id, keyword)
+    - user.keywords / users.keywords (CSV)
+    """
+    try:
+        rows = s.execute(text("SELECT keyword FROM user_keywords WHERE telegram_id=:u"), {"u": uid}).fetchall()
+        if rows:
+            return [r[0] for r in rows if r[0]]
+    except Exception:
+        pass
+    try:
+        rows = s.execute(text("SELECT keyword FROM users_keywords WHERE telegram_id=:u"), {"u": uid}).fetchall()
+        if rows:
+            return [r[0] for r in rows if r[0]]
+    except Exception:
+        pass
+    for tbl in ("user", "users"):
+        try:
+            row = s.execute(text(f"SELECT keywords FROM {tbl} WHERE telegram_id=:u LIMIT 1"), {"u": uid}).fetchone()
+            if row and row[0]:
+                return [x.strip() for x in str(row[0]).split(",") if x.strip()]
+        except Exception:
+            pass
+    return []
+
+def _infer_match(it: Dict, keywords: List[str]) -> str | None:
+    if not keywords:
+        return None
+    text = f"{it.get('title','')}\n{it.get('description','')}".lower()
+    for kw in keywords:
+        k = kw.strip().lower()
+        if not k:
+            continue
+        # ολόκληρη λέξη/φράση σε τίτλο + περιγραφή
+        if re.search(r'(?<!\w)' + re.escape(k) + r'(?!\w)', text):
+            return kw
+    return None
+
 # --------- core runner ---------
 def _receivers(s) -> List[int]:
     u1 = s.execute(text('SELECT DISTINCT telegram_id FROM "user"  WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true')).fetchall()
@@ -175,19 +220,30 @@ async def _run_async():
     receivers = _receivers(s)
     log.info(f"[users] total receivers: {len(receivers)} (per-user keywords where available)")
 
-    items = run_pipeline([])  # pipeline κάνει match τίτλο+περιγραφή
+    items = run_pipeline([])
 
     sent = 0
     for it in items:
         try:
             key = _job_key(it)
             for uid in receivers:
+                # de-dup per user
                 try:
-                    s.execute(text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING;"), {"u": uid, "k": key})
+                    s.execute(text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING;"),
+                              {"u": uid, "k": key})
                     s.commit()
                 except Exception:
                     s.rollback()
                     continue
+
+                # Match (fallback per user)
+                if not it.get("matched_keyword"):
+                    kws = _load_user_keywords(s, uid)
+                    mk = _infer_match(it, kws)
+                    if mk:
+                        it = dict(it)
+                        it["matched_keyword"] = mk
+
                 msg = _compose_text(it, fx)
                 prop = it.get("proposal_url") or _first_url(it)
                 orig = it.get("original_url") or _first_url(it)
@@ -204,4 +260,3 @@ def run_worker():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:worker:%(message)s")
     run_worker()
-PY
