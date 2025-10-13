@@ -1,16 +1,18 @@
+# worker_runner.py
 import os
 import time
+import json
+import hashlib
 import logging
 import datetime as _dt
-from telegram import Bot
-from telegram.constants import ParseMode
+import requests
 from sqlalchemy import text
 from db import get_session
-from platform_freelancer import fetch_freelancer_jobs
+from worker import run_pipeline  # use the working pipeline
 
 log = logging.getLogger("worker")
 
-# ---- time helpers (relative "Posted: 1m/2h/3d") ----
+# ---------------- time helpers (relative "Posted: 1m/2h/3d") ----------------
 def _parse_timestamp(val):
     if val is None:
         return None
@@ -35,6 +37,7 @@ def _parse_timestamp(val):
     return None
 
 def _posted_ago(item: dict) -> str | None:
+    # disable if SHOW_RELATIVE_AGE=off
     if str(os.getenv("SHOW_RELATIVE_AGE", "on")).lower() in ("0", "off", "false", "no"):
         return None
     for key in ("posted_at", "created_at", "published_at", "date", "timestamp", "ts"):
@@ -54,76 +57,145 @@ def _posted_ago(item: dict) -> str | None:
             return f"{days}d ago"
     return None
 
-# ---- compose message ----
-def _compose_message(job: dict) -> str:
+# ---------------- utils ----------------
+def _first_url(it: dict) -> str:
+    for k in ("affiliate_url", "proposal_url", "original_url", "url"):
+        u = (it.get(k) or "").strip()
+        if u:
+            return u
+    return ""
+
+def _job_key(it: dict) -> str:
+    # use existing if present, else hash url/title
+    k = it.get("job_key")
+    if k:
+        return k
+    src = (it.get("original_url") or it.get("proposal_url") or it.get("affiliate_url") or it.get("title") or "")
+    return hashlib.sha1(src.encode("utf-8", errors="ignore")).hexdigest()
+
+def _fmt_amount(x):
+    if x is None:
+        return ""
+    if isinstance(x, (int,)) or (isinstance(x, float) and x.is_integer()):
+        return str(int(x))
+    return f"{x}"
+
+def _compose_budget_lines(it: dict) -> list[str]:
     lines = []
-    title = job.get("title", "").strip()
+    cur = (it.get("currency") or "").upper()
+    bmin, bmax = it.get("budget_min"), it.get("budget_max")
+    umin, umax = it.get("budget_min_usd"), it.get("budget_max_usd")
+
+    has_native = (bmin is not None) or (bmax is not None)
+    has_usd = (umin is not None) or (umax is not None)
+
+    if not has_native and not has_usd:
+        return lines
+
+    if has_native:
+        if bmin is not None and bmax is not None:
+            native = f"{_fmt_amount(bmin)}–{_fmt_amount(bmax)} {cur or 'USD'}"
+        else:
+            native = f"{_fmt_amount(bmin if bmin is not None else bmax)} {cur or 'USD'}"
+    else:
+        native = ""
+
+    usd_str = ""
+    if cur and cur != "USD" and has_usd:
+        if umin is not None and umax is not None:
+            usd_str = f" (~ {_fmt_amount(umin)}–{_fmt_amount(umax)} USD)"
+        else:
+            usd_str = f" (~ {_fmt_amount(umin if umin is not None else umax)} USD)"
+
+    if native or usd_str:
+        lines.append(f"💰 {native}{usd_str}")
+    return lines
+
+def _compose_message(it: dict) -> str:
+    lines = []
+    title = (it.get("title") or "").strip()
     if title:
         lines.append(f"💼 <b>{title}</b>")
 
-    if job.get("description"):
-        desc = job["description"].strip()
+    desc = (it.get("description") or "").strip()
+    if desc:
         if len(desc) > 300:
             desc = desc[:300] + "..."
         lines.append(desc)
 
-    # price + conversion
-    budget = job.get("budget_amount")
-    cur = job.get("budget_currency", "")
-    usd = job.get("budget_usd")
-    if budget:
-        if cur and usd and cur.upper() != "USD":
-            lines.append(f"💰 {budget} {cur.upper()} (~{usd} USD)")
-        else:
-            lines.append(f"💰 {budget} {cur.upper() or 'USD'}")
+    lines += _compose_budget_lines(it)
 
-    # keyword match
-    if job.get("matched_keyword"):
-        lines.append(f"🔎 Match: <b>{job['matched_keyword']}</b>")
+    if it.get("matched_keyword"):
+        lines.append(f"🔎 Match: <b>{it['matched_keyword']}</b>")
 
-    # posted ago
-    age = _posted_ago(job)
+    age = _posted_ago(it)
     if age:
         lines.append(f"🕓 Posted: {age}")
 
-    if job.get("url"):
-        lines.append(f"\n🔗 <a href=\"{job['url']}\">View details</a>")
+    url = _first_url(it)
+    if url:
+        lines.append(f"\n🔗 <a href=\"{url}\">View details</a>")
 
     return "\n".join(lines)
 
-# ---- runner main ----
+def _send_telegram(token: str, chat_id: int, text: str):
+    api = os.getenv("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
+    url = f"{api}/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=15)
+        if r.status_code != 200:
+            log.warning("send_message failed [%s]: %s", r.status_code, r.text[:200])
+    except Exception as e:
+        log.warning("send_message exception: %s", e)
+
+# ---------------- runner main ----------------
 def run_worker():
     s = get_session()
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         log.error("Missing TELEGRAM_BOT_TOKEN")
         return
-    bot = Bot(token=token)
 
-    # get all active user ids
-    u1 = s.execute(text('SELECT DISTINCT telegram_id FROM "user" WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true')).fetchall()
+    # receivers (both tables)
+    u1 = s.execute(text('SELECT DISTINCT telegram_id FROM "user"  WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true')).fetchall()
     u2 = s.execute(text('SELECT DISTINCT telegram_id FROM users WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false')).fetchall()
     receivers = sorted({int(r[0]) for r in u1} | {int(r[0]) for r in u2})
     log.info(f"[users] total receivers: {len(receivers)} (per-user keywords where available)")
 
-    jobs = fetch_freelancer_jobs()
+    # fetch items via pipeline (title+description filtered & enriched)
+    jobs = run_pipeline([])  # keep [] -> pipeline handles keyword matching internally
     sent = 0
 
-    for job in jobs:
-        msg = _compose_message(job)
-        key = job.get("job_key")
-        for uid in receivers:
-            try:
-                s.execute(text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING;"), {"u": uid, "k": key})
-                s.commit()
-                bot.send_message(chat_id=uid, text=msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-                time.sleep(1)
-                sent += 1
-            except Exception as e:
-                s.rollback()
-                log.warning(f"send_message failed for {uid}: {e}")
+    for it in jobs:
+        try:
+            key = _job_key(it)
+            msg = _compose_message(it)
+            # de-dup per user
+            for uid in receivers:
+                try:
+                    s.execute(text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING;"),
+                              {"u": uid, "k": key})
+                    s.commit()
+                    _send_telegram(token, uid, msg)
+                    time.sleep(0.3)
+                    sent += 1
+                except Exception as e:
+                    s.rollback()
+                    log.warning("send_message failed for %s: %s", uid, e)
+        except Exception as e:
+            log.warning("compose/send skipped due to error: %s", e)
 
     log.info(f"[runner] sent {sent} messages")
 
 if __name__ == "__main__":
+    log.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s:worker:%(message)s"))
+    log.addHandler(handler)
     run_worker()
