@@ -12,21 +12,50 @@ DEFAULT_PARAMS = {
     "full_description": "true",
 }
 
-_ALIAS = {"IND":"INR","RUPEE":"INR","₹":"INR","EURO":"EUR","£":"GBP","UK":"GBP","A$":"AUD","C$":"CAD","R$":"BRL"}
+# Symbol/alias → ISO currency code
+_ALIAS = {
+    "IND": "INR", "RUPEE": "INR", "₹": "INR",
+    "EURO": "EUR", "€": "EUR",
+    "£": "GBP", "UK": "GBP", "POUND": "GBP",
+    "A$": "AUD", "AUD$": "AUD",
+    "C$": "CAD", "CAD$": "CAD",
+    "R$": "BRL",
+}
 
 def _norm_cur(cur: Optional[str]) -> Optional[str]:
-    if not cur: return None
-    cur = str(cur).strip().upper()
-    return _ALIAS.get(cur, cur)
+    if not cur:
+        return None
+    cur = str(cur).strip()
+    if not cur:
+        return None
+    if cur in _ALIAS:
+        return _ALIAS[cur]
+    c = cur.upper()
+    return _ALIAS.get(c, c)
 
 def _extract_budget(p: Dict) -> Dict:
     b = p.get("budget") or {}
+    # currency: never default to USD; keep None if unknown
     code = None
-    if isinstance(b.get("currency"), dict):
-        code = b["currency"].get("code")
+    cur = b.get("currency")
+    if isinstance(cur, dict):
+        code = cur.get("code") or cur.get("sign") or cur.get("name")
+    elif isinstance(cur, str):
+        code = cur
     code = _norm_cur(code)
+
+    # values
     minb = b.get("minimum")
     maxb = b.get("maximum")
+    try:
+        if isinstance(minb, str): minb = float(minb)
+    except Exception:
+        minb = None
+    try:
+        if isinstance(maxb, str): maxb = float(maxb)
+    except Exception:
+        maxb = None
+
     return {"currency": code, "budget_min": minb, "budget_max": maxb}
 
 def _project_url(p: Dict) -> str:
@@ -51,7 +80,7 @@ def _item_from_project(p: Dict) -> Dict:
         "currency": b["currency"],
         "budget_min": b["budget_min"],
         "budget_max": b["budget_max"],
-        "posted_at": p.get("time_submitted") or p.get("submitdate") or None,
+        "posted_at": p.get("time_submitted") or p.get("submitdate") or p.get("time_submitted_unix") or None,
     }
     return item
 

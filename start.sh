@@ -6,8 +6,8 @@ export PORT="${PORT:-10000}"
 
 echo "==> launching web(server) + worker..."
 
-# Start worker in background
-python -u worker.py &
+# Start worker runner in background
+python -u worker_runner.py &
 WORKER_PID=$!
 
 cleanup() {
@@ -18,4 +18,4 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # Run Uvicorn in foreground so Render detects the open port
-python -m uvicorn server:app --host 0.0.0.0 --port "${PORT}" --no-access-log
+python -m uvicorn server:app --host 0.0.0.0 --port "${PORT}" --no-access-log --log-level info
