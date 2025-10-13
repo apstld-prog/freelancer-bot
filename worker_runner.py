@@ -1,219 +1,129 @@
-#!/usr/bin/env python3
-# worker_runner.py — async runner: send-to-all + per-user dedup (PTB v20+)
-# Env:
-#   TELEGRAM_BOT_TOKEN (required)
-#   WORKER_INTERVAL=60 (optional)
-#   WORKER_CLEANUP_DAYS=7 (optional)
-#   BATCH_PER_TICK=5 (optional)
-
-import os, time, logging, asyncio
-from typing import Dict, List, Optional, Set
-
-import worker as _worker
-from sqlalchemy import text as _sql_text
-from db import get_session as _get_session
-
-try:
-    from ui_keyboards import job_action_kb as _job_kb
-except Exception:
-    _job_kb = None
-
-from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
+import os
+import time
+import logging
+import datetime as _dt
+from telegram import Bot
 from telegram.constants import ParseMode
+from sqlalchemy import text
+from db import get_session
+from platform_freelancer import fetch_freelancer_jobs
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
 
-def _get_env_int(name: str, default: int) -> int:
-    try: return int(str(os.getenv(name, default)).strip())
-    except Exception: return default
+# ---- time helpers (relative "Posted: 1m/2h/3d") ----
+def _parse_timestamp(val):
+    if val is None:
+        return None
+    try:
+        # epoch seconds
+        if isinstance(val, (int, float)):
+            return _dt.datetime.fromtimestamp(float(val), tz=_dt.timezone.utc)
+        s = str(val).strip()
+        # ISO 8601
+        try:
+            dt = _dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_dt.timezone.utc)
+            return dt.astimezone(_dt.timezone.utc)
+        except Exception:
+            pass
+        # numeric string epoch
+        if s.isdigit():
+            return _dt.datetime.fromtimestamp(int(s), tz=_dt.timezone.utc)
+    except Exception:
+        return None
+    return None
 
-# ---------- sent_job schema + helpers (sync SQL) ----------
-def _ensure_sent_schema():
-    with _get_session() as s:
-        s.execute(_sql_text("""
-            CREATE TABLE IF NOT EXISTS sent_job (
-                user_id BIGINT NOT NULL,
-                job_key TEXT NOT NULL,
-                sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'),
-                PRIMARY KEY (user_id, job_key)
-            );
-        """))
-        s.commit()
-    log.info("[dedup] sent_job schema ensured")
+def _posted_ago(item: dict) -> str | None:
+    if str(os.getenv("SHOW_RELATIVE_AGE", "on")).lower() in ("0", "off", "false", "no"):
+        return None
+    for key in ("posted_at", "created_at", "published_at", "date", "timestamp", "ts"):
+        dt = _parse_timestamp(item.get(key))
+        if dt:
+            now = _dt.datetime.now(_dt.timezone.utc)
+            sec = int((now - dt).total_seconds())
+            if sec < 60:
+                return f"{sec}s ago"
+            mins = sec // 60
+            if mins < 60:
+                return f"{mins}m ago"
+            hrs = mins // 60
+            if hrs < 24:
+                return f"{hrs}h ago"
+            days = hrs // 24
+            return f"{days}d ago"
+    return None
 
-def _already_sent(user_id: int, job_key: str) -> bool:
-    with _get_session() as s:
-        row = s.execute(
-            _sql_text("SELECT 1 FROM sent_job WHERE user_id=:u AND job_key=:k LIMIT 1;"),
-            {"u": user_id, "k": job_key},
-        ).fetchone()
-        return row is not None
+# ---- compose message ----
+def _compose_message(job: dict) -> str:
+    lines = []
+    title = job.get("title", "").strip()
+    if title:
+        lines.append(f"💼 <b>{title}</b>")
 
-def _mark_sent(user_id: int, job_key: str):
-    with _get_session() as s:
-        s.execute(
-            _sql_text("""
-                INSERT INTO sent_job (user_id, job_key)
-                VALUES (:u, :k)
-                ON CONFLICT (user_id, job_key) DO NOTHING;
-            """),
-            {"u": user_id, "k": job_key},
-        )
-        s.commit()
+    if job.get("description"):
+        desc = job["description"].strip()
+        if len(desc) > 300:
+            desc = desc[:300] + "..."
+        lines.append(desc)
 
-# ---------- compose + keyboard ----------
-def _compose_message(it: Dict) -> str:
-    title = (it.get("title") or "").strip() or "Untitled"
-    desc = (it.get("description") or "").strip()
-    if len(desc) > 700: desc = desc[:700] + "…"
-    src = it.get("source", "freelancer")
-    budget_min, budget_max = it.get("budget_min"), it.get("budget_max")
-    currency = it.get("currency") or ""
-    budget_str = ""
-    if budget_min is not None or budget_max is not None:
-        if budget_min is not None and budget_max is not None:
-            budget_str = f"{budget_min}–{budget_max} {currency}"
-        elif budget_min is not None:
-            budget_str = f"from {budget_min} {currency}"
-        elif budget_max is not None:
-            budget_str = f"up to {budget_max} {currency}"
-    lines = [f"<b>{title}</b>"]
-    if budget_str: lines.append(f"💰 <i>{budget_str}</i>")
-    if desc: lines.append(desc)
-    lines.append(f"🏷️ <i>{src}</i>")
+    # price + conversion
+    budget = job.get("budget_amount")
+    cur = job.get("budget_currency", "")
+    usd = job.get("budget_usd")
+    if budget:
+        if cur and usd and cur.upper() != "USD":
+            lines.append(f"💰 {budget} {cur.upper()} (~{usd} USD)")
+        else:
+            lines.append(f"💰 {budget} {cur.upper() or 'USD'}")
+
+    # keyword match
+    if job.get("matched_keyword"):
+        lines.append(f"🔎 Match: <b>{job['matched_keyword']}</b>")
+
+    # posted ago
+    age = _posted_ago(job)
+    if age:
+        lines.append(f"🕓 Posted: {age}")
+
+    if job.get("url"):
+        lines.append(f"\n🔗 <a href=\"{job['url']}\">View details</a>")
+
     return "\n".join(lines)
 
-def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
-    original = it.get("original_url") or it.get("url") or ""
-    proposal = it.get("proposal_url") or original or ""
-    affiliate = it.get("affiliate_url") or ""
-    if (it.get("source") or "").lower() == "freelancer" and original and not affiliate:
-        try: affiliate = _worker.wrap_freelancer(original)
-        except Exception: pass
-    return {"original": original, "proposal": proposal, "affiliate": affiliate}
-
-def _build_keyboard(links: Dict[str, Optional[str]]):
-    if _job_kb is not None:
-        try: return _job_kb(links["original"], links["proposal"], links["affiliate"])
-        except TypeError:
-            try: return _job_kb(links)
-            except Exception: pass
-    row1 = [
-        InlineKeyboardButton("📝 Proposal", url=links["proposal"] or links["original"] or ""),
-        InlineKeyboardButton("🔗 Original", url=links["original"] or ""),
-    ]
-    row2 = [
-        InlineKeyboardButton("⭐ Save", callback_data="job:save"),
-        InlineKeyboardButton("🗑️ Delete", callback_data="job:delete"),
-    ]
-    return InlineKeyboardMarkup([row1, row2])
-
-# ---------- users ----------
-def _fetch_all_users() -> List[int]:
-    ids: Set[int] = set()
-    with _get_session() as s:
-        try:
-            rows = s.execute(_sql_text("""
-                SELECT DISTINCT telegram_id
-                FROM "user"
-                WHERE telegram_id IS NOT NULL
-                  AND (COALESCE(is_blocked, false) = false)
-                  AND (COALESCE(is_active, true) = true)
-            """)).fetchall()
-            ids.update(int(r[0]) for r in rows if r[0] is not None)
-        except Exception as e:
-            log.info("[users] skip 'user': %s", e)
-        try:
-            rows = s.execute(_sql_text("""
-                SELECT DISTINCT telegram_id
-                FROM users
-                WHERE telegram_id IS NOT NULL
-                  AND (COALESCE(is_blocked, false) = false)
-            """)).fetchall()
-            ids.update(int(r[0]) for r in rows if r[0] is not None)
-        except Exception as e:
-            log.info("[users] skip 'users': %s", e)
-    out = sorted(list(ids))
-    log.info("[users] total distinct receivers: %s", len(out))
-    return out
-
-# ---------- keys ----------
-try:
-    from dedup import make_key as _make_key
-except Exception:
-    _make_key = None
-
-def _job_key(it: Dict) -> str:
-    if _make_key:
-        try: return _make_key(it)
-        except Exception: pass
-    sid = str(it.get("id") or it.get("original_url") or it.get("url") or it.get("title") or "")[:512]
-    return f"{it.get('source','unknown')}::{sid}"
-
-# ---------- async send ----------
-async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
-    sent = 0
-    for it in items:
-        if sent >= per_user_batch: break
-        k = _job_key(it)
-        if _already_sent(chat_id, k): continue
-        text = _compose_message(it)
-        links = _resolve_links(it)
-        kb = _build_keyboard(links)
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb,
-                disable_web_page_preview=False
-            )
-            _mark_sent(chat_id, k)
-            sent += 1
-            await asyncio.sleep(0.35)
-        except Exception as e:
-            log.warning("send_message failed for %s: %s", chat_id, e)
-
-# ---------- main loop ----------
-async def amain():
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+# ---- runner main ----
+def run_worker():
+    s = get_session()
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
-
-    interval = _get_env_int("WORKER_INTERVAL", 60)
-    per_user_batch = _get_env_int("BATCH_PER_TICK", 5)
-
-    _ensure_sent_schema()
-
-    cleanup = os.getenv("WORKER_CLEANUP_DAYS", "")
-    if cleanup and cleanup.lower() not in ("0", "false"):
-        try:
-            d = int(cleanup)
-            log.info("[cleanup] using make_interval days=%s", d)
-            _worker._cleanup_old_sent_jobs(d)
-            log.info("[Runner] cleanup executed on start (days=%s)", d)
-        except Exception as e:
-            log.warning("[Runner] cleanup failed: %s", e)
-
+        log.error("Missing TELEGRAM_BOT_TOKEN")
+        return
     bot = Bot(token=token)
 
-    while True:
-        try:
-            # τρέξε sync pipeline σε ξεχωριστό thread για να μην μπλοκάρει event loop
-            items = await asyncio.to_thread(_worker.run_pipeline, [])
-            users = await asyncio.to_thread(_fetch_all_users)
-            if items and users:
-                for uid in users:
-                    await _send_items(bot, uid, items, per_user_batch)
-            else:
-                if not items: log.info("[pipeline] no items this tick")
-                if not users: log.info("[users] no receivers")
-        except Exception as e:
-            log.error("[runner] pipeline/send error: %s", e)
+    # get all active user ids
+    u1 = s.execute(text('SELECT DISTINCT telegram_id FROM "user" WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true')).fetchall()
+    u2 = s.execute(text('SELECT DISTINCT telegram_id FROM users WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false')).fetchall()
+    receivers = sorted({int(r[0]) for r in u1} | {int(r[0]) for r in u2})
+    log.info(f"[users] total receivers: {len(receivers)} (per-user keywords where available)")
 
-        await asyncio.sleep(interval)
+    jobs = fetch_freelancer_jobs()
+    sent = 0
+
+    for job in jobs:
+        msg = _compose_message(job)
+        key = job.get("job_key")
+        for uid in receivers:
+            try:
+                s.execute(text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING;"), {"u": uid, "k": key})
+                s.commit()
+                bot.send_message(chat_id=uid, text=msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                time.sleep(1)
+                sent += 1
+            except Exception as e:
+                s.rollback()
+                log.warning(f"send_message failed for {uid}: {e}")
+
+    log.info(f"[runner] sent {sent} messages")
 
 if __name__ == "__main__":
-    asyncio.run(amain())
+    run_worker()
