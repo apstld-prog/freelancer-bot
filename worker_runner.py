@@ -1,11 +1,12 @@
 
 #!/usr/bin/env python3
 # worker_runner.py — async runner: send-to-all + dedup (PTB v20+)
-# Adds:
-#   - Budget line shows original currency AND (~ USD)
-#   - "Match: ..." support (incl. KEYWORDS_CSV)
+# Features:
+#   - Keyword filtering & "Match: ..." over title+description (from KEYWORDS_CSV)
+#   - Budget line shows original currency AND (~ USD) if not USD
 #   - "Posted: ..." relative age
-#   - Robust job_action_kb signature handling (original_url/proposal/affiliate or item)
+#   - job_action_kb(original_url) enforced first so Save works
+#   - Dedup safe for legacy constraints
 
 import os, logging, asyncio, inspect, datetime as _dt
 from typing import Dict, List, Optional, Set
@@ -14,15 +15,15 @@ import worker as _worker
 from sqlalchemy import text as _sql_text
 from db import get_session as _get_session
 
-# FX conversion (reuse your project's utilities)
+# FX conversion reuse
 try:
     from utils_fx import load_fx_rates, to_usd as _to_usd
     from config import FX_USD_RATES as _FX_URL
     _RATES = load_fx_rates(_FX_URL)
 except Exception:
-    _RATES, _to_usd = {}, lambda x, c: None  # graceful fallback
+    _RATES, _to_usd = {}, lambda x, c, r=None: None
 
-# Prefer project keyboard
+# Project keyboard
 try:
     from ui_keyboards import job_action_kb as _job_kb
 except Exception:
@@ -41,7 +42,32 @@ def _get_env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
-# ---------- sent_job helpers (do not touch legacy constraints) ----------
+# ---------- keywords ----------
+def _env_keywords() -> List[str]:
+    csv = os.getenv("KEYWORDS_CSV", "").strip()
+    return [w.strip() for w in csv.split(",") if w.strip()]
+
+def _text_contains_any(text: str, words: List[str]) -> Optional[str]:
+    if not words:
+        return None
+    hay = (text or "").lower()
+    for w in words:
+        if w.lower() in hay:
+            return w
+    return None
+
+def _detect_match(it: Dict, words: List[str]) -> Optional[str]:
+    # explicit match provided by pipeline?
+    for k in ("match", "matched", "match_keyword"):
+        v = it.get(k)
+        if v:
+            return str(v)
+    # env keywords check over title+description
+    title = it.get("title", "")
+    desc  = it.get("description", "")
+    return _text_contains_any(f"{title}\n{desc}", words)
+
+# ---------- sent_job helpers (no constraint changes) ----------
 def _ensure_sent_schema():
     with _get_session() as s:
         s.execute(_sql_text("""
@@ -75,7 +101,7 @@ def _already_sent(_uid: int, job_key: str) -> bool:
 
 def _mark_sent(uid: int, job_key: str):
     with _get_session() as s:
-        # try ON CONFLICT by job_key (if constraint exists); otherwise ignore error and fallback
+        # try ON CONFLICT by job_key (if exists), otherwise check then insert
         try:
             s.execute(_sql_text("INSERT INTO sent_job (chat_id, job_key) VALUES (:u, :k) ON CONFLICT (job_key) DO NOTHING;"),
                      {"u": uid, "k": job_key})
@@ -91,21 +117,7 @@ def _mark_sent(uid: int, job_key: str):
         except Exception:
             s.rollback()
 
-# ---------- Match & Posted helpers ----------
-def _detect_match(it: Dict) -> Optional[str]:
-    for k in ("match", "matched", "match_keyword"):
-        v = it.get(k)
-        if v:
-            return str(v)
-    csv = os.getenv("KEYWORDS_CSV", "").strip()
-    if not csv:
-        return None
-    hay = f"{it.get('title','')} {it.get('description','')}".lower()
-    for w in [x.strip() for x in csv.split(",") if x.strip()]:
-        if w.lower() in hay:
-            return w
-    return None
-
+# ---------- time helpers ----------
 def _parse_timestamp(val) -> Optional[_dt.datetime]:
     if val is None:
         return None
@@ -171,7 +183,6 @@ def _budget_line(it: Dict) -> Optional[str]:
     if bmin is None and bmax is None:
         return None
 
-    # Original string
     def with_cur(x):
         s = _fmt_amount(x)
         return f"{s} {cur}".strip() if s else None
@@ -183,21 +194,21 @@ def _budget_line(it: Dict) -> Optional[str]:
     else:
         orig = f"up to {with_cur(bmax) if cur else _fmt_amount(bmax)}"
 
-    # USD conversion
-    umin = _usd(bmin, cur) if bmin is not None else None
-    umax = _usd(bmax, cur) if bmax is not None else None
-    if cur and cur != "USD" and (umin is not None or umax is not None):
-        if umin is not None and umax is not None:
-            usd = f"(~ {int(round(umin))}–{int(round(umax))} USD)"
-        elif umin is not None:
-            usd = f"(~ {int(round(umin))} USD)"
-        else:
-            usd = f"(~ {int(round(umax))} USD)"
-        return f"{orig} {usd}"
+    if cur and cur != "USD":
+        umin = _usd(bmin, cur) if bmin is not None else None
+        umax = _usd(bmax, cur) if bmax is not None else None
+        if umin is not None or umax is not None:
+            if umin is not None and umax is not None:
+                usd = f"(~ {int(round(umin))}–{int(round(umax))} USD)"
+            elif umin is not None:
+                usd = f"(~ {int(round(umin))} USD)"
+            else:
+                usd = f"(~ {int(round(umax))} USD)"
+            return f"{orig} {usd}"
     return orig
 
 # ---------- compose + keyboard ----------
-def _compose_message(it: Dict) -> str:
+def _compose_message(it: Dict, words: List[str]) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
     if len(desc) > 700:
@@ -213,7 +224,7 @@ def _compose_message(it: Dict) -> str:
     if desc:
         lines.append(desc)
 
-    m = _detect_match(it)
+    m = _detect_match(it, words)
     if m:
         lines.append(f"Match: {m}")
 
@@ -237,25 +248,29 @@ def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
 
 def _build_keyboard(it: Dict, links: Dict[str, Optional[str]]):
     if _job_kb is not None:
+        # force original_url first to satisfy your handler
         try:
-            sig = inspect.signature(_job_kb)
-            params = list(sig.parameters.keys())
-            # (original_url) only
-            if len(params) == 1 and params[0] == "original_url":
-                return _job_kb(links["original"])
-            # (item) only
-            if len(params) == 1 and params[0] == "item":
-                return _job_kb(it)
-            # (original, proposal, affiliate)
-            if len(params) >= 3:
-                return _job_kb(links["original"], links["proposal"], links["affiliate"])
-            # (item=...) signature
-            if "item" in params:
-                return _job_kb(item=it)
+            return _job_kb(links["original"])
+        except TypeError:
+            pass
         except Exception as e:
-            log.warning("job_action_kb fallback: %s", e)
+            log.warning("job_action_kb(original_url) raised: %s", e)
+        # try 3-url variant
+        try:
+            return _job_kb(links["original"], links["proposal"], links["affiliate"])
+        except TypeError:
+            pass
+        except Exception as e:
+            log.warning("job_action_kb(3 urls) raised: %s", e)
+        # try item variant
+        try:
+            return _job_kb(it)
+        except TypeError:
+            pass
+        except Exception as e:
+            log.warning("job_action_kb(item) raised: %s", e)
 
-    # fallback – same labels
+    # fallback keyboard (same labels)
     row1 = [
         InlineKeyboardButton("📝 Proposal", url=links["proposal"] or links["original"] or ""),
         InlineKeyboardButton("🔗 Original",  url=links["original"] or ""),
@@ -311,15 +326,18 @@ def _job_key(it: Dict) -> str:
     return f"{it.get('source','unknown')}::{sid}"
 
 # ---------- async send ----------
-async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
+async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int, words: List[str], filter_on: bool):
     sent = 0
     for it in items:
         if sent >= per_user_batch:
             break
+        # apply keyword filter if enabled
+        if filter_on and not _detect_match(it, words):
+            continue
         k = _job_key(it)
         if _already_sent(chat_id, k):
             continue
-        text = _compose_message(it)
+        text = _compose_message(it, words)
         links = _resolve_links(it)
         kb = _build_keyboard(it, links)
         try:
@@ -341,25 +359,30 @@ async def amain():
 
     _ensure_sent_schema()
 
-    cleanup = os.getenv("WORKER_CLEANUP_DAYS", "")
-    if cleanup and cleanup.lower() not in ("0", "false"):
+    # keywords & filter mode
+    words = _env_keywords()
+    filter_on = os.getenv("KEYWORD_FILTER_MODE", "on").lower() not in ("0","off","false","no")
+    if filter_on:
+        log.info("[keywords] filtering is ON with %s words: %s", len(words), words)
+    else:
+        log.info("[keywords] filtering is OFF")
+
+    # run pipeline with or without keywords (best-effort)
+    def _pipeline():
         try:
-            d = int(cleanup)
-            log.info("[cleanup] using make_interval days=%s", d)
-            _worker._cleanup_old_sent_jobs(d)
-            log.info("[Runner] cleanup executed on start (days=%s)", d)
-        except Exception as e:
-            log.warning("[Runner] cleanup failed: %s", e)
+            return _worker.run_pipeline(words if filter_on else [])
+        except TypeError:
+            return _worker.run_pipeline()
 
     bot = Bot(token=token)
 
     while True:
         try:
-            items = await asyncio.to_thread(_worker.run_pipeline, [])
+            items = await asyncio.to_thread(_pipeline)
             users = await asyncio.to_thread(_fetch_all_users)
             if items and users:
                 for uid in users:
-                    await _send_items(bot, uid, items, per_user_batch)
+                    await _send_items(bot, uid, items, per_user_batch, words, filter_on)
             else:
                 if not items:
                     log.info("[pipeline] no items this tick")
