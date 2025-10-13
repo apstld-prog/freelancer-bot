@@ -1,4 +1,3 @@
-
 import requests, re
 from typing import List, Dict, Optional
 
@@ -22,6 +21,17 @@ _ALIAS = {
     "R$": "BRL",
 }
 
+# Regex για ανίχνευση συμβόλων νομισμάτων στο κείμενο
+_SYM_RE = [
+    (re.compile(r"₹|\bINR\b|\bRUPEE\S*\b", re.I), "INR"),
+    (re.compile(r"€|\bEURO\b", re.I), "EUR"),
+    (re.compile(r"£|\bGBP\b|\bPOUND\b", re.I), "GBP"),
+    (re.compile(r"\bA\$\b|\bAUD\b", re.I), "AUD"),
+    (re.compile(r"\bC\$\b|\bCAD\b", re.I), "CAD"),
+    (re.compile(r"\bR\$\b|\bBRL\b", re.I), "BRL"),
+    (re.compile(r"\bUSD\b|\bUS\$\b|\$", re.I), "USD"),  # προσοχή: $ είναι αμφίσημο, το βάζουμε χαμηλά
+]
+
 def _norm_cur(cur: Optional[str]) -> Optional[str]:
     if not cur:
         return None
@@ -33,20 +43,60 @@ def _norm_cur(cur: Optional[str]) -> Optional[str]:
     c = cur.upper()
     return _ALIAS.get(c, c)
 
-def _extract_budget(p: Dict) -> Dict:
+def _infer_currency_from_text(title: str, desc: str) -> Optional[str]:
+    text = f"{title or ''}\n{desc or ''}"
+    for rx, code in _SYM_RE:
+        if rx.search(text):
+            return code
+    return None
+
+def _extract_currency_from_any(p: Dict) -> Optional[str]:
+    """
+    Tries multiple places:
+    - budget.currency.{code,sign,name}
+    - top-level currency.{code,sign,name}
+    - fallback: infer from text symbols
+    """
+    # 1) budget.currency
     b = p.get("budget") or {}
-    # currency: never default to USD; keep None if unknown
-    code = None
     cur = b.get("currency")
     if isinstance(cur, dict):
-        code = cur.get("code") or cur.get("sign") or cur.get("name")
+        for k in ("code", "sign", "name"):
+            code = _norm_cur(cur.get(k))
+            if code:
+                return code
     elif isinstance(cur, str):
-        code = cur
-    code = _norm_cur(code)
+        code = _norm_cur(cur)
+        if code:
+            return code
+
+    # 2) top-level currency
+    cur2 = p.get("currency")
+    if isinstance(cur2, dict):
+        for k in ("code", "sign", "name"):
+            code = _norm_cur(cur2.get(k))
+            if code:
+                return code
+    elif isinstance(cur2, str):
+        code = _norm_cur(cur2)
+        if code:
+            return code
+
+    # 3) infer από κείμενο (ήπια, τελευταία λύση)
+    code = _infer_currency_from_text(p.get("title", ""), p.get("description", "") or p.get("preview_description", ""))
+    return code
+
+def _extract_budget(p: Dict) -> Dict:
+    """Extract currency + min/max without inventing defaults."""
+    b = p.get("budget") or {}
+
+    # currency (πολλαπλά fallbacks)
+    code = _extract_currency_from_any(p)
 
     # values
     minb = b.get("minimum")
     maxb = b.get("maximum")
+    # Ensure numeric if stringified
     try:
         if isinstance(minb, str): minb = float(minb)
     except Exception:
@@ -59,9 +109,13 @@ def _extract_budget(p: Dict) -> Dict:
     return {"currency": code, "budget_min": minb, "budget_max": maxb}
 
 def _project_url(p: Dict) -> str:
+    # Prefer SEO URL if provided, else fallback to id
     url = (p.get("seo_url") or p.get("url") or "").strip()
+    if url and not url.startswith("http"):
+        # φτιάξε absolute
+        url = "https://www.freelancer.com/" + url.lstrip("/")
     if url:
-        return "https://www.freelancer.com" + url if url.startswith("/") else url
+        return url
     pid = p.get("id") or p.get("project_id")
     if pid:
         return f"https://www.freelancer.com/projects/{pid}"
@@ -80,6 +134,7 @@ def _item_from_project(p: Dict) -> Dict:
         "currency": b["currency"],
         "budget_min": b["budget_min"],
         "budget_max": b["budget_max"],
+        # Time fields (any of these may exist depending on API shape)
         "posted_at": p.get("time_submitted") or p.get("submitdate") or p.get("time_submitted_unix") or None,
     }
     return item
