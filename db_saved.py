@@ -1,4 +1,4 @@
-# db_saved.py — simple saved jobs table
+# db_saved.py — saved jobs table (portable)
 
 from typing import List, Dict
 from sqlalchemy import text
@@ -30,9 +30,9 @@ def add_saved_job(user_id: int, title: str, url: str = "", description: str = ""
 
 def list_saved_jobs_by_user(user_id: int, limit: int = 10) -> List[Dict]:
     ensure_saved_schema()
+    limit = int(limit) if limit and int(limit) > 0 else 10
     with get_session() as s:
         rows = s.execute(
-            text("SELECT title, url, description, saved_at FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT :n"),
-            {"u": user_id, "n": int(limit)}
-        ).fetchall()
+            text(f"SELECT title, url, description, saved_at FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT {limit}")
+        , {"u": user_id}).fetchall()
     return [{"title": r[0], "url": r[1], "description": r[2], "saved_at": r[3]} for r in rows]

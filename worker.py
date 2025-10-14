@@ -1,4 +1,4 @@
-# worker.py — fetch, per-user filter, annotate match, dedup, currency prepare (robust INR/EUR/£/₹, etc.)
+# worker.py — fetch, per-user filter, annotate match, dedup, currency prepare (prefers non-USD)
 
 from typing import List, Dict, Optional, Tuple
 from config import (
@@ -87,30 +87,34 @@ def deduplicate(items: List[Dict]) -> List[Dict]:
 # ---------- currency detection ----------
 _SYMBOL_TO_CODE = {
     "€":"EUR","£":"GBP","₹":"INR","₽":"RUB","₺":"TRY","¥":"JPY","₩":"KRW","₪":"ILS",
-    "R$":"BRL","A$":"AUD","C$":"CAD","$":"USD"  # generic $ as last resort
+    "R$":"BRL","A$":"AUD","C$":"CAD","$":"USD"
 }
+
+def _pick_non_usd(*cands: str) -> Optional[str]:
+    """Return first non-empty; if both USD and non-USD present, prefer non-USD."""
+    cleaned = [c.strip().upper() for c in cands if c and str(c).strip()]
+    non_usd = [c for c in cleaned if c != "USD"]
+    return (non_usd[0] if non_usd else (cleaned[0] if cleaned else None))
 
 def _detect_currency(item: Dict) -> Tuple[str, str]:
     """
-    Returns (code, display). Display prefers symbol if provided, otherwise code.
-    Extremely defensive: checks multiple fields + scans text for common symbols (₹ € £).
+    Returns (code, display). Prefers non-USD if mixed values exist.
+    Checks: original_currency/budget_currency/currency_code/currency, symbol, then text scan.
     """
-    # 1) obvious fields from parsers
-    code = (item.get("currency_code") or item.get("currency") or item.get("budget_currency") or item.get("original_currency") or "")
-    code = str(code).upper().strip() if code else ""
+    code = _pick_non_usd(
+        item.get("original_currency"),
+        item.get("budget_currency"),
+        item.get("currency_code"),
+        item.get("currency"),
+    )
     sym  = (item.get("currency_symbol") or item.get("currency_display") or "").strip()
-
-    # 2) infer from symbol mapping
     if not code and sym:
-        code = _SYMBOL_TO_CODE.get(sym, "")
-
-    # 3) scan title/desc for symbols if still unknown
+        code = _SYMBOL_TO_CODE.get(sym, None)
     if not code:
         txt = f"{item.get('title') or ''}\n{item.get('description') or ''}"
         for s,c in [("₹","INR"),("€","EUR"),("£","GBP")]:
             if s in txt:
                 code = c; sym = s; break
-
     if not code:
         code = "USD"
     display = sym or code
