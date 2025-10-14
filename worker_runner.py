@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# worker_runner.py — per-user fetch, correct budget display (original + USD), show matched keyword
+# worker_runner.py — per-user fetch, no-duplicates, correct budget display, show matched keyword
 
 import os, logging, asyncio
 from typing import Dict, List, Optional, Set
@@ -21,7 +21,44 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
 
-# ---------- users ----------
+# ============ Dedup (per user) ============
+def _ensure_sent_schema():
+    with _get_session() as s:
+        s.execute(_sql_text("""
+            CREATE TABLE IF NOT EXISTS sent_job (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                job_key TEXT NOT NULL,
+                sent_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC'),
+                UNIQUE (user_id, job_key)
+            )
+        """))
+        s.commit()
+
+def _already_sent(user_id: int, job_key: str) -> bool:
+    _ensure_sent_schema()
+    with _get_session() as s:
+        row = s.execute(_sql_text(
+            "SELECT 1 FROM sent_job WHERE user_id=:u AND job_key=:k LIMIT 1"
+        ), {"u": user_id, "k": job_key}).fetchone()
+        return row is not None
+
+def _mark_sent(user_id: int, job_key: str) -> None:
+    with _get_session() as s:
+        s.execute(_sql_text(
+            "INSERT INTO sent_job (user_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING"
+        ), {"u": user_id, "k": job_key})
+        s.commit()
+
+def _cleanup_sent(days: int = 30) -> None:
+    # προαιρετικό καθάρισμα – καλείται αραιά
+    with _get_session() as s:
+        s.execute(_sql_text(
+            "DELETE FROM sent_job WHERE sent_at < (NOW() AT TIME ZONE 'UTC') - INTERVAL ':d days'"
+        ).bindparams(d=days))
+        s.commit()
+
+# ============ Users / Keywords ============
 def _fetch_all_users() -> List[int]:
     ids: Set[int] = set()
     with _get_session() as s:
@@ -50,25 +87,13 @@ def _fetch_all_users() -> List[int]:
     log.info("[users] receivers: %s", len(out))
     return out
 
-def _fetch_user_keywords(telegram_id: int) -> List[str]:
-    """Fetch keywords using the app's internal user.id (NOT the telegram_id)."""
+def _fetch_user_keywords(user_id: int) -> List[str]:
     try:
-        with _get_session() as s:
-            row = s.execute(
-                _sql_text('SELECT id FROM "user" WHERE telegram_id=:tid'),
-                {"tid": telegram_id}
-            ).fetchone()
-            if not row:
-                return []
-            uid = int(row[0])
-        kws = _list_keywords(uid) or []
-        # normalize/trim
-        return [k.strip() for k in kws if k and k.strip()]
-    except Exception as e:
-        log.warning("[kw] could not fetch for %s: %s", telegram_id, e)
+        return [k for k in (_list_keywords(user_id) or []) if k and k.strip()]
+    except Exception:
         return []
 
-# ---------- compose ----------
+# ============ Message compose ============
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
@@ -153,23 +178,34 @@ def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
             pass
     return {"original": original, "proposal": proposal, "affiliate": affiliate}
 
-# ---------- send ----------
+# ============ Send (with dedup) ============
 async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
     sent = 0
     for it in items:
         if sent >= per_user_batch:
             break
+
+        # dedup key από το worker (ίδιο με deduplicate λογική)
+        key = it.get("_dedup_key") or it.get("key") or it.get("id") or ""
+        if not key:
+            # ασφαλές fallback: τίτλος+url
+            key = f"{it.get('source','?')}::{it.get('title','')[:80]}::{it.get('url') or it.get('original_url') or ''}"
+
+        if _already_sent(chat_id, key):
+            continue  # ΜΗ στείλεις διπλότυπο
+
         try:
             text = _compose_message(it)
             kb = _build_keyboard(_resolve_links(it))
             await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
                                    reply_markup=kb, disable_web_page_preview=False)
+            _mark_sent(chat_id, key)
             sent += 1
             await asyncio.sleep(0.35)
         except Exception as e:
             log.warning("send_message failed for %s: %s", chat_id, e)
 
-# ---------- main loop ----------
+# ============ Main loop ============
 async def amain():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
     if not token:
@@ -178,15 +214,21 @@ async def amain():
     per_user_batch = int(os.getenv("BATCH_PER_TICK", "5"))
     bot = Bot(token=token)
 
+    # προαιρετικό cleanup 1 φορά στην εκκίνηση
+    try:
+        _cleanup_sent(days=int(os.getenv("SENT_TTL_DAYS", "30")))
+    except Exception:
+        pass
+
     while True:
         try:
             users = await asyncio.to_thread(_fetch_all_users)
             if users:
-                for tid in users:
-                    kws = await asyncio.to_thread(_fetch_user_keywords, tid)
+                for uid in users:
+                    kws = await asyncio.to_thread(_fetch_user_keywords, uid)
                     items = await asyncio.to_thread(_worker.run_pipeline, kws)
                     if items:
-                        await _send_items(bot, tid, items, per_user_batch)
+                        await _send_items(bot, uid, items, per_user_batch)
         except Exception as e:
             log.error("[runner] pipeline error: %s", e)
 
