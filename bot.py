@@ -369,11 +369,8 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for t, u in rows:
                     t = (t or '').strip() or '(no title)'
                     u = (u or '').strip()
-                    lines.append(f"• {t}
-{u}" if u else f"• {t}")
-                await q.message.reply_text('
-
-'.join(lines))
+                    lines.append(f"• {t}\n{u}" if u else f"• {t}")
+                await q.message.reply_text('\n\n'.join(lines))
         except Exception as e:
             # Still show a minimal message instead of failing silently
             await q.message.reply_text("Saved list: (empty)")
