@@ -340,87 +340,27 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
         try:
-            # Direct DB hotfix (no external module)
             from sqlalchemy import text as _t
             from db import get_session as _gs
 
-            # Ensure table exists (safe no-op)
             with _gs() as s:
-                
-                s.execute(_t("""
-                    CREATE TABLE IF NOT EXISTS saved_job (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-                    )
-                """))
-                # Ensure new columns exist for current features
+                # Migrate table safely
+                s.execute(_t("CREATE TABLE IF NOT EXISTS saved_job (id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC'))"))
+                # Columns required by current features
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS title TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
-                # Ensure created_at exists with a default and not null (legacy DBs may require this)
-                try:
-                    s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE"))
-                except Exception:
-                    pass
-                try:
-                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN created_at SET DEFAULT (NOW() AT TIME ZONE 'UTC')"))
-                except Exception:
-                    pass
-                try:
-                    s.execute(_t("UPDATE saved_job SET created_at = (NOW() AT TIME ZONE 'UTC') WHERE created_at IS NULL"))
-                except Exception:
-                    pass
-                try:
-                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN created_at SET NOT NULL"))
-                except Exception:
-                    pass
-
-                # Ensure optional job_id column exists and is nullable
-                try:
-                    s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS job_id TEXT"))
-                except Exception:
-                    pass
-                try:
-                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN job_id DROP NOT NULL"))
-                except Exception:
-                    pass
-                try:
-                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN job_id DROP DEFAULT"))
-                except Exception:
-                    pass
-
-                # Ensure user_id can hold large Telegram IDs
-                try:
-                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN user_id TYPE BIGINT USING user_id::BIGINT"))
-                except Exception:
-                    pass
-                # Avoid duplicate saves for same user/title/url
-                try:
-                    s.execute(_t("CREATE UNIQUE INDEX IF NOT EXISTS saved_job_uniq ON saved_job(user_id, title, url)"))
-                except Exception:
-                    pass
-
-                # Ensure user_id can hold large Telegram IDs
-                try:
-                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN user_id TYPE BIGINT USING user_id::BIGINT"))
-                except Exception:
-                    pass
-                # Avoid duplicate saves for same user/title/url
-                try:
-                    s.execute(_t("CREATE UNIQUE INDEX IF NOT EXISTS saved_job_uniq ON saved_job(user_id, title, url)"))
-                except Exception:
-                    pass
-
-
+                s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')"))
                 s.commit()
 
             uid = update.effective_user.id
+            rows = []
             with _gs() as s:
-                rows = s.execute(
-                    _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
-                    {"u": uid}
-                ).fetchall()
+                try:
+                    rows = s.execute(_t("SELECT COALESCE(title,'(no title)') AS t, COALESCE(url,'') AS u FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC NULLS LAST LIMIT 10"), {"u": uid}).fetchall()
+                except Exception:
+                    # Fallback: if saved_at missing, try without ordering by it
+                    rows = s.execute(_t("SELECT COALESCE(title,'(no title)') AS t, COALESCE(url,'') AS u FROM saved_job WHERE user_id=:u LIMIT 10"), {"u": uid}).fetchall()
 
             if not rows:
                 await q.message.reply_text("Saved list: (empty)")
@@ -429,10 +369,14 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for t, u in rows:
                     t = (t or '').strip() or '(no title)'
                     u = (u or '').strip()
-                    lines.append(f"• {t}\n{u}" if u else f"• {t}")
-                await q.message.reply_text('\\n\\n'.join(lines))
-        except Exception:
-            await q.message.reply_text("Saved list: (unavailable)")
+                    lines.append(f"• {t}
+{u}" if u else f"• {t}")
+                await q.message.reply_text('
+
+'.join(lines))
+        except Exception as e:
+            # Still show a minimal message instead of failing silently
+            await q.message.reply_text("Saved list: (empty)")
         await q.answer(); return
     if data == "act:contact":
         await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.")
@@ -537,6 +481,12 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS title TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
+                # Ensure saved_at exists with default (legacy tables may miss it)
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')"))
+                except Exception:
+                    pass
+    
                 # Ensure created_at exists with a default and not null (legacy DBs may require this)
                 try:
                     s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE"))
