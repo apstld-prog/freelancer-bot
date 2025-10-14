@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# worker_runner.py — async runner: send-to-all + per-user dedup + keyword match + currency fix
+# worker_runner.py — per-user fetch, correct budget display (original + USD), show matched keyword
 
 import os, logging, asyncio
 from typing import Dict, List, Optional, Set
@@ -30,8 +30,8 @@ def _fetch_all_users() -> List[int]:
                 SELECT DISTINCT telegram_id
                 FROM "user"
                 WHERE telegram_id IS NOT NULL
-                  AND (COALESCE(is_blocked, false) = false)
-                  AND (COALESCE(is_active, true) = true)
+                  AND COALESCE(is_blocked,false)=false
+                  AND COALESCE(is_active,true)=true
             """)).fetchall()
             ids.update(int(r[0]) for r in rows if r[0] is not None)
         except Exception as e:
@@ -41,25 +41,22 @@ def _fetch_all_users() -> List[int]:
                 SELECT DISTINCT telegram_id
                 FROM users
                 WHERE telegram_id IS NOT NULL
-                  AND (COALESCE(is_blocked, false) = false)
+                  AND COALESCE(is_blocked,false)=false
             """)).fetchall()
             ids.update(int(r[0]) for r in rows if r[0] is not None)
         except Exception as e:
             log.info("[users] skip 'users': %s", e)
     out = sorted(list(ids))
-    log.info("[users] total distinct receivers: %s", len(out))
+    log.info("[users] receivers: %s", len(out))
     return out
 
-
-# ---------- user keywords ----------
-def _fetch_user_keywords(user_id: int) -> list:
+def _fetch_user_keywords(user_id: int) -> List[str]:
     try:
         return [k for k in (_list_keywords(user_id) or []) if k and k.strip()]
     except Exception:
         return []
 
-
-# ---------- message composer ----------
+# ---------- compose ----------
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
@@ -67,28 +64,33 @@ def _compose_message(it: Dict) -> str:
         desc = desc[:700] + "…"
     src = it.get("source", "freelancer")
 
+    # Prefer a human display currency (keep symbol), fallback to code
+    display_ccy = (
+        it.get("currency_display")
+        or it.get("budget_currency")
+        or it.get("original_currency")
+        or it.get("currency")
+        or ""
+    )
+    # Numeric amounts (original)
     budget_min, budget_max = it.get("budget_min"), it.get("budget_max")
-    currency = (it.get("currency") or "").upper()
+    # USD conversions computed by worker.prepare_display
     usd_min, usd_max = it.get("budget_min_usd"), it.get("budget_max_usd")
-    budget_str = ""
 
-    if currency:
-        if budget_min is not None and budget_max is not None:
-            orig = f"{budget_min}–{budget_max} {currency}"
-            usd = None
-            if usd_min is not None and usd_max is not None:
-                usd = f"${usd_min}–${usd_max}"
-            elif usd_min is not None:
-                usd = f"from ${usd_min}"
-            elif usd_max is not None:
-                usd = f"up to ${usd_max}"
-            budget_str = orig + (f" (≈ {usd})" if usd else "")
-        elif budget_min is not None:
-            orig = f"from {budget_min} {currency}"
-            budget_str = orig + (f" (≈ ${usd_min})" if usd_min is not None else "")
-        elif budget_max is not None:
-            orig = f"up to {budget_max} {currency}"
-            budget_str = orig + (f" (≈ ${usd_max})" if usd_max is not None else "")
+    budget_parts = []
+    if budget_min is not None and budget_max is not None:
+        orig = f"{budget_min}–{budget_max} {display_ccy}".strip()
+        if usd_min is not None and usd_max is not None:
+            budget_parts.append(f"{orig} (≈ ${usd_min}–${usd_max})")
+        else:
+            budget_parts.append(orig)
+    elif budget_min is not None:
+        orig = f"from {budget_min} {display_ccy}".strip()
+        budget_parts.append(orig + (f" (≈ ${usd_min})" if usd_min is not None else ""))
+    elif budget_max is not None:
+        orig = f"up to {budget_max} {display_ccy}".strip()
+        budget_parts.append(orig + (f" (≈ ${usd_max})" if usd_max is not None else ""))
+    budget_str = budget_parts[0] if budget_parts else ""
 
     lines = [f"<b>{title}</b>"]
     if budget_str:
@@ -102,7 +104,6 @@ def _compose_message(it: Dict) -> str:
 
     lines.append(f"🏷️ <i>{src}</i>")
     return "\n".join(lines)
-
 
 def _build_keyboard(links: Dict[str, Optional[str]]):
     if _job_kb is not None:
@@ -123,7 +124,6 @@ def _build_keyboard(links: Dict[str, Optional[str]]):
     ]
     return InlineKeyboardMarkup([row1, row2])
 
-
 def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
     original = it.get("original_url") or it.get("url") or ""
     proposal = it.get("proposal_url") or original or ""
@@ -135,36 +135,27 @@ def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
             pass
     return {"original": original, "proposal": proposal, "affiliate": affiliate}
 
-
-# ---------- async send ----------
+# ---------- send ----------
 async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
     sent = 0
     for it in items:
         if sent >= per_user_batch:
             break
-        text = _compose_message(it)
-        links = _resolve_links(it)
-        kb = _build_keyboard(links)
         try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb,
-                disable_web_page_preview=False
-            )
+            text = _compose_message(it)
+            kb = _build_keyboard(_resolve_links(it))
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+                                   reply_markup=kb, disable_web_page_preview=False)
             sent += 1
             await asyncio.sleep(0.35)
         except Exception as e:
             log.warning("send_message failed for %s: %s", chat_id, e)
 
-
 # ---------- main loop ----------
 async def amain():
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
-
     interval = int(os.getenv("WORKER_INTERVAL", "120"))
     per_user_batch = int(os.getenv("BATCH_PER_TICK", "5"))
     bot = Bot(token=token)
@@ -179,10 +170,9 @@ async def amain():
                     if items:
                         await _send_items(bot, uid, items, per_user_batch)
         except Exception as e:
-            log.error("[runner] pipeline/send error: %s", e)
+            log.error("[runner] pipeline error: %s", e)
 
         await asyncio.sleep(interval)
-
 
 if __name__ == "__main__":
     asyncio.run(amain())
