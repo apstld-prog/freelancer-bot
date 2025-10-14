@@ -358,6 +358,24 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS title TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
+                # Ensure created_at exists with a default and not null (legacy DBs may require this)
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE"))
+                except Exception:
+                    pass
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN created_at SET DEFAULT (NOW() AT TIME ZONE 'UTC')"))
+                except Exception:
+                    pass
+                try:
+                    s.execute(_t("UPDATE saved_job SET created_at = (NOW() AT TIME ZONE 'UTC') WHERE created_at IS NULL"))
+                except Exception:
+                    pass
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN created_at SET NOT NULL"))
+                except Exception:
+                    pass
+
                 # Ensure optional job_id column exists and is nullable
                 try:
                     s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS job_id TEXT"))
@@ -519,6 +537,24 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS title TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
+                # Ensure created_at exists with a default and not null (legacy DBs may require this)
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE"))
+                except Exception:
+                    pass
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN created_at SET DEFAULT (NOW() AT TIME ZONE 'UTC')"))
+                except Exception:
+                    pass
+                try:
+                    s.execute(_t("UPDATE saved_job SET created_at = (NOW() AT TIME ZONE 'UTC') WHERE created_at IS NULL"))
+                except Exception:
+                    pass
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN created_at SET NOT NULL"))
+                except Exception:
+                    pass
+
                 # Ensure optional job_id column exists and is nullable
                 try:
                     s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS job_id TEXT"))
