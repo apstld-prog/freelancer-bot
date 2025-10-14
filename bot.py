@@ -346,16 +346,19 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Ensure table exists (safe no-op)
             with _gs() as s:
+                
                 s.execute(_t("""
                     CREATE TABLE IF NOT EXISTS saved_job (
                         id SERIAL PRIMARY KEY,
                         user_id BIGINT NOT NULL,
-                        title TEXT NOT NULL,
-                        url TEXT,
-                        description TEXT,
                         saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
                     )
                 """))
+                -- Ensure new columns exist for current features
+                s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS title TEXT"))
+                s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
+                s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
+
                 s.commit()
 
             uid = update.effective_user.id
@@ -468,16 +471,19 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from sqlalchemy import text as _t
             from db import get_session as _gs
             with _gs() as s:
+                
                 s.execute(_t("""
                     CREATE TABLE IF NOT EXISTS saved_job (
                         id SERIAL PRIMARY KEY,
                         user_id BIGINT NOT NULL,
-                        title TEXT NOT NULL,
-                        url TEXT,
-                        description TEXT,
                         saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
                     )
                 """))
+                -- Ensure new columns exist for current features
+                s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS title TEXT"))
+                s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
+                s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
+
                 # Avoid duplicates per user/title/url combo
                 exists = s.execute(_t(
                     "SELECT 1 FROM saved_job WHERE user_id=:u AND title=:t AND COALESCE(url,'')=COALESCE(:uurl,'') LIMIT 1"
