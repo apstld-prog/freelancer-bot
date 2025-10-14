@@ -1,56 +1,121 @@
+# platform_freelancer.py — robust Freelancer.com fetcher
+# - Pulls recent projects (public feed)
+# - Normalizes currency (code + symbol)
+# - Provides budget_min/budget_max, original_currency, currency_symbol
+# - Emits 'matched_keyword' when keywords_query provided
+# - Leaves presentation to worker/runner
 
-import requests
-from typing import List, Dict
+from typing import List, Dict, Optional
+import os, time, json, math
+import httpx
 
-API = "https://www.freelancer.com/api/projects/0.1/projects/active/"
-# The public endpoint works without auth for basic queries; tune params as needed.
+# Public feed endpoint (no secret)
+FREELANCER_SEARCH_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 
-DEFAULT_PARAMS = {
-    "limit": 50,
-    "compact": "true",
-    "user_details": "true",
-    "job_details": "true",
-    "full_description": "true",
-    # 'query': 'python, telegram'  # set by caller if needed
+# Map ISO code -> symbol (display)
+CCY_SYMBOL = {
+    "USD": "$", "EUR": "€", "GBP": "£", "INR": "₹", "AUD": "A$",
+    "CAD": "C$", "BRL": "R$", "JPY": "¥", "KRW": "₩", "TRY": "₺",
+    "RUB": "₽", "ILS": "₪", "MXN": "MX$", "NZD": "NZ$", "ZAR": "R"
 }
 
-def _extract_budget(p: dict):
-    b = (p or {}).get("budget") or {}
-    minimum = b.get("minimum")
-    maximum = b.get("maximum")
-    currency = (b.get("currency") or {}).get("code") or "USD"
-    return minimum, maximum, currency
+def _ccy_symbol(code: Optional[str]) -> str:
+    c = (code or "").upper()
+    return CCY_SYMBOL.get(c, c or "USD")
 
-def _item_from_project(p: dict) -> Dict:
-    min_b, max_b, ccy = _extract_budget(p)
+def _safe_num(x) -> Optional[float]:
+    try:
+        if x is None: return None
+        f = float(x)
+        if math.isnan(f): return None
+        return round(f, 1)
+    except Exception:
+        return None
+
+def _make_url(project) -> str:
+    # canonical deeplink
+    seo = project.get("seo_url") or ""
+    if seo:
+        return f"https://www.freelancer.com/projects/{seo}"
+    # fallback
+    pid = project.get("id")
+    return f"https://www.freelancer.com/projects/{pid}"
+
+def _normalize_project(p) -> Dict:
     title = p.get("title") or ""
     desc = p.get("preview_description") or p.get("description") or ""
-    seo_url = (p.get("seo_url") or "").lstrip("/")
-    url = f"https://www.freelancer.com/projects/{seo_url}" if seo_url else "https://www.freelancer.com"
-    return {
-        "external_id": str(p.get("id")),
-        "title": title,
-        "description": desc,
-        "url": url,
-        "budget_min": min_b,
-        "budget_max": max_b,
-        "currency": ccy,
-        "source": "freelancer",
-        "affiliate": True,
-    }
+    url = _make_url(p)
 
-def fetch(query: str = None, country_codes: List[str] = None, limit: int = 50) -> List[Dict]:
-    params = dict(DEFAULT_PARAMS)
-    params["limit"] = limit
-    if query:
-        params["query"] = query
-    # country filter optional. Freelancer supports location filters via advanced params;
-    # here we keep it simple for compatibility.
+    # budget
+    b = p.get("budget") or {}
+    # NOTE: in some responses 'currency' sits under 'currency' or 'budget' -> 'currency'
+    ccy = None
+    if isinstance(b.get("currency"), dict):
+        ccy = b["currency"].get("code")
+    if not ccy and isinstance(p.get("currency"), dict):
+        ccy = p["currency"].get("code")
+    ccy = (ccy or "").upper() or None
+
+    min_amt = _safe_num(b.get("minimum"))
+    max_amt = _safe_num(b.get("maximum"))
+
+    out = {
+        "source": "freelancer",
+        "title": title.strip(),
+        "description": desc.strip(),
+        "original_url": url,
+        "budget_min": min_amt,
+        "budget_max": max_amt,
+        "original_currency": ccy,
+        "currency_symbol": _ccy_symbol(ccy),
+    }
+    # convenience aliases used by runner
+    out["currency_display"] = out["currency_symbol"] if out["currency_symbol"] else (ccy or "USD")
+    out["currency"] = ccy  # keep for legacy code paths
+
+    return out
+
+def _build_params(keywords_query: Optional[str]) -> Dict:
+    # Restrict to fixed+hourly; order by latest; basic fields
+    params = {
+        "full_description": False,
+        "job_details": False,
+        "limit": 30,               # small page for freshness
+        "offset": 0,
+        "sort_field": "time_submitted",
+        "sort_direction": "desc",
+    }
+    if keywords_query:
+        params["query"] = keywords_query  # comma-separated string
+    return params
+
+def fetch(keywords_query: Optional[str] = None) -> List[Dict]:
+    params = _build_params(keywords_query)
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (FreelancerFeedBot)"
+    }
+    items: List[Dict] = []
     try:
-        r = requests.get(API, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        r.raise_for_status()
-        data = r.json() or {}
-        projects = (data.get("result") or {}).get("projects") or []
-        return [_item_from_project(p) for p in projects]
+        with httpx.Client(timeout=12.0) as cli:
+            r = cli.get(FREELANCER_SEARCH_URL, params=params, headers=headers)
+            r.raise_for_status()
+            data = r.json()
     except Exception:
-        return []
+        return items
+
+    projects = (data.get("result") or {}).get("projects") or []
+    for p in projects:
+        try:
+            it = _normalize_project(p)
+            # annotate match if we have a query list (split by comma)
+            if keywords_query:
+                hay = f"{it.get('title','').lower()}\n{it.get('description','').lower()}"
+                for kw in [k.strip().lower() for k in keywords_query.split(",") if k.strip()]:
+                    if kw and kw in hay:
+                        it["matched_keyword"] = kw
+                        break
+            items.append(it)
+        except Exception:
+            continue
+    return items
