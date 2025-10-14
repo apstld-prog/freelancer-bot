@@ -127,6 +127,9 @@ def prepare_display(item: Dict, rates: Dict) -> Dict:
     for fld in ("budget_min", "budget_max"):
         val = out.get(fld)
         out[fld + "_usd"] = to_usd(val, code, rates)
+    # ✅ Preserve matched keyword so it appears in Telegram
+    if "matched_keyword" in item:
+        out["matched_keyword"] = item["matched_keyword"]
     return out
 
 def wrap_freelancer(url: str) -> str:
