@@ -50,10 +50,22 @@ def _fetch_all_users() -> List[int]:
     log.info("[users] receivers: %s", len(out))
     return out
 
-def _fetch_user_keywords(user_id: int) -> List[str]:
+def _fetch_user_keywords(telegram_id: int) -> List[str]:
+    """Fetch keywords using the app's internal user.id (NOT the telegram_id)."""
     try:
-        return [k for k in (_list_keywords(user_id) or []) if k and k.strip()]
-    except Exception:
+        with _get_session() as s:
+            row = s.execute(
+                _sql_text('SELECT id FROM "user" WHERE telegram_id=:tid'),
+                {"tid": telegram_id}
+            ).fetchone()
+            if not row:
+                return []
+            uid = int(row[0])
+        kws = _list_keywords(uid) or []
+        # normalize/trim
+        return [k.strip() for k in kws if k and k.strip()]
+    except Exception as e:
+        log.warning("[kw] could not fetch for %s: %s", telegram_id, e)
         return []
 
 # ---------- compose ----------
@@ -170,11 +182,11 @@ async def amain():
         try:
             users = await asyncio.to_thread(_fetch_all_users)
             if users:
-                for uid in users:
-                    kws = await asyncio.to_thread(_fetch_user_keywords, uid)
+                for tid in users:
+                    kws = await asyncio.to_thread(_fetch_user_keywords, tid)
                     items = await asyncio.to_thread(_worker.run_pipeline, kws)
                     if items:
-                        await _send_items(bot, uid, items, per_user_batch)
+                        await _send_items(bot, tid, items, per_user_batch)
         except Exception as e:
             log.error("[runner] pipeline error: %s", e)
 
