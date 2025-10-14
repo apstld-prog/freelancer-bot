@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# worker_runner.py — per-user fetch, no-duplicates, correct budget display, show matched keyword
+# worker_runner.py — per-user fetch, show matched keyword, prevent duplicates, correct currency display
 
 import os, logging, asyncio
 from typing import Dict, List, Optional, Set
@@ -51,7 +51,6 @@ def _mark_sent(user_id: int, job_key: str) -> None:
         s.commit()
 
 def _cleanup_sent(days: int = 30) -> None:
-    # προαιρετικό καθάρισμα – καλείται αραιά
     with _get_session() as s:
         s.execute(_sql_text(
             "DELETE FROM sent_job WHERE sent_at < (NOW() AT TIME ZONE 'UTC') - INTERVAL ':d days'"
@@ -185,14 +184,12 @@ async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch:
         if sent >= per_user_batch:
             break
 
-        # dedup key από το worker (ίδιο με deduplicate λογική)
         key = it.get("_dedup_key") or it.get("key") or it.get("id") or ""
         if not key:
-            # ασφαλές fallback: τίτλος+url
             key = f"{it.get('source','?')}::{it.get('title','')[:80]}::{it.get('url') or it.get('original_url') or ''}"
 
         if _already_sent(chat_id, key):
-            continue  # ΜΗ στείλεις διπλότυπο
+            continue
 
         try:
             text = _compose_message(it)
@@ -214,7 +211,6 @@ async def amain():
     per_user_batch = int(os.getenv("BATCH_PER_TICK", "5"))
     bot = Bot(token=token)
 
-    # προαιρετικό cleanup 1 φορά στην εκκίνηση
     try:
         _cleanup_sent(days=int(os.getenv("SENT_TTL_DAYS", "30")))
     except Exception:
@@ -227,6 +223,14 @@ async def amain():
                 for uid in users:
                     kws = await asyncio.to_thread(_fetch_user_keywords, uid)
                     items = await asyncio.to_thread(_worker.run_pipeline, kws)
+
+                    # 🔎 Ensure match keyword present
+                    for it in items:
+                        if "matched_keyword" not in it or not it["matched_keyword"]:
+                            mk = _worker.match_keywords(it, kws)
+                            if mk:
+                                it["matched_keyword"] = mk
+
                     if items:
                         await _send_items(bot, uid, items, per_user_batch)
         except Exception as e:
