@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-# worker_runner.py — per-user fetch, show matched keyword, prevent duplicates, correct currency display
+# worker_runner.py — stable version with correct Match, dedup, and currency formatting
 
 import os, logging, asyncio
 from typing import Dict, List, Optional, Set
+import hashlib
 
 import worker as _worker
 from sqlalchemy import text as _sql_text
@@ -21,43 +22,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
 
-# ============ Dedup (per user) ============
-def _ensure_sent_schema():
-    with _get_session() as s:
-        s.execute(_sql_text("""
-            CREATE TABLE IF NOT EXISTS sent_job (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                job_key TEXT NOT NULL,
-                sent_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC'),
-                UNIQUE (user_id, job_key)
-            )
-        """))
-        s.commit()
-
-def _already_sent(user_id: int, job_key: str) -> bool:
-    _ensure_sent_schema()
-    with _get_session() as s:
-        row = s.execute(_sql_text(
-            "SELECT 1 FROM sent_job WHERE user_id=:u AND job_key=:k LIMIT 1"
-        ), {"u": user_id, "k": job_key}).fetchone()
-        return row is not None
-
-def _mark_sent(user_id: int, job_key: str) -> None:
-    with _get_session() as s:
-        s.execute(_sql_text(
-            "INSERT INTO sent_job (user_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING"
-        ), {"u": user_id, "k": job_key})
-        s.commit()
-
-def _cleanup_sent(days: int = 30) -> None:
-    with _get_session() as s:
-        s.execute(_sql_text(
-            "DELETE FROM sent_job WHERE sent_at < (NOW() AT TIME ZONE 'UTC') - INTERVAL ':d days'"
-        ).bindparams(d=days))
-        s.commit()
-
-# ============ Users / Keywords ============
+# ---------- Users ----------
 def _fetch_all_users() -> List[int]:
     ids: Set[int] = set()
     with _get_session() as s:
@@ -70,8 +35,8 @@ def _fetch_all_users() -> List[int]:
                   AND COALESCE(is_active,true)=true
             """)).fetchall()
             ids.update(int(r[0]) for r in rows if r[0] is not None)
-        except Exception as e:
-            log.info("[users] skip 'user': %s", e)
+        except Exception:
+            pass
         try:
             rows = s.execute(_sql_text("""
                 SELECT DISTINCT telegram_id
@@ -80,11 +45,9 @@ def _fetch_all_users() -> List[int]:
                   AND COALESCE(is_blocked,false)=false
             """)).fetchall()
             ids.update(int(r[0]) for r in rows if r[0] is not None)
-        except Exception as e:
-            log.info("[users] skip 'users': %s", e)
-    out = sorted(list(ids))
-    log.info("[users] receivers: %s", len(out))
-    return out
+        except Exception:
+            pass
+    return sorted(list(ids))
 
 def _fetch_user_keywords(user_id: int) -> List[str]:
     try:
@@ -92,7 +55,7 @@ def _fetch_user_keywords(user_id: int) -> List[str]:
     except Exception:
         return []
 
-# ============ Message compose ============
+# ---------- Message Compose ----------
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
@@ -151,11 +114,8 @@ def _build_keyboard(links: Dict[str, Optional[str]]):
     if _job_kb is not None:
         try:
             return _job_kb(links["original"], links["proposal"], links["affiliate"])
-        except TypeError:
-            try:
-                return _job_kb(links)
-            except Exception:
-                pass
+        except Exception:
+            pass
     row1 = [
         InlineKeyboardButton("📝 Proposal", url=links["proposal"] or links["original"] or ""),
         InlineKeyboardButton("🔗 Original", url=links["original"] or ""),
@@ -177,32 +137,35 @@ def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
             pass
     return {"original": original, "proposal": proposal, "affiliate": affiliate}
 
-# ============ Send (with dedup) ============
+# ---------- Send with simple dedup ----------
+_sent_cache = set()
+
 async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
     sent = 0
     for it in items:
         if sent >= per_user_batch:
             break
 
-        key = it.get("_dedup_key") or it.get("key") or it.get("id") or ""
-        if not key:
-            key = f"{it.get('source','?')}::{it.get('title','')[:80]}::{it.get('url') or it.get('original_url') or ''}"
-
-        if _already_sent(chat_id, key):
+        # lightweight dedup (same title+url hash)
+        key = f"{it.get('source','')}::{it.get('title','')[:80]}::{it.get('url') or it.get('original_url') or ''}"
+        key_hash = hashlib.sha1(key.encode()).hexdigest()
+        cache_key = f"{chat_id}:{key_hash}"
+        if cache_key in _sent_cache:
             continue
+        _sent_cache.add(cache_key)
 
         try:
             text = _compose_message(it)
             kb = _build_keyboard(_resolve_links(it))
-            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+            await bot.send_message(chat_id=chat_id, text=text,
+                                   parse_mode=ParseMode.HTML,
                                    reply_markup=kb, disable_web_page_preview=False)
-            _mark_sent(chat_id, key)
             sent += 1
             await asyncio.sleep(0.35)
         except Exception as e:
             log.warning("send_message failed for %s: %s", chat_id, e)
 
-# ============ Main loop ============
+# ---------- Main loop ----------
 async def amain():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
     if not token:
@@ -211,31 +174,21 @@ async def amain():
     per_user_batch = int(os.getenv("BATCH_PER_TICK", "5"))
     bot = Bot(token=token)
 
-    try:
-        _cleanup_sent(days=int(os.getenv("SENT_TTL_DAYS", "30")))
-    except Exception:
-        pass
-
     while True:
         try:
             users = await asyncio.to_thread(_fetch_all_users)
-            if users:
-                for uid in users:
-                    kws = await asyncio.to_thread(_fetch_user_keywords, uid)
-                    items = await asyncio.to_thread(_worker.run_pipeline, kws)
-
-                    # 🔎 Ensure match keyword present
-                    for it in items:
-                        if "matched_keyword" not in it or not it["matched_keyword"]:
-                            mk = _worker.match_keywords(it, kws)
-                            if mk:
-                                it["matched_keyword"] = mk
-
-                    if items:
-                        await _send_items(bot, uid, items, per_user_batch)
+            for uid in users:
+                kws = await asyncio.to_thread(_fetch_user_keywords, uid)
+                items = await asyncio.to_thread(_worker.run_pipeline, kws)
+                # ✅ Ensure match keyword always appears
+                for it in items:
+                    mk = _worker.match_keywords(it, kws)
+                    if mk:
+                        it["matched_keyword"] = mk
+                if items:
+                    await _send_items(bot, uid, items, per_user_batch)
         except Exception as e:
-            log.error("[runner] pipeline error: %s", e)
-
+            log.error("[runner] error: %s", e)
         await asyncio.sleep(interval)
 
 if __name__ == "__main__":
