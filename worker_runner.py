@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Set
 import worker as _worker
 from sqlalchemy import text as _sql_text
 from db import get_session as _get_session
+from db_keywords import list_keywords as _list_keywords
 
 try:
     from ui_keyboards import job_action_kb as _job_kb
@@ -122,31 +123,28 @@ def _compose_message(it: Dict) -> str:
     currency = (it.get("currency") or "").upper()
     usd_min, usd_max = it.get("budget_min_usd"), it.get("budget_max_usd")
     budget_str = ""
-    # Build original currency string
     if currency:
         if budget_min is not None and budget_max is not None:
             orig = f"{budget_min}–{budget_max} {currency}"
             usd = None
             if usd_min is not None and usd_max is not None:
-                usd = f"$${usd_min}–{usd_max}"
+                usd = f"${usd_min}–${usd_max}"
             elif usd_min is not None:
-                usd = f"$$from {usd_min}"
+                usd = f"from ${usd_min}"
             elif usd_max is not None:
-                usd = f"$$up to {usd_max}"
-            budget_str = f"{orig} " + (f"(≈ {usd})" if usd else "")
+                usd = f"up to ${usd_max}"
+            budget_str = orig + (f" (≈ {usd})" if usd else "")
         elif budget_min is not None:
             orig = f"from {budget_min} {currency}"
-            budget_str = orig + (f" (≈ $$ {usd_min})" if usd_min is not None else "")
+            budget_str = orig + (f" (≈ ${usd_min})" if usd_min is not None else "")
         elif budget_max is not None:
             orig = f"up to {budget_max} {currency}"
-            budget_str = orig + (f" (≈ $$ {usd_max})" if usd_max is not None else "")
-    # Lines
+            budget_str = orig + (f" (≈ ${usd_max})" if usd_max is not None else "")
     lines = [f"<b>{title}</b>"]
     if budget_str:
         lines.append(f"💰 <i>{budget_str}</i>")
     if desc:
         lines.append(desc)
-    # Keyword
     mk = it.get("matched_keyword") or it.get("match") or it.get("keyword")
     if mk:
         lines.append(f"🔎 <i>Match: {mk}</i>")
@@ -186,6 +184,12 @@ def _build_keyboard(links: Dict[str, Optional[str]]):
 
 # ---------- users ----------
 def _fetch_all_users() -> List[int]:
+
+def _fetch_user_keywords(user_id: int) -> list:
+    try:
+        return [k for k in (_list_keywords(user_id) or []) if k and k.strip()]
+    except Exception:
+        return []
     ids: Set[int] = set()
     with _get_session() as s:
         try:
@@ -279,11 +283,13 @@ async def amain():
 
     while True:
         try:
-            items = await asyncio.to_thread(_worker.run_pipeline, [])
             users = await asyncio.to_thread(_fetch_all_users)
-            if items and users:
+            if users:
                 for uid in users:
-                    await _send_items(bot, uid, items, per_user_batch)
+                    kws = await asyncio.to_thread(_fetch_user_keywords, uid)
+                    items = await asyncio.to_thread(_worker.run_pipeline, kws)
+                    if items:
+                        await _send_items(bot, uid, items, per_user_batch)
             else:
                 if not items:
                     log.info("[pipeline] no items this tick")

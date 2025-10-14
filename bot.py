@@ -340,7 +340,23 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(HELP_EN + help_footer(STATS_WINDOW_HOURS),
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
-        await q.message.reply_text("Saved list: (demo)"); await q.answer(); return
+        try:
+            from db_saved import ensure_saved_schema, list_saved_jobs_by_user
+            ensure_saved_schema()
+            uid = update.effective_user.id
+            rows = list_saved_jobs_by_user(uid, limit=10)
+            if not rows:
+                await q.message.reply_text("Saved list: (empty)")
+            else:
+                lines = ["Saved jobs:"]
+                for r in rows:
+                    t = (r.get("title") or "").strip() or "(no title)"
+                    u = r.get("url") or ""
+                    lines.append(f"• {t}\n{u}" if u else f"• {t}")
+                await q.message.reply_text("\n\n".join(lines))
+        except Exception:
+            await q.message.reply_text("Saved list: (unavailable)")
+        await q.answer(); return
     if data == "act:contact":
         await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.")
         await q.answer(); return
