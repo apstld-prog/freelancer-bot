@@ -243,7 +243,6 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Log a synthetic event so /feedstatus has data
     try:
         ensure_feed_events_schema()
-        # Log a minimal row (no JSON payload) to avoid any driver/JSON issues
         record_event('freelancer')
         log.info("selftest: feed_events row recorded for 'freelancer'")
     except Exception as e:
@@ -341,19 +340,40 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
         try:
-            from db_saved import ensure_saved_schema, list_saved_jobs_by_user
-            ensure_saved_schema()
+            # Direct DB hotfix (no external module)
+            from sqlalchemy import text as _t
+            from db import get_session as _gs
+
+            # Ensure table exists (safe no-op)
+            with _gs() as s:
+                s.execute(_t("""
+                    CREATE TABLE IF NOT EXISTS saved_job (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        title TEXT NOT NULL,
+                        url TEXT,
+                        description TEXT,
+                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                    )
+                """))
+                s.commit()
+
             uid = update.effective_user.id
-            rows = list_saved_jobs_by_user(uid, limit=10)
+            with _gs() as s:
+                rows = s.execute(
+                    _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
+                    {"u": uid}
+                ).fetchall()
+
             if not rows:
                 await q.message.reply_text("Saved list: (empty)")
             else:
                 lines = ["Saved jobs:"]
-                for r in rows:
-                    t = (r.get("title") or "").strip() or "(no title)"
-                    u = r.get("url") or ""
+                for t, u in rows:
+                    t = (t or '').strip() or '(no title)'
+                    u = (u or '').strip()
                     lines.append(f"• {t}\n{u}" if u else f"• {t}")
-                await q.message.reply_text("\n\n".join(lines))
+                await q.message.reply_text('\n\n'.join(lines))
         except Exception:
             await q.message.reply_text("Saved list: (unavailable)")
         await q.answer(); return
@@ -424,7 +444,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         original_url = ""
 
-    # Extract a title from the first bold line (e.g., <b>Title</b>...)
+    # Extract a title from the first bold line
     title = ""
     try:
         import re as _re
@@ -433,7 +453,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if m:
             title = m.group(1).strip()
         if not title:
-            # fallback to first line truncated
             title = (text_html.splitlines()[0] if text_html else "")[:200]
     except Exception:
         title = "Saved job"
@@ -442,19 +461,29 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "job:save":
         try:
-            # Lazy import here to avoid circulars
-            from db_saved import ensure_saved_schema, add_saved_job
-            ensure_saved_schema()
-            add_saved_job(user_id=user_id, title=title, url=original_url or "", description="")
+            from sqlalchemy import text as _t
+            from db import get_session as _gs
+            with _gs() as s:
+                s.execute(_t("""
+                    CREATE TABLE IF NOT EXISTS saved_job (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        title TEXT NOT NULL,
+                        url TEXT,
+                        description TEXT,
+                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                    )
+                """))
+                s.execute(_t(
+                    "INSERT INTO saved_job (user_id,title,url,description) VALUES (:u,:t,:uurl,:d)"
+                ), {"u": user_id, "t": title, "uurl": original_url or "", "d": ""})
+                s.commit()
         except Exception:
-            # If DB insert fails, at least answer gracefully
             pass
-        # Remove the message (silent)
         try:
             if msg:
                 await msg.delete()
         except Exception:
-            # As a fallback, remove buttons
             try:
                 await msg.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -462,7 +491,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.answer()
 
     if data == "job:delete":
-        # Just delete the message silently
         try:
             if msg:
                 await msg.delete()
@@ -474,17 +502,9 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.answer()
 
     await q.answer()
-    if q.data == "job:delete": await q.message.reply_text("Deleted 🗑"); return await q.answer()
-    await q.answer()
 
 # ---------- Router (continuous admin-user chat) ----------
 async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Non-command messages:
-    - If ADMIN is paired → send to that paired USER.
-    - Else if USER is paired → forward to their ADMIN.
-    - Else (first contact) → forward to all admins.
-    """
     if not update.message or not update.message.text or update.message.text.startswith("/"):
         return
 
@@ -492,7 +512,6 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
     sender_id = update.effective_user.id
     app = context.application
 
-    # 1) ADMIN sending while paired -> deliver to the paired user
     if is_admin_user(sender_id):
         paired_user = get_paired_user(app, sender_id)
         if paired_user:
@@ -500,9 +519,8 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.send_message(chat_id=paired_user, text=text_msg)
             except Exception:
                 pass
-            return  # do not echo back to admin
+            return
 
-    # 2) USER paired -> forward to their assigned admin
     paired_admin = get_paired_admin(app, sender_id)
     if paired_admin:
         try:
@@ -513,7 +531,6 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
             pass
         return
 
-    # 3) First contact -> forward to all admins
     for aid in all_admin_ids():
         try:
             await context.bot.send_message(

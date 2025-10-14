@@ -76,10 +76,11 @@ def _compose_message(it: Dict) -> str:
     budget_min, budget_max = it.get("budget_min"), it.get("budget_max")
     usd_min, usd_max = it.get("budget_min_usd"), it.get("budget_max_usd")
 
-    def _fmt(v):  # keep one decimal like before
+    def _fmt(v):
         try:
             f = float(v)
-            return f"{f:.1f}".rstrip("0").rstrip(".")
+            s = f"{f:.1f}"
+            return s.rstrip("0").rstrip(".")
         except Exception:
             return str(v)
 

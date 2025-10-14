@@ -91,8 +91,7 @@ _SYMBOL_TO_CODE = {
 }
 
 def _pick_non_usd(*cands: str) -> Optional[str]:
-    """Return first non-empty; if both USD and non-USD present, prefer non-USD."""
-    cleaned = [c.strip().upper() for c in cands if c and str(c).strip()]
+    cleaned = [str(c).strip().upper() for c in cands if c and str(c).strip()]
     non_usd = [c for c in cleaned if c != "USD"]
     return (non_usd[0] if non_usd else (cleaned[0] if cleaned else None))
 
