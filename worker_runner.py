@@ -111,6 +111,7 @@ def _mark_sent(user_id: int, job_key: str):
         s.commit()
 
 # ---------- compose + keyboard ----------
+
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
@@ -118,22 +119,40 @@ def _compose_message(it: Dict) -> str:
         desc = desc[:700] + "…"
     src = it.get("source", "freelancer")
     budget_min, budget_max = it.get("budget_min"), it.get("budget_max")
-    currency = it.get("currency") or ""
+    currency = (it.get("currency") or "").upper()
+    usd_min, usd_max = it.get("budget_min_usd"), it.get("budget_max_usd")
     budget_str = ""
-    if budget_min is not None or budget_max is not None:
+    # Build original currency string
+    if currency:
         if budget_min is not None and budget_max is not None:
-            budget_str = f"{budget_min}–{budget_max} {currency}"
+            orig = f"{budget_min}–{budget_max} {currency}"
+            usd = None
+            if usd_min is not None and usd_max is not None:
+                usd = f"$${usd_min}–{usd_max}"
+            elif usd_min is not None:
+                usd = f"$$from {usd_min}"
+            elif usd_max is not None:
+                usd = f"$$up to {usd_max}"
+            budget_str = f"{orig} " + (f"(≈ {usd})" if usd else "")
         elif budget_min is not None:
-            budget_str = f"from {budget_min} {currency}"
+            orig = f"from {budget_min} {currency}"
+            budget_str = orig + (f" (≈ $$ {usd_min})" if usd_min is not None else "")
         elif budget_max is not None:
-            budget_str = f"up to {budget_max} {currency}"
+            orig = f"up to {budget_max} {currency}"
+            budget_str = orig + (f" (≈ $$ {usd_max})" if usd_max is not None else "")
+    # Lines
     lines = [f"<b>{title}</b>"]
     if budget_str:
         lines.append(f"💰 <i>{budget_str}</i>")
     if desc:
         lines.append(desc)
+    # Keyword
+    mk = it.get("matched_keyword") or it.get("match") or it.get("keyword")
+    if mk:
+        lines.append(f"🔎 <i>Match: {mk}</i>")
     lines.append(f"🏷️ <i>{src}</i>")
-    return "\n".join(lines)
+    return "
+".join(lines)
 
 def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
     original = it.get("original_url") or it.get("url") or ""
