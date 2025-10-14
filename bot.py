@@ -358,6 +358,28 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS title TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
+                # Ensure user_id can hold large Telegram IDs
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN user_id TYPE BIGINT USING user_id::BIGINT"))
+                except Exception:
+                    pass
+                # Avoid duplicate saves for same user/title/url
+                try:
+                    s.execute(_t("CREATE UNIQUE INDEX IF NOT EXISTS saved_job_uniq ON saved_job(user_id, title, url)"))
+                except Exception:
+                    pass
+
+                # Ensure user_id can hold large Telegram IDs
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN user_id TYPE BIGINT USING user_id::BIGINT"))
+                except Exception:
+                    pass
+                # Avoid duplicate saves for same user/title/url
+                try:
+                    s.execute(_t("CREATE UNIQUE INDEX IF NOT EXISTS saved_job_uniq ON saved_job(user_id, title, url)"))
+                except Exception:
+                    pass
+
 
                 s.commit()
 
@@ -483,6 +505,17 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS title TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
+                # Ensure user_id can hold large Telegram IDs
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN user_id TYPE BIGINT USING user_id::BIGINT"))
+                except Exception:
+                    pass
+                # Avoid duplicate saves for same user/title/url
+                try:
+                    s.execute(_t("CREATE UNIQUE INDEX IF NOT EXISTS saved_job_uniq ON saved_job(user_id, title, url)"))
+                except Exception:
+                    pass
+
 
                 # Avoid duplicates per user/title/url combo
                 exists = s.execute(_t(
