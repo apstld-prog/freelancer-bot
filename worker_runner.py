@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# worker_runner.py — per-user fetch, force keyword match display, DB dedup, correct budget formatting
+# worker_runner.py — per-user fetch, correct budget display (original + USD), show matched keyword
+# + DB-backed anti-duplicate so the same job isn't sent twice per user
 
 import os, logging, asyncio, hashlib
 from typing import Dict, List, Optional, Set
@@ -9,6 +10,11 @@ from sqlalchemy import text as _sql_text
 from db import get_session as _get_session
 from db_keywords import list_keywords as _list_keywords
 
+try:
+    from ui_keyboards import job_action_kb as _job_kb
+except Exception:
+    _job_kb = None
+
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
 
@@ -16,7 +22,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
 
-# ============ DB: sent dedup ============
+# ---------- anti-duplicate (per user) ----------
 def _ensure_sent_schema():
     with _get_session() as s:
         s.execute(_sql_text("""
@@ -30,22 +36,32 @@ def _ensure_sent_schema():
         """))
         s.commit()
 
-def _already_sent(user_id: int, job_key: str) -> bool:
+def _job_key(it: Dict) -> str:
+    """
+    Σταθερό κλειδί: προτιμά URL· αν δεν υπάρχει, βασίζεται σε source+title.
+    Χρησιμοποιούμε SHA1 για μικρό σταθερό string.
+    """
+    base = (it.get("url") or it.get("original_url") or "").strip()
+    if not base:
+        base = f"{it.get('source','')}::{(it.get('title') or '')[:160]}"
+    return hashlib.sha1(base.encode("utf-8", "ignore")).hexdigest()
+
+def _already_sent(user_id: int, key: str) -> bool:
     _ensure_sent_schema()
     with _get_session() as s:
         row = s.execute(_sql_text(
             "SELECT 1 FROM sent_job WHERE user_id=:u AND job_key=:k LIMIT 1"
-        ), {"u": user_id, "k": job_key}).fetchone()
+        ), {"u": user_id, "k": key}).fetchone()
         return row is not None
 
-def _mark_sent(user_id: int, job_key: str) -> None:
+def _mark_sent(user_id: int, key: str) -> None:
     with _get_session() as s:
         s.execute(_sql_text(
             "INSERT INTO sent_job (user_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING"
-        ), {"u": user_id, "k": job_key})
+        ), {"u": user_id, "k": key})
         s.commit()
 
-# ============ Users / Keywords ============
+# ---------- users ----------
 def _fetch_all_users() -> List[int]:
     ids: Set[int] = set()
     with _get_session() as s:
@@ -74,28 +90,25 @@ def _fetch_all_users() -> List[int]:
     log.info("[users] receivers: %s", len(out))
     return out
 
-def _fetch_user_keywords(user_id: int) -> List[str]:
+def _fetch_user_keywords(telegram_id: int) -> List[str]:
+    """Fetch keywords using the app's internal user.id (NOT the telegram_id)."""
     try:
-        return [k for k in (_list_keywords(user_id) or []) if k and k.strip()]
-    except Exception:
+        with _get_session() as s:
+            row = s.execute(
+                _sql_text('SELECT id FROM "user" WHERE telegram_id=:tid'),
+                {"tid": telegram_id}
+            ).fetchone()
+            if not row:
+                return []
+            uid = int(row[0])
+        kws = _list_keywords(uid) or []
+        # normalize/trim
+        return [k.strip() for k in kws if k and k.strip()]
+    except Exception as e:
+        log.warning("[kw] could not fetch for %s: %s", telegram_id, e)
         return []
 
-def _find_match_keyword(it: Dict, kws: List[str]) -> Optional[str]:
-    """Return the ORIGINAL keyword (exact casing as stored) that matches item (case-insensitive)."""
-    if not kws:
-        return None
-    title = (it.get("title") or "").lower()
-    desc = (it.get("description") or "").lower()
-    hay = f"{title}\n{desc}"
-    for kw in kws:
-        k = (kw or "").strip()
-        if not k:
-            continue
-        if k.lower() in hay:
-            return k  # return as originally stored
-    return None
-
-# ============ Message compose ============
+# ---------- compose ----------
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
@@ -151,20 +164,23 @@ def _compose_message(it: Dict) -> str:
     return "\n".join(lines)
 
 def _build_keyboard(links: Dict[str, Optional[str]]):
-    # Αν έχεις custom ui_keyboards.job_action_kb θα χρησιμοποιηθεί· αλλιώς default
-    try:
-        from ui_keyboards import job_action_kb as _job_kb
-        return _job_kb(links["original"], links["proposal"], links["affiliate"])
-    except Exception:
-        row1 = [
-            InlineKeyboardButton("📝 Proposal", url=links["proposal"] or links["original"] or ""),
-            InlineKeyboardButton("🔗 Original", url=links["original"] or ""),
-        ]
-        row2 = [
-            InlineKeyboardButton("⭐ Save", callback_data="job:save"),
-            InlineKeyboardButton("🗑️ Delete", callback_data="job:delete"),
-        ]
-        return InlineKeyboardMarkup([row1, row2])
+    if _job_kb is not None:
+        try:
+            return _job_kb(links["original"], links["proposal"], links["affiliate"])
+        except TypeError:
+            try:
+                return _job_kb(links)
+            except Exception:
+                pass
+    row1 = [
+        InlineKeyboardButton("📝 Proposal", url=links["proposal"] or links["original"] or ""),
+        InlineKeyboardButton("🔗 Original", url=links["original"] or ""),
+    ]
+    row2 = [
+        InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+        InlineKeyboardButton("🗑️ Delete", callback_data="job:delete"),
+    ]
+    return InlineKeyboardMarkup([row1, row2])
 
 def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
     original = it.get("original_url") or it.get("url") or ""
@@ -177,39 +193,28 @@ def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
             pass
     return {"original": original, "proposal": proposal, "affiliate": affiliate}
 
-# ============ Send (DB dedup) ============
+# ---------- send (with DB de-dup per user) ----------
 async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
     sent = 0
     for it in items:
         if sent >= per_user_batch:
             break
-
-        # Σταθερό κλειδί: προτιμά URL, αλλιώς source+title
-        base_key = f"{it.get('url') or it.get('original_url') or ''}"
-        if not base_key:
-            base_key = f"{it.get('source','')}::{it.get('title','')[:160]}"
-        job_key = hashlib.sha1(base_key.encode("utf-8", "ignore")).hexdigest()
-
+        # compute job_key & skip if already sent to this user
+        job_key = _job_key(it)
         if _already_sent(chat_id, job_key):
             continue
-
         try:
             text = _compose_message(it)
             kb = _build_keyboard(_resolve_links(it))
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb,
-                disable_web_page_preview=False
-            )
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+                                   reply_markup=kb, disable_web_page_preview=False)
             _mark_sent(chat_id, job_key)
             sent += 1
             await asyncio.sleep(0.35)
         except Exception as e:
             log.warning("send_message failed for %s: %s", chat_id, e)
 
-# ============ Main loop ============
+# ---------- main loop ----------
 async def amain():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
     if not token:
@@ -222,19 +227,11 @@ async def amain():
         try:
             users = await asyncio.to_thread(_fetch_all_users)
             if users:
-                for uid in users:
-                    kws = await asyncio.to_thread(_fetch_user_keywords, uid)
+                for tid in users:
+                    kws = await asyncio.to_thread(_fetch_user_keywords, tid)
                     items = await asyncio.to_thread(_worker.run_pipeline, kws)
-
-                    # 🔎 Εγγυημένα βάζουμε το matched_keyword (όπως το έχει γράψει ο χρήστης)
-                    for it in items:
-                        if not it.get("matched_keyword"):
-                            mk = _find_match_keyword(it, kws)
-                            if mk:
-                                it["matched_keyword"] = mk
-
                     if items:
-                        await _send_items(bot, uid, items, per_user_batch)
+                        await _send_items(bot, tid, items, per_user_batch)
         except Exception as e:
             log.error("[runner] pipeline error: %s", e)
 
