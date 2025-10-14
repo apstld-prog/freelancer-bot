@@ -358,6 +358,20 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS title TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
+                # Ensure optional job_id column exists and is nullable
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS job_id TEXT"))
+                except Exception:
+                    pass
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN job_id DROP NOT NULL"))
+                except Exception:
+                    pass
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN job_id DROP DEFAULT"))
+                except Exception:
+                    pass
+
                 # Ensure user_id can hold large Telegram IDs
                 try:
                     s.execute(_t("ALTER TABLE saved_job ALTER COLUMN user_id TYPE BIGINT USING user_id::BIGINT"))
@@ -505,6 +519,20 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS title TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS url TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
+                # Ensure optional job_id column exists and is nullable
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS job_id TEXT"))
+                except Exception:
+                    pass
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN job_id DROP NOT NULL"))
+                except Exception:
+                    pass
+                try:
+                    s.execute(_t("ALTER TABLE saved_job ALTER COLUMN job_id DROP DEFAULT"))
+                except Exception:
+                    pass
+
                 # Ensure user_id can hold large Telegram IDs
                 try:
                     s.execute(_t("ALTER TABLE saved_job ALTER COLUMN user_id TYPE BIGINT USING user_id::BIGINT"))
