@@ -1,6 +1,6 @@
-# worker.py — fetch, per-user filter, annotate match, dedup, currency prepare
+# worker.py — fetch, per-user filter, annotate match, dedup, currency prepare (robust INR/EUR/£/₹, etc.)
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from config import (
     PLATFORMS, SKYWALKER_RSS, FX_USD_RATES,
     AFFILIATE_PREFIX_FREELANCER
@@ -84,28 +84,46 @@ def deduplicate(items: List[Dict]) -> List[Dict]:
             keep[k] = it
     return list(keep.values())
 
-# ---------- currency helpers ----------
-_SYMBOL_TO_CODE = {"€":"EUR","£":"GBP","₹":"INR","₽":"RUB","₺":"TRY","¥":"JPY","₩":"KRW","₪":"ILS","R$":"BRL","A$":"AUD","C$":"CAD"}
+# ---------- currency detection ----------
+_SYMBOL_TO_CODE = {
+    "€":"EUR","£":"GBP","₹":"INR","₽":"RUB","₺":"TRY","¥":"JPY","₩":"KRW","₪":"ILS",
+    "R$":"BRL","A$":"AUD","C$":"CAD","$":"USD"  # generic $ as last resort
+}
 
-def _detect_ccy_code(item: Dict) -> Optional[str]:
-    # try multiple fields from different sources
-    c = item.get("currency") or item.get("budget_currency") or item.get("original_currency") or item.get("currency_code")
-    if c: return str(c).upper()
-    sym = item.get("currency_display") or item.get("currency_symbol")
-    if sym and sym in _SYMBOL_TO_CODE: return _SYMBOL_TO_CODE[sym]
-    # last resort: guess by URL if it's clearly INR (Freelancer India sometimes only shows ₹)
-    if (item.get("source") or "").lower() == "freelancer" and (item.get("title") or "").lower().find("₹") >= 0:
-        return "INR"
-    return None
+def _detect_currency(item: Dict) -> Tuple[str, str]:
+    """
+    Returns (code, display). Display prefers symbol if provided, otherwise code.
+    Extremely defensive: checks multiple fields + scans text for common symbols (₹ € £).
+    """
+    # 1) obvious fields from parsers
+    code = (item.get("currency_code") or item.get("currency") or item.get("budget_currency") or item.get("original_currency") or "")
+    code = str(code).upper().strip() if code else ""
+    sym  = (item.get("currency_symbol") or item.get("currency_display") or "").strip()
+
+    # 2) infer from symbol mapping
+    if not code and sym:
+        code = _SYMBOL_TO_CODE.get(sym, "")
+
+    # 3) scan title/desc for symbols if still unknown
+    if not code:
+        txt = f"{item.get('title') or ''}\n{item.get('description') or ''}"
+        for s,c in [("₹","INR"),("€","EUR"),("£","GBP")]:
+            if s in txt:
+                code = c; sym = s; break
+
+    if not code:
+        code = "USD"
+    display = sym or code
+    return code, display
 
 def prepare_display(item: Dict, rates: Dict) -> Dict:
     out = dict(item)
-    ccy = _detect_ccy_code(out) or "USD"  # default USD if unknown
-    # also expose a display currency (symbol if present)
-    out["currency_display"] = out.get("currency_display") or out.get("budget_currency") or out.get("original_currency") or out.get("currency") or ccy
+    code, display = _detect_currency(out)
+    out["currency_code_detected"] = code
+    out["currency_display"] = out.get("currency_display") or display
     for fld in ("budget_min", "budget_max"):
         val = out.get(fld)
-        out[fld + "_usd"] = to_usd(val, ccy, rates)
+        out[fld + "_usd"] = to_usd(val, code, rates)
     return out
 
 def wrap_freelancer(url: str) -> str:

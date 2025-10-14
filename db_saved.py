@@ -1,6 +1,6 @@
-# db_saved.py — simple saved jobs table (works with get_session)
+# db_saved.py — simple saved jobs table
 
-from typing import List, Dict, Optional
+from typing import List, Dict
 from sqlalchemy import text
 from db import get_session
 
@@ -35,7 +35,4 @@ def list_saved_jobs_by_user(user_id: int, limit: int = 10) -> List[Dict]:
             text("SELECT title, url, description, saved_at FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT :n"),
             {"u": user_id, "n": int(limit)}
         ).fetchall()
-    out: List[Dict] = []
-    for r in rows:
-        out.append({"title": r[0], "url": r[1], "description": r[2], "saved_at": r[3]})
-    return out
+    return [{"title": r[0], "url": r[1], "description": r[2], "saved_at": r[3]} for r in rows]

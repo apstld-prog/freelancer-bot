@@ -64,33 +64,38 @@ def _compose_message(it: Dict) -> str:
         desc = desc[:700] + "…"
     src = it.get("source", "freelancer")
 
-    # Prefer a human display currency (keep symbol), fallback to code
     display_ccy = (
         it.get("currency_display")
         or it.get("budget_currency")
         or it.get("original_currency")
+        or it.get("currency_code_detected")
         or it.get("currency")
-        or ""
+        or "USD"
     )
-    # Numeric amounts (original)
+
     budget_min, budget_max = it.get("budget_min"), it.get("budget_max")
-    # USD conversions computed by worker.prepare_display
     usd_min, usd_max = it.get("budget_min_usd"), it.get("budget_max_usd")
 
-    budget_parts = []
+    def _fmt(v):  # keep one decimal like before
+        try:
+            f = float(v)
+            return f"{f:.1f}".rstrip("0").rstrip(".")
+        except Exception:
+            return str(v)
+
+    budget_str = ""
     if budget_min is not None and budget_max is not None:
-        orig = f"{budget_min}–{budget_max} {display_ccy}".strip()
+        orig = f"{_fmt(budget_min)}–{_fmt(budget_max)} {display_ccy}".strip()
         if usd_min is not None and usd_max is not None:
-            budget_parts.append(f"{orig} (≈ ${usd_min}–${usd_max})")
+            budget_str = f"{orig} (≈ ${_fmt(usd_min)}–${_fmt(usd_max)})"
         else:
-            budget_parts.append(orig)
+            budget_str = orig
     elif budget_min is not None:
-        orig = f"from {budget_min} {display_ccy}".strip()
-        budget_parts.append(orig + (f" (≈ ${usd_min})" if usd_min is not None else ""))
+        orig = f"from {_fmt(budget_min)} {display_ccy}".strip()
+        budget_str = orig + (f" (≈ ${_fmt(usd_min)})" if usd_min is not None else "")
     elif budget_max is not None:
-        orig = f"up to {budget_max} {display_ccy}".strip()
-        budget_parts.append(orig + (f" (≈ ${usd_max})" if usd_max is not None else ""))
-    budget_str = budget_parts[0] if budget_parts else ""
+        orig = f"up to {_fmt(budget_max)} {display_ccy}".strip()
+        budget_str = orig + (f" (≈ ${_fmt(usd_max)})" if usd_max is not None else "")
 
     lines = [f"<b>{title}</b>"]
     if budget_str:
