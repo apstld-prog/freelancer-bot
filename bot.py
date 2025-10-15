@@ -340,14 +340,13 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
         try:
-            # Direct DB access (safe no-op CREATE for new schema)
             from sqlalchemy import text as _t
             from db import get_session as _gs
 
-            uid = update.effective_user.id
+            tid = update.effective_user.id  # telegram id of requester
 
-            # 1) Try NEW schema first: saved_job(user_id, title, url, description, saved_at)
             rows = []
+            # Try NEW schema first
             try:
                 with _gs() as s:
                     s.execute(_t("""
@@ -364,26 +363,35 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with _gs() as s:
                     rows = s.execute(
                         _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
-                        {"u": uid}
+                        {"u": tid}
                     ).fetchall()
             except Exception:
                 rows = []
 
-            # 2) If NEW schema returned nothing, try LEGACY: saved_job(user_id, job_id) JOIN job_event
+            # If empty, try LEGACY schema using internal user.id (not telegram_id)
             if not rows:
+                internal_id = None
                 try:
                     with _gs() as s:
-                        rows = s.execute(_t("""
-                            SELECT COALESCE(je.title, '(no title)') AS title,
-                                   COALESCE(je.original_url, '') AS url
-                            FROM saved_job sj
-                            LEFT JOIN job_event je ON je.id = sj.job_id
-                            WHERE sj.user_id = :u
-                            ORDER BY sj.saved_at DESC
-                            LIMIT 10
-                        """), {"u": uid}).fetchall()
+                        r = s.execute(_t('SELECT id FROM "user" WHERE telegram_id=:tid LIMIT 1'), {"tid": tid}).fetchone()
+                        internal_id = r[0] if r else None
                 except Exception:
-                    rows = []
+                    internal_id = None
+
+                if internal_id is not None:
+                    try:
+                        with _gs() as s:
+                            rows = s.execute(_t("""
+                                SELECT COALESCE(je.title, '(no title)') AS title,
+                                       COALESCE(je.original_url, '') AS url
+                                FROM saved_job sj
+                                LEFT JOIN job_event je ON je.id = sj.job_id
+                                WHERE sj.user_id = :u
+                                ORDER BY sj.saved_at DESC
+                                LIMIT 10
+                            """), {"u": internal_id}).fetchall()
+                    except Exception:
+                        rows = []
 
             if not rows:
                 await q.message.reply_text("Saved list: (empty)")
@@ -392,8 +400,8 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for t, u in rows:
                     t = (t or '').strip() or '(no title)'
                     u = (u or '').strip()
-                    lines.append(f"• {t}\n{u}" if u else f"• {t}")
-                await q.message.reply_text('\n\n'.join(lines))
+                    lines.append(f"• {t}\\n{u}" if u else f"• {t}")
+                await q.message.reply_text('\\n\\n'.join(lines))
         except Exception:
             await q.message.reply_text("Saved list: (unavailable)")
         await q.answer(); return
@@ -530,8 +538,14 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
                                 )
                             """))
-                            s.execute(_t("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
-                                      {"u": user_id, "j": jid})
+                            internal_id = None
+                            try:
+                                r = s.execute(_t('SELECT id FROM "user" WHERE telegram_id=:tid LIMIT 1'), {"tid": user_id}).fetchone()
+                                internal_id = r[0] if r else None
+                            except Exception:
+                                internal_id = None
+                            if internal_id is not None:
+                                s.execute(_t("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"), {"u": internal_id, "j": jid})
                             s.commit()
                     except Exception:
                         pass
