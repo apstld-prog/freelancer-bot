@@ -431,12 +431,11 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = (q.data or "").strip()
     msg = q.message
 
-    # Extract Original URL from the inline keyboard (2nd button on 1st row)
+    # Extract Original URL from the inline keyboard (prefer 2nd button "Original")
     original_url = ""
     try:
-        if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
-            first_row = msg.reply_markup.inline_keyboard[0]
-            # Prefer "Original" button (usually index 1)
+        if msg and msg.reply_markup and getattr(msg.reply_markup, "inline_keyboard", None):
+            first_row = msg.reply_markup.inline_keyboard[0] if msg.reply_markup.inline_keyboard else []
             if len(first_row) > 1 and getattr(first_row[1], "url", None):
                 original_url = first_row[1].url or ""
             elif len(first_row) >= 1 and getattr(first_row[0], "url", None):
@@ -444,10 +443,9 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         original_url = ""
 
-    # Extract a title from the first bold line
+    # Extract title from the first bold or the first line
     title = ""
     try:
-        import re as _re
         text_html = msg.text_html or msg.text or ""
         m = _re.search(r"<b>([^<]+)</b>", text_html)
         if m:
@@ -458,37 +456,77 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title = "Saved job"
 
     user_id = update.effective_user.id
-    
-        if data == "job:save":
+
+    if data == "job:save":
         try:
-        from sqlalchemy import text as _t
-        from db import get_session as _gs
-        with _gs() as s:
-        s.execute(_t("""
-        CREATE TABLE IF NOT EXISTS saved_job (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT NOT NULL,
-        title TEXT NOT NULL,
-        url TEXT,
-        description TEXT,
-        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-        )
-        """))
-        s.execute(_t(
-        "INSERT INTO saved_job (user_id,title,url,description) VALUES (:u,:t,:uurl,:d)"
-        ), {"u": user_id, "t": title, "uurl": original_url or "", "d": ""})
-        s.commit()
+            from sqlalchemy import text as _t
+            from db import get_session as _gs
+            with _gs() as s:
+                # Try "new" schema first: saved_job(user_id,title,url,description,...)
+                try:
+                    s.execute(_t("""
+                        CREATE TABLE IF NOT EXISTS saved_job (
+                            id SERIAL PRIMARY KEY,
+                            user_id BIGINT NOT NULL,
+                            title TEXT NOT NULL,
+                            url TEXT,
+                            description TEXT,
+                            saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                        )
+                    """))
+                    s.execute(_t(
+                        "INSERT INTO saved_job (user_id,title,url,description) VALUES (:u,:t,:uurl,:d)"
+                    ), {"u": user_id, "t": title, "uurl": original_url or "", "d": ""})
+                    s.commit()
+                except Exception:
+                    # Fallback to legacy schema: saved_job(user_id,job_id) joined to job_event
+                    try:
+                        s.execute(_t("""
+                            CREATE TABLE IF NOT EXISTS job_event (
+                                id SERIAL PRIMARY KEY,
+                                platform TEXT,
+                                title TEXT,
+                                description TEXT,
+                                affiliate_url TEXT,
+                                original_url TEXT,
+                                budget_amount NUMERIC,
+                                budget_currency TEXT,
+                                budget_usd NUMERIC,
+                                created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                            )
+                        """))
+                        res = s.execute(_t("""
+                            INSERT INTO job_event (platform, title, description, affiliate_url, original_url)
+                            VALUES (:p, :t, :d, :a, :o) RETURNING id
+                        """), {"p": "freelancer", "t": title, "d": "", "a": original_url or "", "o": original_url or ""})
+                        row = res.fetchone()
+                        jid = row[0] if row else None
+                        if jid is not None:
+                            s.execute(_t("""
+                                CREATE TABLE IF NOT EXISTS saved_job (
+                                    id SERIAL PRIMARY KEY,
+                                    user_id BIGINT NOT NULL,
+                                    job_id BIGINT NOT NULL,
+                                    saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                                )
+                            """))
+                            s.execute(_t("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
+                                      {"u": user_id, "j": jid})
+                            s.commit()
+                    except Exception:
+                        pass
         except Exception:
-        pass
+            pass
         try:
-        if msg:
-        await msg.delete()
+            if msg:
+                await msg.delete()
         except Exception:
-        try:
-        await msg.edit_reply_markup(reply_markup=None)
-        except Exception:
-        pass
+            try:
+                await msg.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
         return await q.answer()
+
     if data == "job:delete":
         try:
             if msg:
@@ -502,7 +540,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await q.answer()
 
-# ---------- Router (continuous admin-user chat) ----------
 async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text or update.message.text.startswith("/"):
         return
