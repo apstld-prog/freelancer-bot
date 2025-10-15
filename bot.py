@@ -6,7 +6,7 @@ from typing import List, Set, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import (CommandHandler, CommandHandler, 
+from telegram.ext import (CommandHandler, 
     ApplicationBuilder, Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters,
 )
@@ -340,58 +340,30 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
         try:
+            # Direct DB hotfix (no external module)
             from sqlalchemy import text as _t
             from db import get_session as _gs
 
-            tid = update.effective_user.id  # telegram id of requester
+            # Ensure table exists (safe no-op)
+            with _gs() as s:
+                s.execute(_t("""
+                    CREATE TABLE IF NOT EXISTS saved_job (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        title TEXT NOT NULL,
+                        url TEXT,
+                        description TEXT,
+                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                    )
+                """))
+                s.commit()
 
-            rows = []
-            # Try NEW schema first
-            try:
-                with _gs() as s:
-                    s.execute(_t("""
-                        CREATE TABLE IF NOT EXISTS saved_job (
-                            id SERIAL PRIMARY KEY,
-                            user_id BIGINT NOT NULL,
-                            title TEXT NOT NULL,
-                            url TEXT,
-                            description TEXT,
-                            saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-                        )
-                    """))
-                    s.commit()
-                with _gs() as s:
-                    rows = s.execute(
-                        _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
-                        {"u": tid}
-                    ).fetchall()
-            except Exception:
-                rows = []
-
-            # If empty, try LEGACY schema using internal user.id (not telegram_id)
-            if not rows:
-                internal_id = None
-                try:
-                    with _gs() as s:
-                        r = s.execute(_t('SELECT id FROM "user" WHERE telegram_id=:tid LIMIT 1'), {"tid": tid}).fetchone()
-                        internal_id = r[0] if r else None
-                except Exception:
-                    internal_id = None
-
-                if internal_id is not None:
-                    try:
-                        with _gs() as s:
-                            rows = s.execute(_t("""
-                                SELECT COALESCE(je.title, '(no title)') AS title,
-                                       COALESCE(je.original_url, '') AS url
-                                FROM saved_job sj
-                                LEFT JOIN job_event je ON je.id = sj.job_id
-                                WHERE sj.user_id = :u
-                                ORDER BY sj.saved_at DESC
-                                LIMIT 10
-                            """), {"u": internal_id}).fetchall()
-                    except Exception:
-                        rows = []
+            uid = update.effective_user.id
+            with _gs() as s:
+                rows = s.execute(
+                    _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
+                    {"u": uid}
+                ).fetchall()
 
             if not rows:
                 await q.message.reply_text("Saved list: (empty)")
@@ -400,8 +372,8 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for t, u in rows:
                     t = (t or '').strip() or '(no title)'
                     u = (u or '').strip()
-                    lines.append(f"• {t}\\n{u}" if u else f"• {t}")
-                await q.message.reply_text('\\n\\n'.join(lines))
+                    lines.append(f"• {t}\n{u}" if u else f"• {t}")
+                await q.message.reply_text('\n\n'.join(lines))
         except Exception:
             await q.message.reply_text("Saved list: (unavailable)")
         await q.answer(); return
@@ -538,14 +510,8 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
                                 )
                             """))
-                            internal_id = None
-                            try:
-                                r = s.execute(_t('SELECT id FROM "user" WHERE telegram_id=:tid LIMIT 1'), {"tid": user_id}).fetchone()
-                                internal_id = r[0] if r else None
-                            except Exception:
-                                internal_id = None
-                            if internal_id is not None:
-                                s.execute(_t("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"), {"u": internal_id, "j": jid})
+                            s.execute(_t("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
+                                      {"u": user_id, "j": jid})
                             s.commit()
                     except Exception:
                         pass
@@ -649,16 +615,13 @@ async def _ensure_fallback_running(app: Application):
 
 async def debugme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        uid = (update.effective_user.id if update and update.effective_user else None)
-        chat_id = (update.effective_chat.id if update and update.effective_chat else None)
+        uid = update.effective_user.id if update and update.effective_user else None
+        chat_id = update.effective_chat.id if update and update.effective_chat else None
+
         from sqlalchemy import text as _t
         from db import get_session as _gs
 
         internal_id = None
-        saved_new = []
-        saved_old = []
-
-        # internal user id
         try:
             with _gs() as s:
                 r = s.execute(_t('SELECT id FROM "user" WHERE telegram_id=:tid LIMIT 1'), {"tid": uid}).fetchone()
@@ -666,47 +629,57 @@ async def debugme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             internal_id = None
 
-        # new schema
+        # New schema
+        rows_new = []
         try:
             with _gs() as s:
-                saved_new = s.execute(_t('SELECT title, COALESCE(url, \'\') FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 3'), {"u": uid}).fetchall()
+                rows_new = s.execute(_t("SELECT title, COALESCE(url,'') FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 3"), {"u": uid}).fetchall()
         except Exception:
-            saved_new = []
+            rows_new = []
 
-        # legacy schema (needs internal id)
+        # Legacy schema
+        rows_old = []
         try:
             if internal_id is not None:
                 with _gs() as s:
-                    saved_old = s.execute(_t('SELECT COALESCE(je.title, \'(no title)\') AS title, COALESCE(je.original_url, \'\') AS url FROM saved_job sj LEFT JOIN job_event je ON je.id = sj.job_id WHERE sj.user_id = :u ORDER BY sj.saved_at DESC LIMIT 3'), {"u": internal_id}).fetchall()
+                    rows_old = s.execute(_t("""
+                        SELECT COALESCE(je.title,'(no title)') AS title,
+                               COALESCE(je.original_url,'') AS url
+                        FROM saved_job sj
+                        LEFT JOIN job_event je ON je.id = sj.job_id
+                        WHERE sj.user_id = :u
+                        ORDER BY sj.saved_at DESC
+                        LIMIT 3
+                    """), {"u": internal_id}).fetchall()
         except Exception:
-            saved_old = []
+            rows_old = []
 
-        lines = []
-        lines.append(f"Telegram ID: {uid}")
-        lines.append(f"Chat ID: {chat_id}")
-        lines.append(f"Internal user.id: {internal_id}")
-        lines.append("— New schema (saved_job user_id=telegram_id):")
-        if saved_new:
-            for i,(t,u) in enumerate(saved_new,1):
+        lines = [
+            f"Telegram ID: {uid}",
+            f"Chat ID: {chat_id}",
+            f"Internal user.id: {internal_id}",
+            "— New schema (user_id=telegram_id):"
+        ]
+        if rows_new:
+            for i,(t,u) in enumerate(rows_new,1):
                 t = (t or '').strip() or '(no title)'
                 u = (u or '').strip()
                 lines.append(f"{i}. {t}\n{u}")
         else:
             lines.append("(none)")
-        lines.append("— Legacy schema (saved_job -> job_event user_id=internal id):")
-        if saved_old:
-            for i,(t,u) in enumerate(saved_old,1):
+        lines.append("— Legacy schema (user_id=internal id):")
+        if rows_old:
+            for i,(t,u) in enumerate(rows_old,1):
                 t = (t or '').strip() or '(no title)'
                 u = (u or '').strip()
                 lines.append(f"{i}. {t}\n{u}")
         else:
             lines.append("(none)")
 
-        text = "\n".join(lines)
-        await update.effective_chat.send_message(text)
+        await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
     except Exception as e:
         try:
-            await update.effective_chat.send_message(f"/debugme error: {e}")
+            await context.bot.send_message(chat_id=chat_id, text=f"/debugme error: {e}")
         except Exception:
             pass
 
@@ -763,10 +736,3 @@ def build_application() -> Application:
             app.bot_data["start_fallback_on_first_update"] = True
             log.info("Scheduler: fallback loop (will start on first update)")
     return app
-
-
-# Fallback registration for /debugme
-try:
-    app.add_handler(CommandHandler('debugme', debugme_cmd))
-except Exception:
-    pass
