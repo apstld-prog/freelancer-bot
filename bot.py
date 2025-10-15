@@ -56,7 +56,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🔍 Search Jobs", callback_data="act:search")],
         [InlineKeyboardButton("💾 Saved Jobs", callback_data="act:saved")],
-        [InlineKeyboardButton(ℹ️ Help", callback_data="act:help")],
+        [InlineKeyboardButton("ℹ️ Help", callback_data="act:help")],
         [InlineKeyboardButton("🧩 Debug", callback_data="act:debug")],
     ]
     await update.message.reply_text(
