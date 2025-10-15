@@ -459,25 +459,71 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    if data == "job:save":
+    
+if data == "job:save":
         try:
             from sqlalchemy import text as _t
             from db import get_session as _gs
             with _gs() as s:
-                s.execute(_t("""
-                    CREATE TABLE IF NOT EXISTS saved_job (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        title TEXT NOT NULL,
-                        url TEXT,
-                        description TEXT,
-                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-                    )
-                """))
-                s.execute(_t(
-                    "INSERT INTO saved_job (user_id,title,url,description) VALUES (:u,:t,:uurl,:d)"
-                ), {"u": user_id, "t": title, "uurl": original_url or "", "d": ""})
-                s.commit()
+                # Try new schema
+                try:
+                    s.execute(_t("""
+                        CREATE TABLE IF NOT EXISTS saved_job (
+                            id SERIAL PRIMARY KEY,
+                            user_id BIGINT NOT NULL,
+                            title TEXT NOT NULL,
+                            url TEXT,
+                            description TEXT,
+                            saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                        )
+                    """))
+                    s.execute(_t(
+                        "INSERT INTO saved_job (user_id,title,url,description) VALUES (:u,:t,:uurl,:d)"
+                    ), {"u": user_id, "t": title, "uurl": original_url or "", "d": ""})
+                    s.commit()
+                except Exception:
+                    # Fallback to legacy schema: saved_job(user_id, job_id) + job_event row
+                    try:
+                        s.execute(_t("""
+                            CREATE TABLE IF NOT EXISTS job_event (
+                                id SERIAL PRIMARY KEY,
+                                platform TEXT,
+                                title TEXT,
+                                description TEXT,
+                                affiliate_url TEXT,
+                                original_url TEXT,
+                                budget_amount NUMERIC,
+                                budget_currency TEXT,
+                                budget_usd NUMERIC,
+                                created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                            )
+                        """))
+                        res = s.execute(_t("""
+                            INSERT INTO job_event (platform, title, description, affiliate_url, original_url)
+                            VALUES (:p, :t, :d, :a, :o) RETURNING id
+                        """), {
+                            "p": "freelancer",
+                            "t": title,
+                            "d": "",
+                            "a": original_url or "",
+                            "o": original_url or ""
+                        })
+                        row = res.fetchone()
+                        jid = row[0] if row else None
+                        if jid is not None:
+                            s.execute(_t("""
+                                CREATE TABLE IF NOT EXISTS saved_job (
+                                    id SERIAL PRIMARY KEY,
+                                    user_id BIGINT NOT NULL,
+                                    job_id BIGINT NOT NULL,
+                                    saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                                )
+                            """))
+                            s.execute(_t("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
+                                      {"u": user_id, "j": jid})
+                            s.commit()
+                    except Exception:
+                        pass
         except Exception:
             pass
         try:
@@ -489,6 +535,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         return await q.answer()
+
 
     if data == "job:delete":
         try:

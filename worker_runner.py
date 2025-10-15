@@ -63,7 +63,7 @@ def _fetch_all_users() -> List[int]:
         try:
             rows = s.execute(_sql_text("""
                 SELECT DISTINCT telegram_id
-                FROM "user"
+                FROM users
                 WHERE telegram_id IS NOT NULL
                   AND COALESCE(is_blocked,false)=false
             """)).fetchall()
