@@ -1,14 +1,17 @@
 from datetime import datetime, timezone
-from ui_keyboards import job_action_kb
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-def _relative_now_english(dt: datetime) -> str:
-    now = datetime.now(timezone.utc)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    diff = int((now - dt).total_seconds())
-    if diff < 60:
+# --- helper για relative time σε αγγλική μορφή ---
+def format_relative_time(ts):
+    if not ts:
         return "just now"
-    mins = diff // 60
+    now = datetime.now(timezone.utc)
+    diff = now - ts
+
+    secs = int(diff.total_seconds())
+    if secs < 60:
+        return "just now"
+    mins = secs // 60
     if mins < 60:
         return f"{mins} minute{'s' if mins != 1 else ''} ago"
     hours = mins // 60
@@ -17,9 +20,29 @@ def _relative_now_english(dt: datetime) -> str:
     days = hours // 24
     return f"{days} day{'s' if days != 1 else ''} ago"
 
-async def send_job_card(bot, chat_id: int, text: str, proposal_url: str, original_url: str):
-    # Add relative posting time under job description
-    posted_line = f"\n🕓 Posted {_relative_now_english(datetime.now(timezone.utc))}"
-    text_with_time = f"{text.rstrip()}{posted_line}"
-    kb = job_action_kb(proposal_url, original_url)
-    await bot.send_message(chat_id=chat_id, text=text_with_time, parse_mode="HTML", reply_markup=kb)
+
+# --- κύρια συνάρτηση αποστολής αγγελίας ---
+async def send_job_card(bot, chat_id, title, description, url, created_at=None):
+    """
+    Στέλνει κάρτα αγγελίας στον χρήστη με inline κουμπιά και σχετική ώρα.
+    """
+    # Υπολογισμός σχετικής ώρας (π.χ. "Posted 2 hours ago")
+    rel_time = format_relative_time(created_at)
+    posted_line = f"\n🕓 Posted {rel_time}"
+
+    text = f"*{title.strip()}*\n\n{description.strip() if description else ''}{posted_line}"
+
+    kb = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("🔗 View Job", url=url),
+            InlineKeyboardButton("💾 Save", callback_data="job:save"),
+        ]]
+    )
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+        reply_markup=kb,
+    )
