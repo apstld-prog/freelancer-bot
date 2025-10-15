@@ -6,7 +6,7 @@ from typing import List, Set, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import (CommandHandler, 
+from telegram.ext import (CommandHandler, CommandHandler, 
     ApplicationBuilder, Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters,
 )
@@ -763,3 +763,10 @@ def build_application() -> Application:
             app.bot_data["start_fallback_on_first_update"] = True
             log.info("Scheduler: fallback loop (will start on first update)")
     return app
+
+
+# Fallback registration for /debugme
+try:
+    app.add_handler(CommandHandler('debugme', debugme_cmd))
+except Exception:
+    pass
