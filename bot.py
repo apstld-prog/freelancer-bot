@@ -1,5 +1,22 @@
+import logging
 from telegram import Update
-from telegram.ext import ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes
+)
+from sqlalchemy import text as _t
+from db import get_session as _gs, get_or_create_user_by_tid
+from handlers_start import start_cmd
+from handlers_help import help_cmd
+from handlers_settings import feedstatus_cmd, selftest_cmd
+
+log = logging.getLogger(__name__)
+
+# ========================================================================
+# === JOB ACTION CALLBACK (Save / Delete buttons) ========================
+# ========================================================================
 
 async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -39,9 +56,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # === SAVE BUTTON ===
     if data == "job:save":
         try:
-            from sqlalchemy import text as _t
-            from db import get_session as _gs, get_or_create_user_by_tid
-
             with _gs() as s:
                 # ✅ Ensure user exists in DB and get internal PK (not Telegram ID)
                 uobj = get_or_create_user_by_tid(s, update.effective_user.id)
@@ -110,3 +124,27 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.answer()
 
     await q.answer()
+
+# ========================================================================
+# === BUILD APPLICATION ==================================================
+# ========================================================================
+
+def build_application():
+    """
+    Factory function required by server.py to initialize the Telegram bot.
+    """
+    import os
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # === COMMAND HANDLERS (unchanged) ===
+    application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
+    application.add_handler(CommandHandler("selftest", selftest_cmd))
+    application.add_handler(CommandHandler("help", help_cmd))
+
+    # === BUTTON HANDLERS ===
+    application.add_handler(CallbackQueryHandler(job_action_cb))
+
+    return application
