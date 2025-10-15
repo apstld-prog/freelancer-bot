@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 # keep these imports exactly as in your project
-from handlers_start import start_cmd
+from handlers_start import start_cmd          # ← Μείνε με το ΔΙΚΟ ΣΟΥ original
 from handlers_help import help_cmd
 from handlers_settings import feedstatus_cmd, selftest_cmd
 
@@ -134,7 +134,7 @@ def build_application():
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("start", start_cmd))         # ← παραμένει όπως στο backup
     application.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
     application.add_handler(CommandHandler("selftest", selftest_cmd))
     application.add_handler(CommandHandler("help", help_cmd))

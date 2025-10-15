@@ -22,7 +22,7 @@ def _relative_english(ts: datetime | None) -> str:
 async def send_job_card(bot, chat_id: int, title: str, description: str, url: str, created_at: datetime | None = None):
     """
     Sends a job card exactly like before, plus a relative posted-time line under the description.
-    NOTE: If your worker doesn't pass created_at, it will show 'just now' at send time.
+    NOTE: If your worker doesn't pass created_at, it will show 'just now'.
     """
     posted_line = f"\n🕓 Posted {_relative_english(created_at)}"
     text = f"*{title.strip()}*\n\n{(description or '').strip()}{posted_line}"
