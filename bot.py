@@ -340,30 +340,50 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
         try:
-            # Direct DB hotfix (no external module)
+            # Direct DB access (safe no-op CREATE for new schema)
             from sqlalchemy import text as _t
             from db import get_session as _gs
 
-            # Ensure table exists (safe no-op)
-            with _gs() as s:
-                s.execute(_t("""
-                    CREATE TABLE IF NOT EXISTS saved_job (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        title TEXT NOT NULL,
-                        url TEXT,
-                        description TEXT,
-                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-                    )
-                """))
-                s.commit()
-
             uid = update.effective_user.id
-            with _gs() as s:
-                rows = s.execute(
-                    _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
-                    {"u": uid}
-                ).fetchall()
+
+            # 1) Try NEW schema first: saved_job(user_id, title, url, description, saved_at)
+            rows = []
+            try:
+                with _gs() as s:
+                    s.execute(_t("""
+                        CREATE TABLE IF NOT EXISTS saved_job (
+                            id SERIAL PRIMARY KEY,
+                            user_id BIGINT NOT NULL,
+                            title TEXT NOT NULL,
+                            url TEXT,
+                            description TEXT,
+                            saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                        )
+                    """))
+                    s.commit()
+                with _gs() as s:
+                    rows = s.execute(
+                        _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
+                        {"u": uid}
+                    ).fetchall()
+            except Exception:
+                rows = []
+
+            # 2) If NEW schema returned nothing, try LEGACY: saved_job(user_id, job_id) JOIN job_event
+            if not rows:
+                try:
+                    with _gs() as s:
+                        rows = s.execute(_t("""
+                            SELECT COALESCE(je.title, '(no title)') AS title,
+                                   COALESCE(je.original_url, '') AS url
+                            FROM saved_job sj
+                            LEFT JOIN job_event je ON je.id = sj.job_id
+                            WHERE sj.user_id = :u
+                            ORDER BY sj.saved_at DESC
+                            LIMIT 10
+                        """), {"u": uid}).fetchall()
+                except Exception:
+                    rows = []
 
             if not rows:
                 await q.message.reply_text("Saved list: (empty)")
