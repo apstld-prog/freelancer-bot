@@ -1,17 +1,16 @@
 from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-# --- helper για relative time σε αγγλική μορφή ---
-def format_relative_time(ts):
+def _relative_english(ts: datetime | None) -> str:
     if not ts:
         return "just now"
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
-    diff = now - ts
-
-    secs = int(diff.total_seconds())
-    if secs < 60:
+    diff = int((now - ts).total_seconds())
+    if diff < 60:
         return "just now"
-    mins = secs // 60
+    mins = diff // 60
     if mins < 60:
         return f"{mins} minute{'s' if mins != 1 else ''} ago"
     hours = mins // 60
@@ -20,24 +19,18 @@ def format_relative_time(ts):
     days = hours // 24
     return f"{days} day{'s' if days != 1 else ''} ago"
 
-
-# --- κύρια συνάρτηση αποστολής αγγελίας ---
-async def send_job_card(bot, chat_id, title, description, url, created_at=None):
+async def send_job_card(bot, chat_id: int, title: str, description: str, url: str, created_at: datetime | None = None):
     """
-    Στέλνει κάρτα αγγελίας στον χρήστη με inline κουμπιά και σχετική ώρα.
+    Sends a job card exactly like before, plus a relative posted-time line under the description.
+    NOTE: If your worker doesn't pass created_at, it will show 'just now' at send time.
     """
-    # Υπολογισμός σχετικής ώρας (π.χ. "Posted 2 hours ago")
-    rel_time = format_relative_time(created_at)
-    posted_line = f"\n🕓 Posted {rel_time}"
+    posted_line = f"\n🕓 Posted {_relative_english(created_at)}"
+    text = f"*{title.strip()}*\n\n{(description or '').strip()}{posted_line}"
 
-    text = f"*{title.strip()}*\n\n{description.strip() if description else ''}{posted_line}"
-
-    kb = InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("🔗 View Job", url=url),
-            InlineKeyboardButton("💾 Save", callback_data="job:save"),
-        ]]
-    )
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔗 View Job", url=url),
+        InlineKeyboardButton("💾 Save", callback_data="job:save"),
+    ]])
 
     await bot.send_message(
         chat_id=chat_id,

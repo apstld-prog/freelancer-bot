@@ -10,44 +10,39 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Keep existing handlers exactly as in your project
+# keep these imports exactly as in your project
 from handlers_start import start_cmd
 from handlers_help import help_cmd
 from handlers_settings import feedstatus_cmd, selftest_cmd
 
-# DB helpers (unchanged)
 from db import get_session as _gs, get_or_create_user_by_tid
 
 log = logging.getLogger(__name__)
 
 
-# ======================================================================
-# Save/Delete buttons handler (functional fix only, no UI changes)
-# ======================================================================
 async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handles Save/Delete buttons for job cards.
-    Save -> FK-safe insert using INTERNAL user.id, then delete the message.
-    Delete -> delete the message (or clear buttons). No alerts required.
+    Save/Delete buttons on job cards.
+    - Save: FK-safe insert using INTERNAL user.id (from `user` table), then delete the message.
+    - Delete: delete message (or clear buttons). No UI alerts.
     """
     q = update.callback_query
     data = (q.data or "").strip()
     msg = q.message
 
-    # Read original job link (if present) from existing inline keyboard buttons (no UI change)
+    # read original job link from inline keyboard (unchanged UI)
     original_url = ""
     try:
         if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
-            first_row = msg.reply_markup.inline_keyboard[0]
-            # Prefer 2nd button URL if present, else fallback to 1st
-            if len(first_row) > 1 and getattr(first_row[1], "url", None):
-                original_url = first_row[1].url or ""
-            elif len(first_row) >= 1 and getattr(first_row[0], "url", None):
-                original_url = first_row[0].url or ""
+            row = msg.reply_markup.inline_keyboard[0]
+            if len(row) > 1 and getattr(row[1], "url", None):
+                original_url = row[1].url or ""
+            elif len(row) >= 1 and getattr(row[0], "url", None):
+                original_url = row[0].url or ""
     except Exception:
         original_url = ""
 
-    # Derive a title from the card text (first <b>…</b> or first line)
+    # infer a title from text
     title = "Saved job"
     try:
         import re as _re
@@ -62,17 +57,14 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    # ======================
-    # SAVE
-    # ======================
     if data == "job:save":
         try:
             with _gs() as s:
-                # ✅ Ensure user exists and use INTERNAL PK (not Telegram ID)
+                # ✅ ensure user exists and use INTERNAL PK (NOT telegram id)
                 uobj = get_or_create_user_by_tid(s, update.effective_user.id)
-                internal_uid = uobj.id  # <-- this satisfies the FK saved_job.user_id -> user.id
+                internal_uid = uobj.id
 
-                # Be tolerant to various legacy schemas (no UI change)
+                # be tolerant to legacy schemas
                 s.execute(_t("""
                     CREATE TABLE IF NOT EXISTS saved_job (
                         id SERIAL PRIMARY KEY,
@@ -84,7 +76,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS description TEXT"))
                 s.execute(_t("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS created_at TIMESTAMP"))
 
-                # Avoid duplicate saves per user/title/url
+                # avoid duplicates per (user,title,url)
                 exists = s.execute(_t("""
                     SELECT 1 FROM saved_job
                     WHERE user_id=:u AND title=:t AND COALESCE(url,'')=COALESCE(:uurl,'')
@@ -92,7 +84,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """), {"u": internal_uid, "t": title, "uurl": original_url}).scalar()
 
                 if not exists:
-                    # Try insert with created_at; if column default/exists differs, fall back gracefully
                     try:
                         s.execute(_t("""
                             INSERT INTO saved_job (user_id, title, url, description, created_at)
@@ -105,10 +96,9 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         """), {"u": internal_uid, "t": title, "uurl": original_url or "", "d": ""})
                 s.commit()
         except Exception as e:
-            # We avoid user alerts per your spec; keep logs for diagnostics
             log.exception("job:save error: %s", e)
 
-        # Delete the card message (or at least clear buttons)
+        # delete the card (fallback: clear buttons)
         try:
             if msg:
                 await msg.delete()
@@ -119,13 +109,8 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
-
-        # No UI change to alerts; keep as simple callback answer
         return await q.answer()
 
-    # ======================
-    # DELETE
-    # ======================
     if data == "job:delete":
         try:
             if msg:
@@ -139,28 +124,21 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return await q.answer()
 
-    # Default
     await q.answer()
 
 
-# ======================================================================
-# Application factory (required by server.py) — unchanged structure
-# ======================================================================
 def build_application():
     """
-    Factory required by server.py to initialize the Telegram bot.
-    Do not change structure; keep handlers as in original setup.
+    Required by server.py — unchanged structure.
     """
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Commands (unchanged)
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
     application.add_handler(CommandHandler("selftest", selftest_cmd))
     application.add_handler(CommandHandler("help", help_cmd))
 
-    # Buttons (Save/Delete)
     application.add_handler(CallbackQueryHandler(job_action_cb))
 
     return application
