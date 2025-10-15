@@ -6,7 +6,7 @@ from typing import List, Set, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import (CommandHandler, 
+from telegram.ext import (CommandHandler, CommandHandler, 
     ApplicationBuilder, Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters,
 )
@@ -338,45 +338,48 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "act:help":
         await q.message.reply_text(HELP_EN + help_footer(STATS_WINDOW_HOURS),
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
-    if data == "act:saved":
-        try:
-            # Direct DB hotfix (no external module)
-            from sqlalchemy import text as _t
-            from db import get_session as _gs
 
-            # Ensure table exists (safe no-op)
+if data == "act:saved":
+    try:
+        from sqlalchemy import text as _t
+        from db import get_session as _gs
+
+        tid = update.effective_user.id
+        internal_id = None
+        with _gs() as s:
+            r = s.execute(_t('SELECT id FROM "user" WHERE telegram_id=:tid LIMIT 1'), {"tid": tid}).fetchone()
+            internal_id = r[0] if r else None
+
+        rows = []
+        if internal_id is not None:
             with _gs() as s:
-                s.execute(_t("""
-                    CREATE TABLE IF NOT EXISTS saved_job (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        title TEXT NOT NULL,
-                        url TEXT,
-                        description TEXT,
-                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-                    )
-                """))
-                s.commit()
+                rows = s.execute(_t("""
+                    SELECT COALESCE(je.title,'(no title)') AS title,
+                           COALESCE(je.original_url,'')      AS url,
+                           sj.saved_at
+                    FROM saved_job sj
+                    LEFT JOIN job_event je ON je.id = sj.job_id
+                    WHERE sj.user_id = :u
+                    ORDER BY sj.saved_at DESC
+                    LIMIT 10
+                """), {"u": internal_id}).fetchall()
 
-            uid = update.effective_user.id
-            with _gs() as s:
-                rows = s.execute(
-                    _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
-                    {"u": uid}
-                ).fetchall()
+        if not rows:
+            await q.message.reply_text("Saved list: (empty)")
+        else:
+            lines = ["Saved jobs:"]
+            for t,u,_ in rows:
+                t = (t or "").strip() or "(no title)"
+                u = (u or "").strip()
+                lines.append(f"• {t}
+{u}" if u else f"• {t}")
+            await q.message.reply_text("
 
-            if not rows:
-                await q.message.reply_text("Saved list: (empty)")
-            else:
-                lines = ["Saved jobs:"]
-                for t, u in rows:
-                    t = (t or '').strip() or '(no title)'
-                    u = (u or '').strip()
-                    lines.append(f"• {t}\n{u}" if u else f"• {t}")
-                await q.message.reply_text('\n\n'.join(lines))
-        except Exception:
-            await q.message.reply_text("Saved list: (unavailable)")
-        await q.answer(); return
+".join(lines))
+    except Exception:
+        await q.message.reply_text("Saved list: (unavailable)")
+    await q.answer(); return
+
     if data == "act:contact":
         await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.")
         await q.answer(); return
@@ -457,75 +460,62 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    if data == "job:save":
+if data == "job:save":
+    try:
+        from sqlalchemy import text as _t
+        from db import get_session as _gs
+
+        user_tid = update.effective_user.id
+        title = ""
         try:
-            from sqlalchemy import text as _t
-            from db import get_session as _gs
+            text_html = q.message.text_html or q.message.text or ""
+            _m = _re.search(r"<b>([^<]+)</b>", text_html)
+            if _m:
+                title = _m.group(1).strip()
+            if not title:
+                title = (text_html.splitlines()[0] if text_html else "")[:200]
+        except Exception:
+            title = "Saved job"
+
+        original_url = ""
+        try:
+            if q.message and q.message.reply_markup and getattr(q.message.reply_markup, "inline_keyboard", None):
+                first_row = q.message.reply_markup.inline_keyboard[0] if q.message.reply_markup.inline_keyboard else []
+                if len(first_row) > 1 and getattr(first_row[1], "url", None):
+                    original_url = first_row[1].url or ""
+                elif len(first_row) >= 1 and getattr(first_row[0], "url", None):
+                    original_url = first_row[0].url or ""
+        except Exception:
+            original_url = ""
+
+        internal_id = None
+        with _gs() as s:
+            r = s.execute(_t('SELECT id FROM "user" WHERE telegram_id=:tid LIMIT 1'), {"tid": user_tid}).fetchone()
+            internal_id = r[0] if r else None
+
+        if internal_id is not None:
             with _gs() as s:
-                # Try "new" schema first: saved_job(user_id,title,url,description,...)
-                try:
-                    s.execute(_t("""
-                        CREATE TABLE IF NOT EXISTS saved_job (
-                            id SERIAL PRIMARY KEY,
-                            user_id BIGINT NOT NULL,
-                            title TEXT NOT NULL,
-                            url TEXT,
-                            description TEXT,
-                            saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-                        )
-                    """))
-                    s.execute(_t(
-                        "INSERT INTO saved_job (user_id,title,url,description) VALUES (:u,:t,:uurl,:d)"
-                    ), {"u": user_id, "t": title, "uurl": original_url or "", "d": ""})
-                    s.commit()
-                except Exception:
-                    # Fallback to legacy schema: saved_job(user_id,job_id) joined to job_event
-                    try:
-                        s.execute(_t("""
-                            CREATE TABLE IF NOT EXISTS job_event (
-                                id SERIAL PRIMARY KEY,
-                                platform TEXT,
-                                title TEXT,
-                                description TEXT,
-                                affiliate_url TEXT,
-                                original_url TEXT,
-                                budget_amount NUMERIC,
-                                budget_currency TEXT,
-                                budget_usd NUMERIC,
-                                created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-                            )
-                        """))
-                        res = s.execute(_t("""
-                            INSERT INTO job_event (platform, title, description, affiliate_url, original_url)
-                            VALUES (:p, :t, :d, :a, :o) RETURNING id
-                        """), {"p": "freelancer", "t": title, "d": "", "a": original_url or "", "o": original_url or ""})
-                        row = res.fetchone()
-                        jid = row[0] if row else None
-                        if jid is not None:
-                            s.execute(_t("""
-                                CREATE TABLE IF NOT EXISTS saved_job (
-                                    id SERIAL PRIMARY KEY,
-                                    user_id BIGINT NOT NULL,
-                                    job_id BIGINT NOT NULL,
-                                    saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-                                )
-                            """))
-                            s.execute(_t("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
-                                      {"u": user_id, "j": jid})
-                            s.commit()
-                    except Exception:
-                        pass
+                ev = s.execute(_t("""
+                    INSERT INTO job_event (platform, title, description, affiliate_url, original_url)
+                    VALUES (:p, :t, :d, :a, :o)
+                    RETURNING id
+                """), {"p":"freelancer","t":title or "(no title)","d":"","a":original_url or "","o":original_url or ""}).fetchone()
+                jid = ev[0] if ev else None
+                if jid is not None:
+                    s.execute(_t("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"), {"u": internal_id, "j": jid})
+                s.commit()
+    except Exception:
+        pass
+    try:
+        if q.message:
+            await q.message.delete()
+    except Exception:
+        try:
+            await q.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
-        try:
-            if msg:
-                await msg.delete()
-        except Exception:
-            try:
-                await msg.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-        return await q.answer()
+    return await q.answer()
+
 
     if data == "job:delete":
         try:
@@ -615,13 +605,16 @@ async def _ensure_fallback_running(app: Application):
 
 async def debugme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        uid = update.effective_user.id if update and update.effective_user else None
-        chat_id = update.effective_chat.id if update and update.effective_chat else None
-
+        uid = (update.effective_user.id if update and update.effective_user else None)
+        chat_id = (update.effective_chat.id if update and update.effective_chat else None)
         from sqlalchemy import text as _t
         from db import get_session as _gs
 
         internal_id = None
+        saved_new = []
+        saved_old = []
+
+        # internal user id
         try:
             with _gs() as s:
                 r = s.execute(_t('SELECT id FROM "user" WHERE telegram_id=:tid LIMIT 1'), {"tid": uid}).fetchone()
@@ -629,57 +622,47 @@ async def debugme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             internal_id = None
 
-        # New schema
-        rows_new = []
+        # new schema
         try:
             with _gs() as s:
-                rows_new = s.execute(_t("SELECT title, COALESCE(url,'') FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 3"), {"u": uid}).fetchall()
+                saved_new = s.execute(_t('SELECT title, COALESCE(url, \'\') FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 3'), {"u": uid}).fetchall()
         except Exception:
-            rows_new = []
+            saved_new = []
 
-        # Legacy schema
-        rows_old = []
+        # legacy schema (needs internal id)
         try:
             if internal_id is not None:
                 with _gs() as s:
-                    rows_old = s.execute(_t("""
-                        SELECT COALESCE(je.title,'(no title)') AS title,
-                               COALESCE(je.original_url,'') AS url
-                        FROM saved_job sj
-                        LEFT JOIN job_event je ON je.id = sj.job_id
-                        WHERE sj.user_id = :u
-                        ORDER BY sj.saved_at DESC
-                        LIMIT 3
-                    """), {"u": internal_id}).fetchall()
+                    saved_old = s.execute(_t('SELECT COALESCE(je.title, \'(no title)\') AS title, COALESCE(je.original_url, \'\') AS url FROM saved_job sj LEFT JOIN job_event je ON je.id = sj.job_id WHERE sj.user_id = :u ORDER BY sj.saved_at DESC LIMIT 3'), {"u": internal_id}).fetchall()
         except Exception:
-            rows_old = []
+            saved_old = []
 
-        lines = [
-            f"Telegram ID: {uid}",
-            f"Chat ID: {chat_id}",
-            f"Internal user.id: {internal_id}",
-            "— New schema (user_id=telegram_id):"
-        ]
-        if rows_new:
-            for i,(t,u) in enumerate(rows_new,1):
+        lines = []
+        lines.append(f"Telegram ID: {uid}")
+        lines.append(f"Chat ID: {chat_id}")
+        lines.append(f"Internal user.id: {internal_id}")
+        lines.append("— New schema (saved_job user_id=telegram_id):")
+        if saved_new:
+            for i,(t,u) in enumerate(saved_new,1):
                 t = (t or '').strip() or '(no title)'
                 u = (u or '').strip()
                 lines.append(f"{i}. {t}\n{u}")
         else:
             lines.append("(none)")
-        lines.append("— Legacy schema (user_id=internal id):")
-        if rows_old:
-            for i,(t,u) in enumerate(rows_old,1):
+        lines.append("— Legacy schema (saved_job -> job_event user_id=internal id):")
+        if saved_old:
+            for i,(t,u) in enumerate(saved_old,1):
                 t = (t or '').strip() or '(no title)'
                 u = (u or '').strip()
                 lines.append(f"{i}. {t}\n{u}")
         else:
             lines.append("(none)")
 
-        await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        text = "\n".join(lines)
+        await update.effective_chat.send_message(text)
     except Exception as e:
         try:
-            await context.bot.send_message(chat_id=chat_id, text=f"/debugme error: {e}")
+            await update.effective_chat.send_message(f"/debugme error: {e}")
         except Exception:
             pass
 
