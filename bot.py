@@ -1,3 +1,6 @@
+from telegram import Update
+from telegram.ext import ContextTypes
+
 async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles Save/Delete buttons for job cards.
