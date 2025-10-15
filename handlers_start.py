@@ -1,13 +1,18 @@
-
 from telegram import Update
 from telegram.ext import ContextTypes
-from ui_keyboards import main_menu_kb
-from ui_texts import welcome_full, features_block
-from config import ADMIN_IDS, TRIAL_DAYS
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_admin = update.effective_user.id in ADMIN_IDS
-    await update.effective_chat.send_message(
-        welcome_full(trial_days=TRIAL_DAYS), parse_mode="HTML", reply_markup=main_menu_kb(is_admin=is_admin)
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles the /start command for Freelancer Alert Bot.
+    Welcomes the user and provides basic guidance.
+    """
+    user = update.effective_user
+    text = (
+        f"👋 Hello {user.first_name or 'there'}!\n\n"
+        "Welcome to *Freelancer Alert Bot* 🚀\n\n"
+        "This bot sends you fresh freelance job listings that match your keywords.\n"
+        "Use /feedstatus to view your current feed setup.\n"
+        "Use /help for available commands.\n\n"
+        "Happy freelancing! 💼"
     )
-    await update.effective_chat.send_message(features_block(), parse_mode="HTML")
+    await update.message.reply_text(text, parse_mode="Markdown")
