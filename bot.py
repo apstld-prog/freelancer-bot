@@ -635,9 +635,3 @@ def build_application() -> Application:
             app.bot_data["start_fallback_on_first_update"] = True
             log.info("Scheduler: fallback loop (will start on first update)")
     return app
-            # Resolve internal user id for FK (map from telegram_id)
-            uid = update.effective_user.id
-            from db import get_or_create_user_by_tid as _get_user
-            uobj = _get_user(s, uid)
-            db_user_id = uobj.id
-
