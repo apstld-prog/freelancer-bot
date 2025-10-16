@@ -119,20 +119,20 @@ def _compose_message(it: Dict) -> str:
     budget_str = ""
     if budget_min is not None and budget_max is not None:
         orig = f"{_fmt(budget_min)}–{_fmt(budget_max)} {display_ccy}".strip()
-        budget_str = f"{orig} (≈ ${_fmt(usd_min)}–${_fmt(usd_max)})" if (usd_min is not None and usd_max is not None) else orig
+        budget_str = f"{orig} (~${_fmt(usd_min USD)}–${_fmt(usd_max)})" if (usd_min is not None and usd_max is not None) else orig
     elif budget_min is not None:
         orig = f"from {_fmt(budget_min)} {display_ccy}".strip()
-        budget_str = orig + (f" (≈ ${_fmt(usd_min)})" if usd_min is not None else "")
+        budget_str = orig + (f" (~${_fmt(usd_min USD)})" if usd_min is not None else "")
     elif budget_max is not None:
         orig = f"up to {_fmt(budget_max)} {display_ccy}".strip()
-        budget_str = orig + (f" (≈ ${_fmt(usd_max)})" if usd_max is not None else "")
+        budget_str = orig + (f" (~${_fmt(usd_max USD)})" if usd_max is not None else "")
 
     lines = [f"<b>{title}</b>"]
-    if budget_str: lines.append(f"💰 <i>{budget_str}</i>")
+    if budget_str: lines.append(f"💰 <i>Budget: {budget_str}</i>")
     if desc: lines.append(desc)
 
     mk = it.get("matched_keyword") or it.get("match") or it.get("keyword")
-    if mk: lines.append(f"🔎 <i>Match: {mk}</i>")
+    if mk: lines.append(f"🔎 <i>Keyword: {mk}</i>")
 
     lines.append(f"🏷️ <i>{src}</i>")
     return "\n".join(lines)
