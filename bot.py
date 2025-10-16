@@ -33,10 +33,8 @@ logger = logging.getLogger("bot")
 def normalize_db_url(url: str) -> str:
     if not url:
         return url
-    # postgres:// → postgresql://
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
-    # postgresql+psycopg2:// → postgresql://
     if url.startswith("postgresql+psycopg2://"):
         url = "postgresql://" + url[len("postgresql+psycopg2://"):]
     return url
@@ -47,22 +45,24 @@ DB_URL = normalize_db_url(DB_URL_RAW)
 # DATABASE
 # ==========================================================
 def get_connection():
-    # psycopg2 expects plain DSN
     return psycopg2.connect(DB_URL, sslmode="require")
 
 # ==========================================================
-# /start (ΑΠΑΡΑΒΙΑΣΤΟ: ίδια δομή, ίδια κουμπιά, ίδιο κείμενο & emoji)
+# /start
 # ==========================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     tg_id = user.id
     name = user.first_name or "User"
 
-    # ΜΟΝΟ telegram_id (η στήλη first_name δεν υπάρχει στο schema σου)
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute('INSERT INTO "user"(telegram_id) VALUES (%s) ON CONFLICT (telegram_id) DO NOTHING;', (tg_id,))
+        # 🔧 ΔΙΟΡΘΩΣΗ ΕΔΩ: γράφει is_blocked=false
+        cur.execute(
+            'INSERT INTO "user"(telegram_id, is_blocked) VALUES (%s, false) ON CONFLICT (telegram_id) DO NOTHING;',
+            (tg_id,),
+        )
         conn.commit()
     finally:
         try:
@@ -83,7 +83,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ==========================================================
-# SEARCH (κρατάμε όπως είναι — δεν αλλάζουμε UI)
+# SEARCH
 # ==========================================================
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -107,7 +107,6 @@ async def handle_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     jobs = data["result"]["projects"]
 
-    # Απλή αποθήκευση job_event για συσχέτιση με Save
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -130,7 +129,6 @@ async def handle_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ("freelancer", title, desc, link, cur_code, amount),
                 )
             except Exception:
-                # Αν υπάρχει ήδη, προχωράμε
                 pass
 
             keyboard = [[
@@ -149,14 +147,13 @@ async def handle_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 # ==========================================================
-# CALLBACKS: Save / Saved / Help / Delete
+# CALLBACKS
 # ==========================================================
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
     tg_id = q.from_user.id
 
-    # Χρήστης -> internal id
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -171,7 +168,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return await q.message.reply_text("Please use /start first.")
 
-    # SAVE
     if data.startswith("job:save|"):
         job_link = data.split("|", 1)[1]
         try:
@@ -192,7 +188,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         await q.answer("✅ Saved")
-        # Διαγραφή του μηνύματος χωρίς άλλο alert
         try:
             await q.message.delete()
         except Exception:
@@ -202,7 +197,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
-    # DELETE (σιωπηλό)
     if data == "job:delete":
         await q.answer()
         try:
@@ -214,7 +208,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
-    # SAVED LIST
     if data == "act:saved":
         try:
             cur.execute(
@@ -241,14 +234,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             lines = []
             for title, url in rows:
-                # ΣΩΣΤΟ f-string με ρητό newline
                 lines.append(f"• {title}\n{url}" if url else f"• {title}")
             out = "\n\n".join(lines)
             await q.message.reply_text(f"Saved jobs:\n\n{out}")
         await q.answer()
         return
 
-    # HELP (ίδιο μήνυμα)
     if data == "act:help":
         await q.message.reply_text(
             "ℹ️ Use this bot to get live job alerts from Freelancer.com.\n\n"
@@ -263,7 +254,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer("OK")
 
 # ==========================================================
-# APPLICATION
+# APP + FASTAPI
 # ==========================================================
 def build_application():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -273,9 +264,6 @@ def build_application():
     app.add_handler(CallbackQueryHandler(button_callback))
     return app
 
-# ==========================================================
-# FASTAPI
-# ==========================================================
 fastapi_app = FastAPI()
 application = build_application()
 
