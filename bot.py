@@ -1,5 +1,5 @@
 # bot.py — EN-only, add via /addkeyword only, robust keywords, admin panel, selftest
-import os, logging, asyncio
+import os, logging, asyncio, re
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import List, Set, Optional
@@ -321,6 +321,12 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_chat.send_message(f"📣 Broadcast sent to {len(ids)} users.")
 
 # ---------- Callbacks ----------
+def _extract_card_title(text_html: str) -> str:
+    m = re.search(r"<b>([^<]+)</b>", text_html or "", flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return (text_html.splitlines()[0] if text_html else "")[:200] or "Saved job"
+
 async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; data = (q.data or "").strip()
     if data == "act:addkw":
@@ -328,6 +334,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Add keywords with:\n<code>/addkeyword logo, lighting</code>\n"
             "Remove: <code>/delkeyword logo</code> • Clear: <code>/clearkeywords</code>",
             parse_mode=ParseMode.HTML); await q.answer(); return
+
     if data == "act:settings":
         with get_session() as s:
             u = get_or_create_user_by_tid(s, q.from_user.id)
@@ -335,16 +342,17 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
         txt = settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6]))
         await q.message.reply_text(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
+
     if data == "act:help":
         await q.message.reply_text(HELP_EN + help_footer(STATS_WINDOW_HOURS),
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
+
     if data == "act:saved":
         try:
-            # Direct DB hotfix (no external module)
+            # Ensure table & fetch user rows
             from sqlalchemy import text as _t
-            from db import get_session as _gs
+            from db import get_session as _gs, get_or_create_user_by_tid as _get_user
 
-            # Ensure table exists (safe no-op)
             with _gs() as s:
                 s.execute(_t("""
                     CREATE TABLE IF NOT EXISTS saved_job (
@@ -356,54 +364,49 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
                     )
                 """))
-                s.commit()
-
-            uid = update.effective_user.id
-            with _gs() as s:
-                from db import get_or_create_user_by_tid as _get_user
-                uobj = _get_user(s, uid)
-                db_user_id = uobj.id
+                uobj = _get_user(s, q.from_user.id)
                 rows = s.execute(
-                    _t("SELECT title, url FROM saved_job WHERE user_id=:uid_db ORDER BY saved_at DESC LIMIT 10"),
-                    {"uid_db": db_user_id}
+                    _t("SELECT id, title, url, description FROM saved_job WHERE user_id=:uid ORDER BY saved_at DESC LIMIT 30"),
+                    {"uid": uobj.id}
                 ).fetchall()
 
             if not rows:
                 await q.message.reply_text("Saved list: (empty)")
-            else:
-                lines = ["Saved jobs:"]
-                for t, u in rows:
-                    t = (t or '').strip() or '(no title)'
-                    u = (u or '').strip()
-                    lines.append(f"• {t}\n{u}" if u else f"• {t}")
-                await q.message.reply_text('\n\n'.join(lines))
-        except Exception:
-            await q.message.reply_text("Saved list: (unavailable)")
-        await q.answer(); return
+                await q.answer()
+                return
+
+            # Στέλνουμε ΚΑΘΕ saved ως κανονική κάρτα (όπως όταν έρχεται από worker)
             for rid, t, u, d in rows:
-                card_html = (d or '').strip()
+                card_html = (d or "").strip()
                 if not card_html:
-                    title_txt = (t or '').strip() or '(no title)'
+                    # fallback μορφή – απλή κάρτα με τίτλο
+                    title_txt = (t or "").strip() or "(no title)"
                     card_html = f"<b>{title_txt}</b>"
-    
+
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton('📄 Proposal', url=u or ''), InlineKeyboardButton('🔗 Original', url=u or '')],
-                    [InlineKeyboardButton('🗑️ Delete', callback_data=f'saved:del:{rid}')]
+                    [InlineKeyboardButton("📄 Proposal", url=u or ""),
+                     InlineKeyboardButton("🔗 Original", url=u or "")],
+                    [InlineKeyboardButton("🗑️ Delete", callback_data=f"saved:del:{rid}")]
                 ])
-    
                 await q.message.chat.send_message(
                     card_html,
                     parse_mode=ParseMode.HTML,
                     reply_markup=kb,
                     disable_web_page_preview=True
                 )
-    
+
+            await q.answer()
+            return
+        except Exception as e:
+            log.exception("act:saved error: %s", e)
+            await q.message.reply_text("Saved list: (unavailable)")
             await q.answer()
             return
 
     if data == "act:contact":
         await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.")
         await q.answer(); return
+
     if data == "act:admin":
         if not is_admin_user(q.from_user.id):
             await q.answer("Not allowed", show_alert=True); return
@@ -414,6 +417,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<code>/broadcast &lt;text&gt;</code> • <code>/feedstatus</code>",
             parse_mode=ParseMode.HTML
         ); await q.answer(); return
+
     await q.answer()
 
 async def kw_clear_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -450,6 +454,35 @@ async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.answer(f"Granted +{days}d")
     await q.answer()
 
+async def saved_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete from Saved list (invoked by 'saved:del:<id>')."""
+    q = update.callback_query
+    data = (q.data or "")
+    if not data.startswith("saved:del:"):
+        return await q.answer()
+
+    try:
+        rid = int(data.split(":")[2])
+    except Exception:
+        return await q.answer("Invalid id")
+
+    try:
+        from sqlalchemy import text as _t
+        from db import get_session as _gs, get_or_create_user_by_tid as _get_user
+        with _gs() as s:
+            uobj = _get_user(s, q.from_user.id)
+            s.execute(_t("DELETE FROM saved_job WHERE id=:rid AND user_id=:uid"), {"rid": rid, "uid": uobj.id})
+            s.commit()
+        # remove markup from the message so φαίνεται ότι διαγράφηκε
+        try:
+            await q.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await q.answer("Deleted")
+    except Exception as e:
+        log.exception("saved:del error: %s", e)
+        await q.answer("Error", show_alert=True)
+
 async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = (q.data or "").strip()
@@ -460,7 +493,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
             first_row = msg.reply_markup.inline_keyboard[0]
-            # Prefer "Original" button (usually index 1)
             if len(first_row) > 1 and getattr(first_row[1], "url", None):
                 original_url = first_row[1].url or ""
             elif len(first_row) >= 1 and getattr(first_row[0], "url", None):
@@ -468,18 +500,17 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         original_url = ""
 
-    # Extract a title from the first bold line
-    title = ""
+    # Full HTML (όπως ήρθε) για αποθήκευση
+    text_html = ""
     try:
-        import re as _re
-        text_html = msg.text_html or msg.text or ""
-        m = _re.search(r"<b>([^<]+)</b>", text_html)
-        if m:
-            title = m.group(1).strip()
-        if not title:
-            title = (text_html.splitlines()[0] if text_html else "")[:200]
+        text_html = (getattr(msg, "text_html", None) or
+                     getattr(msg, "caption_html", None) or
+                     getattr(msg, "text", None) or
+                     getattr(msg, "caption", None) or "")
     except Exception:
-        title = "Saved job"
+        text_html = ""
+
+    title = _extract_card_title(text_html)
 
     user_id = update.effective_user.id
 
@@ -504,19 +535,16 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db_user_id = uobj.id
                 s.execute(_t(
                     "INSERT INTO saved_job (user_id,title,url,description) VALUES (:uid_db,:t,:uurl,:d)"
-                ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": card_html})
+                ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": text_html})
                 s.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            log.exception("job:save db error: %s", e)
         try:
             if msg:
-                await msg.delete()
-        except Exception:
-            try:
                 await msg.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-        return await q.answer()
+        except Exception:
+            pass
+        return await q.answer("Saved")
 
     if data == "job:delete":
         try:
@@ -527,7 +555,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
-        return await q.answer()
+        return await q.answer("Deleted")
 
     await q.answer()
 
@@ -634,6 +662,7 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:(addkw|settings|help|saved|contact|admin)$"))
     app.add_handler(CallbackQueryHandler(kw_clear_confirm_cb, pattern=r"^kw:clear:(yes|no)$"))
     app.add_handler(CallbackQueryHandler(admin_action_cb, pattern=r"^adm:(reply|decline|grant):"))
+    app.add_handler(CallbackQueryHandler(saved_action_cb, pattern=r"^saved:del:\d+$"))
     app.add_handler(CallbackQueryHandler(job_action_cb, pattern=r"^job:(save|delete)$"))
 
     # text router (continuous chat)
