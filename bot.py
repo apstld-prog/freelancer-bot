@@ -342,14 +342,11 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         from sqlalchemy import text as _t
         from db import get_session as _gs
-
         uid = update.effective_user.id
         with _gs() as s:
-            # Map Telegram ID -> internal user.id (FK-safe)
             from db import get_or_create_user_by_tid as _get_user
             uobj = _get_user(s, uid)
             db_user_id = uobj.id
-
             rows = s.execute(
                 _t("SELECT id, title, url, COALESCE(description,'') FROM saved_job WHERE user_id=:uid_db ORDER BY saved_at DESC LIMIT 10"),
                 {"uid_db": db_user_id}
@@ -377,237 +374,10 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await q.answer()
         return
+
     except Exception:
         return await q.answer()
 
-
-    if data == "act:contact":
-        await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.")
-        await q.answer(); return
-    if data == "act:admin":
-        if not is_admin_user(q.from_user.id):
-            await q.answer("Not allowed", show_alert=True); return
-        await q.message.reply_text(
-            "<b>Admin panel</b>\n"
-            "<code>/users</code> • <code>/grant &lt;id&gt; &lt;days&gt;</code>\n"
-            "<code>/block &lt;id&gt;</code> • <code>/unblock &lt;id&gt;</code>\n"
-            "<code>/broadcast &lt;text&gt;</code> • <code>/feedstatus</code>",
-            parse_mode=ParseMode.HTML
-        ); await q.answer(); return
-    await q.answer()
-async def kw_clear_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    if not q.data.startswith("kw:clear:"): return await q.answer()
-    agree = q.data.split(":")[-1] == "yes"
-    if not agree:
-        await q.message.reply_text("Cancelled."); return await q.answer()
-    with get_session() as s:
-        u = get_or_create_user_by_tid(s, q.from_user.id)
-    n = clear_keywords(u.id)
-    await q.message.reply_text(f"🗑 Cleared {n} keyword(s)."); await q.answer()
-async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    if not is_admin_user(q.from_user.id): return await q.answer("Not allowed", show_alert=True)
-    parts = (q.data or "").split(":")
-    if len(parts) < 3 or parts[0] != "adm": return await q.answer()
-    action, target = parts[1], int(parts[2])
-
-    if action == "reply":
-        pair_admin_user(context.application, q.from_user.id, target)
-        await q.message.reply_text(f"Replying to <code>{target}</code>. Type your messages.", parse_mode=ParseMode.HTML)
-        return await q.answer()
-    if action == "decline":
-        unpair(context.application, user_id=target); return await q.answer("Declined")
-    if action == "grant":
-        days = int(parts[3]) if len(parts) >= 4 else 30
-        until = datetime.now(timezone.utc) + timedelta(days=days)
-        with get_session() as s:
-            s.execute(text('UPDATE "user" SET license_until=:dt WHERE telegram_id=:tid'), {"dt": until, "tid": target}); s.commit()
-        try: await context.bot.send_message(chat_id=target, text=f"🔑 Your access is extended until {until.strftime('%Y-%m-%d %H:%M UTC')}.")
-        except Exception: pass
-        return await q.answer(f"Granted +{days}d")
-    await q.answer()
-async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    data = (q.data or "").strip()
-    msg = q.message
-
-    # Extract Original URL from the inline keyboard (2nd button on 1st row)
-    original_url = ""
-    try:
-        if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
-            first_row = msg.reply_markup.inline_keyboard[0]
-            # Prefer "Original" button (usually index 1)
-            if len(first_row) > 1 and getattr(first_row[1], "url", None):
-                original_url = first_row[1].url or ""
-            elif len(first_row) >= 1 and getattr(first_row[0], "url", None):
-                original_url = first_row[0].url or ""
-    except Exception:
-        original_url = ""
-
-    # Extract a title from the first bold line
-    title = ""
-    try:
-        import re as _re
-        text_html = msg.text_html or msg.text or ""
-        m = _re.search(r"<b>([^<]+)</b>", text_html)
-        if m:
-            title = m.group(1).strip()
-            full_text = (msg.text_html or msg.caption_html or "")
-            parts = full_text.splitlines()
-            body_text = "\n".join(parts[1:]).strip() if len(parts) > 1 else ""
-            desc_to_save = body_text
-        if not title:
-            title = (text_html.splitlines()[0] if text_html else "")[:200]
-    except Exception:
-        title = "Saved job"
-
-    user_id = update.effective_user.id
-
-    if data == "job:save":
-        try:
-            from sqlalchemy import text as _t
-            from db import get_session as _gs
-            with _gs() as s:
-                s.execute(_t("""
-                    CREATE TABLE IF NOT EXISTS saved_job (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        title TEXT NOT NULL,
-                        url TEXT,
-                        description TEXT,
-                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-                    )
-                """))
-                
-                # Ensure DB user exists and get internal id (FK-safe)
-                from db import get_or_create_user_by_tid as _get_user
-                uobj = _get_user(s, user_id)
-                db_user_id = uobj.id
-                s.execute(_t(
-                    "INSERT INTO saved_job (user_id,title,url,description) VALUES (:uid_db,:t,:uurl,:d)"
-                ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": desc_to_save})
-                s.commit()
-        except Exception:
-            pass
-        try:
-            if msg:
-                await msg.delete()
-        except Exception:
-            try:
-                await msg.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-        return await q.answer()
-
-    if data == "job:delete":
-        try:
-            if msg:
-                await msg.delete()
-        except Exception:
-            try:
-                await msg.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-        return await q.answer()
-
-    await q.answer()
-
-# ---------- Router (continuous admin-user chat) ----------
-async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text or update.message.text.startswith("/"):
-        return
-
-    text_msg = update.message.text.strip()
-    sender_id = update.effective_user.id
-    app = context.application
-
-    if is_admin_user(sender_id):
-        paired_user = get_paired_user(app, sender_id)
-        if paired_user:
-            try:
-                await context.bot.send_message(chat_id=paired_user, text=text_msg)
-            except Exception:
-                pass
-            return
-
-    paired_admin = get_paired_admin(app, sender_id)
-    if paired_admin:
-        try:
-            await context.bot.send_message(chat_id=paired_admin,
-                                           text=f"✉️ From {sender_id}:\n\n{text_msg}",
-                                           reply_markup=admin_contact_kb(sender_id))
-        except Exception:
-            pass
-        return
-
-    for aid in all_admin_ids():
-        try:
-            await context.bot.send_message(
-                chat_id=aid,
-                text=f"✉️ <b>New message from user</b>\nID: <code>{sender_id}</code>\n\n{text_msg}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=admin_contact_kb(sender_id),
-            )
-        except Exception:
-            pass
-    await update.message.reply_text("Thanks! Your message was forwarded to the admin 👌")
-
-# ---------- Expiry reminders ----------
-async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(timezone.utc); soon = now + timedelta(hours=24)
-    with get_session() as s:
-        rows = s.execute(text('SELECT telegram_id, COALESCE(license_until, trial_end) FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
-    for tid, expiry in rows:
-        if not expiry: continue
-        if getattr(expiry, "tzinfo", None) is None: expiry = expiry.replace(tzinfo=timezone.utc)
-        if now < expiry <= soon:
-            try:
-                hours_left = int((expiry - now).total_seconds() // 3600)
-                await context.bot.send_message(chat_id=tid, text=f"⏰ Reminder: your access expires in about {hours_left} hours (on {expiry.strftime('%Y-%m-%d %H:%M UTC')}).")
-            except Exception: pass
-async def _background_expiry_loop(app: Application):
-    await asyncio.sleep(5)
-    while True:
-        try:
-            ctx = SimpleNamespace(bot=app.bot)
-            await notify_expiring_job(ctx)  # type: ignore[arg-type]
-        except Exception as e:
-            log.exception("expiry loop error: %s", e)
-        await asyncio.sleep(3600)
-async def _ensure_fallback_running(app: Application):
-    if app.bot_data.get("expiry_task"): return
-    try:
-        app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
-        log.info("Fallback expiry loop started (immediate).")
-    except Exception as e:
-        log.warning("Could not start fallback loop immediately: %s", e)
-
-# ---------- Build app ----------
-async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    data = (q.data or "").strip()
-    try:
-        rid = int(data.split(":")[-1])
-    except Exception:
-        return await q.answer()
-
-    from sqlalchemy import text as _t
-    from db import get_session as _gs
-    uid = update.effective_user.id
-    # Delete only if this row belongs to this user (join with "user" on telegram_id)
-    with _gs() as s:
-        s.execute(_t(
-            "DELETE FROM saved_job USING \"user\" u WHERE saved_job.user_id=u.id AND u.telegram_id=:tid AND saved_job.id=:rid"
-        ), {"tid": uid, "rid": rid}); s.commit()
-    try:
-        await q.message.delete()
-    except Exception:
-        try:
-            await q.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-    return await q.answer("Deleted")
 def build_application() -> Application:
     ensure_schema()
     ensure_feed_events_schema()
@@ -660,4 +430,4 @@ def build_application() -> Application:
         except Exception:
             app.bot_data["start_fallback_on_first_update"] = True
             log.info("Scheduler: fallback loop (will start on first update)")
-    return app
+    return app\n
