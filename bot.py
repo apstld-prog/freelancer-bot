@@ -360,7 +360,6 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             uid = update.effective_user.id
             with _gs() as s:
-                # Map Telegram ID -> internal user.id for FK-safe query
                 from db import get_or_create_user_by_tid as _get_user
                 uobj = _get_user(s, uid)
                 db_user_id = uobj.id
@@ -478,7 +477,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
                     )
                 """))
-                
                 # Ensure DB user exists and get internal id (FK-safe)
                 from db import get_or_create_user_by_tid as _get_user
                 uobj = _get_user(s, user_id)
