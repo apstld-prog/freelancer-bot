@@ -339,59 +339,47 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(HELP_EN + help_footer(STATS_WINDOW_HOURS),
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
-        try:
-            # Direct DB hotfix (no external module)
-            from sqlalchemy import text as _t
-            from db import get_session as _gs
-
-            # Ensure table exists (safe no-op)
-            with _gs() as s:
-                s.execute(_t("""
-                    CREATE TABLE IF NOT EXISTS saved_job (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        title TEXT NOT NULL,
-                        url TEXT,
-                        description TEXT,
-                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
-                    )
-                """))
-                s.commit()
-
-            uid = update.effective_user.id
-            with _gs() as s:
-                rows = s.execute(
-                    _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
-                    {"u": uid}
-                ).fetchall()
-
-            if not rows:
-                await q.message.reply_text("Saved list: (empty)")
-                await q.answer()
-                return
-
-# Send each saved job as its own card with inline keyboard; no link preview (no banner)
-for rid, t, u, d in s.execute(
-    _t("SELECT id, title, url, COALESCE(description,'') FROM saved_job WHERE user_id=:uid_db ORDER BY saved_at DESC LIMIT 10"),
-    {"uid_db": db_user_id}
-).fetchall():
-    title_line = f"<b>{(t or '').strip() or '(no title)'}</b>"
-    desc_line = (d or '').strip()
-    txt_lines = [title_line]
-    if desc_line:
-        txt_lines.append(desc_line)
-    card = "\n".join(txt_lines)
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Proposal", url=u or ""),
-         InlineKeyboardButton("🔗 Original", url=u or "")],
-        [InlineKeyboardButton("🗑️ Delete", callback_data=f"saved:del:{rid}")]
-    ])
     try:
-        await q.message.chat.send_message(card, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+        from sqlalchemy import text as _t
+        from db import get_session as _gs
+
+        uid = update.effective_user.id
+        with _gs() as s:
+            # Map Telegram ID -> internal user.id (FK-safe)
+            from db import get_or_create_user_by_tid as _get_user
+            uobj = _get_user(s, uid)
+            db_user_id = uobj.id
+
+            rows = s.execute(
+                _t("SELECT id, title, url, COALESCE(description,'') FROM saved_job WHERE user_id=:uid_db ORDER BY saved_at DESC LIMIT 10"),
+                {"uid_db": db_user_id}
+            ).fetchall()
+
+        if not rows:
+            await q.message.reply_text("Saved list: (empty)")
+            await q.answer()
+            return
+
+        for rid, t, u, d in rows:
+            title_line = f"<b>{(t or '').strip() or '(no title)'}</b>"
+            body = (d or '').strip()
+            card = title_line + ("\n" + body if body else "")
+
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📄 Proposal", url=u or ""),
+                 InlineKeyboardButton("🔗 Original", url=u or "")],
+                [InlineKeyboardButton("🗑️ Delete", callback_data=f"saved:del:{rid}")]
+            ])
+            try:
+                await q.message.chat.send_message(card, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+            except Exception:
+                await q.message.reply_text(card, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+
+        await q.answer()
+        return
     except Exception:
-        await q.message.reply_text(card, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
-await q.answer(); return
+        return await q.answer()
+
 
     if data == "act:contact":
         await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.")
@@ -499,7 +487,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from db import get_or_create_user_by_tid as _get_user
                 uobj = _get_user(s, user_id)
                 db_user_id = uobj.id
-s.execute(_t(
+                s.execute(_t(
                     "INSERT INTO saved_job (user_id,title,url,description) VALUES (:uid_db,:t,:uurl,:d)"
                 ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": desc_to_save})
                 s.commit()
@@ -679,9 +667,3 @@ def build_application() -> Application:
             app.bot_data["start_fallback_on_first_update"] = True
             log.info("Scheduler: fallback loop (will start on first update)")
     return app
-            # Resolve internal user id for FK (map from telegram_id)
-            uid = update.effective_user.id
-            from db import get_or_create_user_by_tid as _get_user
-            uobj = _get_user(s, uid)
-            db_user_id = uobj.id
-
