@@ -1,75 +1,64 @@
+
 @echo off
-setlocal
-
-rem ===== Header =====
-echo.
-echo ==========================================
-echo   Git Auto Push - Simple & Stable
-echo ==========================================
-echo.
-
-rem ===== Check tools =====
-where git >NUL 2>&1
+setlocal ENABLEDELAYEDEXPANSION
+REM --- Ensure we're inside a Git repo
+git rev-parse --is-inside-work-tree >NUL 2>&1
 if errorlevel 1 (
-  echo [ERROR] Git not found in PATH.
-  goto END
+  echo [ERROR] This folder is not a Git repository.
+  exit /b 1
 )
 
-where python >NUL 2>&1
-if errorlevel 1 (
-  echo [WARN] Python not found in PATH. Continuing without Python checks.
-)
-
-rem ===== (Optional) Python syntax check - DISABLED by default =====
-rem if exist "bot.py" (
-rem   python -c "import py_compile; py_compile.compile(r'bot.py', doraise=True)" 2>NUL
-rem   if errorlevel 1 (
-rem     echo [ERROR] Syntax error in bot.py
-rem     goto END
-rem   )
-rem )
-rem if exist "worker_runner.py" (
-rem   python -c "import py_compile; py_compile.compile(r'worker_runner.py', doraise=True)" 2>NUL
-rem   if errorlevel 1 (
-rem     echo [ERROR] Syntax error in worker_runner.py
-rem     goto END
-rem   )
-rem )
+REM --- Determine branch and remote
+for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set BRANCH=%%b
+for /f "delims=" %%r in ('git remote') do set REMOTE=%%r
+if "%REMOTE%"=="" set REMOTE=origin
 
 echo.
-echo ==========================================
-echo   GIT STAGE / COMMIT / PUSH
-echo ==========================================
-echo.
+echo [INFO] Branch: %BRANCH%
+echo [INFO] Remote: %REMOTE%
+git remote -v
 
+REM --- Stage and commit all changes
 git add -A
+for /f "tokens=1-5 delims=/ " %%d in ("%date%") do set DATESTR=%%f-%%e-%%d
+set MSG=Auto push %DATESTR% %time%
+git commit -m "%MSG%" 1>NUL 2>&1
 if errorlevel 1 (
-  echo [ERROR] git add failed.
-  goto END
+  echo [INFO] Nothing to commit. Proceeding to push...
 )
 
-set "MSG=Deploy: auto push"
-if not "%~1"=="" set "MSG=%*"
-
-git commit -m "%MSG%"
+REM --- Pull --rebase to avoid conflicts
+echo [INFO] Pulling latest from %REMOTE%/%BRANCH% ...
+git pull --rebase %REMOTE% %BRANCH%
 if errorlevel 1 (
-  echo [INFO] Nothing to commit (working tree clean).
+  echo [ERROR] git pull --rebase failed. Resolve conflicts and retry.
+  exit /b 1
 )
 
-git push
+REM --- Push
+echo [INFO] Pushing to %REMOTE%/%BRANCH% ...
+git push -u %REMOTE% %BRANCH%
 if errorlevel 1 (
-  echo [ERROR] git push failed.
-  goto END
+  echo [ERROR] git push failed. Check your remote/credentials.
+  exit /b 1
 )
 
-echo.
-echo ==========================================
-echo   PUSH COMPLETED SUCCESSFULLY
-echo ==========================================
-echo.
+REM --- Optional: trigger Render Deploy Hook if file exists
+if exist .render_deploy_hook (
+  set /p RENDER_HOOK=<.render_deploy_hook
+  if not "%RENDER_HOOK%"=="" (
+    echo [INFO] Triggering Render Deploy Hook...
+    powershell -NoProfile -Command "try { Invoke-WebRequest -Method POST -Uri '%RENDER_HOOK%' ^| Out-Null; exit 0 } catch { exit 1 }"
+    if errorlevel 1 (
+      echo [WARN] Deploy hook call failed. Check the hook URL.
+    ) else (
+      echo [INFO] Deploy hook triggered successfully.
+    )
+  )
+) else (
+  echo [INFO] No .render_deploy_hook file found. Skipping manual deploy trigger.
+  echo [HINT] To force a deploy even without code changes, create a file named .render_deploy_hook in repo root with your Render Deploy Hook URL.
+)
 
-:END
-echo.
-echo Press any key to close this window...
-pause >NUL
-endlocal
+echo [DONE] All set.
+exit /b 0
