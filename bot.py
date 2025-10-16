@@ -338,7 +338,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "act:help":
         await q.message.reply_text(HELP_EN + help_footer(STATS_WINDOW_HOURS),
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
-    if data in ("act:saved", "saved"):
+    if data == "act:saved":
         try:
             # Direct DB hotfix (no external module)
             from sqlalchemy import text as _t
@@ -453,8 +453,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if m:
             title = m.group(1).strip()
         if not title:
-            title = "Untitled"
-        if not title:
             title = (text_html.splitlines()[0] if text_html else "")[:200]
     except Exception:
         title = "Saved job"
@@ -476,13 +474,17 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
                     )
                 """))
-                s.execute(_t(
-                    "INSERT INTO saved_job (user_id,title,url,description) VALUES (:u,:t,:uurl,:d)"
-                ), {"u": user_id, "t": title, "uurl": original_url or "", "d": ""})
+                
+                # Ensure DB user exists and get internal id (FK-safe)
+                from db import get_or_create_user_by_tid as _get_user
+                uobj = _get_user(s, user_id)
+                db_user_id = uobj.id
+s.execute(_t(
+                    "INSERT INTO saved_job (user_id,title,url,description) VALUES (:uid_db,:t,:uurl,:d)"
+                ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": ""})
                 s.commit()
-        except Exception as e:
-            import logging
-            logging.getLogger("bot").warning("Save failed: %s", e)
+        except Exception:
+            pass
         try:
             if msg:
                 await msg.delete()
@@ -530,9 +532,8 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
             await context.bot.send_message(chat_id=paired_admin,
                                            text=f"✉️ From {sender_id}:\n\n{text_msg}",
                                            reply_markup=admin_contact_kb(sender_id))
-        except Exception as e:
-            import logging
-            logging.getLogger("bot").warning("Save failed: %s", e)
+        except Exception:
+            pass
         return
 
     for aid in all_admin_ids():
@@ -543,9 +544,8 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode=ParseMode.HTML,
                 reply_markup=admin_contact_kb(sender_id),
             )
-        except Exception as e:
-            import logging
-            logging.getLogger("bot").warning("Save failed: %s", e)
+        except Exception:
+            pass
     await update.message.reply_text("Thanks! Your message was forwarded to the admin 👌")
 
 # ---------- Expiry reminders ----------
@@ -633,3 +633,9 @@ def build_application() -> Application:
             app.bot_data["start_fallback_on_first_update"] = True
             log.info("Scheduler: fallback loop (will start on first update)")
     return app
+            # Resolve internal user id for FK (map from telegram_id)
+            uid = update.effective_user.id
+            from db import get_or_create_user_by_tid as _get_user
+            uobj = _get_user(s, uid)
+            db_user_id = uobj.id
+
