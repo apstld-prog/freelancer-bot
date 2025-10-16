@@ -395,8 +395,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML
         ); await q.answer(); return
     await q.answer()
-
-    async def kw_clear_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def kw_clear_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q.data.startswith("kw:clear:"): return await q.answer()
     agree = q.data.split(":")[-1] == "yes"
@@ -406,8 +405,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = get_or_create_user_by_tid(s, q.from_user.id)
     n = clear_keywords(u.id)
     await q.message.reply_text(f"🗑 Cleared {n} keyword(s)."); await q.answer()
-
-    async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not is_admin_user(q.from_user.id): return await q.answer("Not allowed", show_alert=True)
     parts = (q.data or "").split(":")
@@ -429,8 +427,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception: pass
         return await q.answer(f"Granted +{days}d")
     await q.answer()
-
-    async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = (q.data or "").strip()
     msg = q.message
@@ -517,7 +514,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 # ---------- Router (continuous admin-user chat) ----------
-    async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text or update.message.text.startswith("/"):
         return
 
@@ -557,7 +554,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Thanks! Your message was forwarded to the admin 👌")
 
 # ---------- Expiry reminders ----------
-    async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
+async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc); soon = now + timedelta(hours=24)
     with get_session() as s:
         rows = s.execute(text('SELECT telegram_id, COALESCE(license_until, trial_end) FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
@@ -569,8 +566,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 hours_left = int((expiry - now).total_seconds() // 3600)
                 await context.bot.send_message(chat_id=tid, text=f"⏰ Reminder: your access expires in about {hours_left} hours (on {expiry.strftime('%Y-%m-%d %H:%M UTC')}).")
             except Exception: pass
-
-    async def _background_expiry_loop(app: Application):
+async def _background_expiry_loop(app: Application):
     await asyncio.sleep(5)
     while True:
         try:
@@ -579,8 +575,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             log.exception("expiry loop error: %s", e)
         await asyncio.sleep(3600)
-
-    async def _ensure_fallback_running(app: Application):
+async def _ensure_fallback_running(app: Application):
     if app.bot_data.get("expiry_task"): return
     try:
         app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
@@ -589,8 +584,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Could not start fallback loop immediately: %s", e)
 
 # ---------- Build app ----------
-
-    async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = (q.data or "").strip()
     try:
