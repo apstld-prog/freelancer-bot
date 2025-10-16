@@ -365,25 +365,28 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
     
             for rid, t, u, d in rows:
-                title_txt = (t or "").strip() or "(no title)"
-                body_txt  = (d or "").strip()
-    
-                # SAME card format as worker (no preview/banner)
-                card = f"<b>{title_txt}</b>" + (f"\n{body_txt}" if body_txt else "")
-    
+                card_html = (d or '').strip()
+                if not card_html:
+                    title_txt = (t or '').strip() or '(no title)'
+                    card_html = f"<b>{title_txt}</b>"
+
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📄 Proposal", url=u or ""),
-                     InlineKeyboardButton("🔗 Original", url=u or "")],
-                    [InlineKeyboardButton("🗑️ Delete", callback_data=f"saved:del:{rid}")]
+                    [InlineKeyboardButton('📄 Proposal', url=u or ''),
+                     InlineKeyboardButton('🔗 Original', url=u or '')],
+                    [InlineKeyboardButton('🗑️ Delete', callback_data=f'saved:del:{rid}')]
                 ])
-    
+
                 await q.message.chat.send_message(
-                    card,
+                    card_html,
                     parse_mode=ParseMode.HTML,
                     reply_markup=kb,
                     disable_web_page_preview=True
                 )
-    
+
+            await q.answer()
+            return
+
+        except Exception:
             await q.answer()
             return
     
@@ -492,7 +495,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db_user_id = uobj.id
                 s.execute(_t(
                     "INSERT INTO saved_job (user_id,title,url,description) VALUES (:uid_db,:t,:uurl,:d)"
-                ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": ""})
+                ), {"uid_db": db_user_id, "t": title, "uurl": (original_url or ""), "d": card_html})
                 s.commit()
         except Exception:
             pass
