@@ -366,7 +366,9 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ).fetchall()
 
             if not rows:
-    await q.message.reply_text("Saved list: (empty)"); await q.answer(); return
+                await q.message.reply_text("Saved list: (empty)")
+                await q.answer()
+                return
 
 # Send each saved job as its own card with inline keyboard; no link preview (no banner)
 for rid, t, u, d in s.execute(
