@@ -360,26 +360,38 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             uid = update.effective_user.id
             with _gs() as s:
-                from db import get_or_create_user_by_tid as _get_user
-                uobj = _get_user(s, uid)
-                db_user_id = uobj.id
                 rows = s.execute(
-                    _t("SELECT title, url FROM saved_job WHERE user_id=:uid_db ORDER BY saved_at DESC LIMIT 10"),
-                    {"uid_db": db_user_id}
+                    _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
+                    {"u": uid}
                 ).fetchall()
 
             if not rows:
-                await q.message.reply_text("Saved list: (empty)")
-            else:
-                lines = ["Saved jobs:"]
-                for t, u in rows:
-                    t = (t or '').strip() or '(no title)'
-                    u = (u or '').strip()
-                    lines.append(f"• {t}\n{u}" if u else f"• {t}")
-                await q.message.reply_text('\n\n'.join(lines))
-        except Exception:
-            await q.message.reply_text("Saved list: (unavailable)")
-        await q.answer(); return
+    await q.message.reply_text("Saved list: (empty)"); await q.answer(); return
+
+# Send each saved job as its own card with inline keyboard; no link preview (no banner)
+for rid, t, u, d in s.execute(
+    _t("SELECT id, title, url, COALESCE(description,'') FROM saved_job WHERE user_id=:uid_db ORDER BY saved_at DESC LIMIT 10"),
+    {"uid_db": db_user_id}
+).fetchall():
+    title_line = f"<b>{(t or '').strip() or '(no title)'}</b>"
+    desc_line = (d or '').strip()
+    txt_lines = [title_line]
+    if desc_line:
+        txt_lines.append(desc_line)
+    card = "
+".join(txt_lines)
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Proposal", url=u or ""),
+         InlineKeyboardButton("🔗 Original", url=u or "")],
+        [InlineKeyboardButton("🗑️ Delete", callback_data=f"saved:del:{rid}")]
+    ])
+    try:
+        await q.message.chat.send_message(card, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+    except Exception:
+        await q.message.reply_text(card, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+await q.answer(); return
+
     if data == "act:contact":
         await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.")
         await q.answer(); return
@@ -477,11 +489,12 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
                     )
                 """))
+                
                 # Ensure DB user exists and get internal id (FK-safe)
                 from db import get_or_create_user_by_tid as _get_user
                 uobj = _get_user(s, user_id)
                 db_user_id = uobj.id
-                s.execute(_t(
+s.execute(_t(
                     "INSERT INTO saved_job (user_id,title,url,description) VALUES (:uid_db,:t,:uurl,:d)"
                 ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": ""})
                 s.commit()
@@ -583,6 +596,31 @@ async def _ensure_fallback_running(app: Application):
         log.warning("Could not start fallback loop immediately: %s", e)
 
 # ---------- Build app ----------
+
+async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = (q.data or "").strip()
+    try:
+        rid = int(data.split(":")[-1])
+    except Exception:
+        return await q.answer()
+
+    from sqlalchemy import text as _t
+    from db import get_session as _gs
+    uid = update.effective_user.id
+    # Delete only if this row belongs to this user (join with "user" on telegram_id)
+    with _gs() as s:
+        s.execute(_t(
+            "DELETE FROM saved_job USING \"user\" u WHERE saved_job.user_id=u.id AND u.telegram_id=:tid AND saved_job.id=:rid"
+        ), {"tid": uid, "rid": rid}); s.commit()
+    try:
+        await q.message.delete()
+    except Exception:
+        try:
+            await q.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    return await q.answer("Deleted")
 def build_application() -> Application:
     ensure_schema()
     ensure_feed_events_schema()
@@ -614,6 +652,7 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(kw_clear_confirm_cb, pattern=r"^kw:clear:(yes|no)$"))
     app.add_handler(CallbackQueryHandler(admin_action_cb, pattern=r"^adm:(reply|decline|grant):"))
     app.add_handler(CallbackQueryHandler(job_action_cb, pattern=r"^job:(save|delete)$"))
+    app.add_handler(CallbackQueryHandler(saved_delete_cb, pattern=r"^saved:del:\d+$"))
 
     # text router (continuous chat)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, incoming_message_router))
@@ -635,3 +674,9 @@ def build_application() -> Application:
             app.bot_data["start_fallback_on_first_update"] = True
             log.info("Scheduler: fallback loop (will start on first update)")
     return app
+            # Resolve internal user id for FK (map from telegram_id)
+            uid = update.effective_user.id
+            from db import get_or_create_user_by_tid as _get_user
+            uobj = _get_user(s, uid)
+            db_user_id = uobj.id
+
