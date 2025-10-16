@@ -378,8 +378,7 @@ for rid, t, u, d in s.execute(
     txt_lines = [title_line]
     if desc_line:
         txt_lines.append(desc_line)
-    card = "
-".join(txt_lines)
+    card = "\n".join(txt_lines)
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Proposal", url=u or ""),
