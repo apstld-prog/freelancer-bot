@@ -124,10 +124,49 @@ def _compose_message(it: Dict) -> str:
         orig = f"from {_fmt(budget_min)} {display_ccy}".strip()
         budget_str = orig + (f" (~${_fmt(usd_min USD)})" if usd_min is not None else "")
     elif budget_max is not None:
-        orig = f"up to {_fmt(budget_max)} {display_ccy}".strip()
-        budget_str = orig + (f" (~${_fmt(usd_max USD)})" if usd_max is not None else "")
+        orig = f"up to {_fmt(budget_max)} {
+    display_ccy = (
+        it.get("currency_display")
+        or it.get("budget_currency")
+        or it.get("original_currency")
+        or it.get("currency_code_detected")
+        or it.get("currency")
+        or "USD"
+    )
 
-    lines = [f"<b>{title}</b>"]
+    budget_min = it.get("budget_min")
+    budget_max = it.get("budget_max")
+    usd_min = it.get("usd_min")
+    usd_max = it.get("usd_max")
+
+    def _fmt(v):
+        try:
+            f = float(v)
+            s = f"{f:.1f}"
+            return s.rstrip("0").rstrip(".")
+        except Exception:
+            return str(v)
+
+    # Build original budget label
+    orig = ""
+    if budget_min is not None and budget_max is not None:
+        orig = f"{_fmt(budget_min)}–{_fmt(budget_max)} {display_ccy}".strip()
+    elif budget_min is not None:
+        orig = f"from {_fmt(budget_min)} {display_ccy}".strip()
+    elif budget_max is not None:
+        orig = f"up to {_fmt(budget_max)} {display_ccy}".strip()
+
+    # USD hint
+    usd_hint = ""
+    if usd_min is not None and usd_max is not None:
+        usd_hint = f" (~${_fmt(usd_min)}–${_fmt(usd_max)} USD)"
+    elif usd_min is not None:
+        usd_hint = f" (~${_fmt(usd_min)} USD)"
+    elif usd_max is not None:
+        usd_hint = f" (~${_fmt(usd_max)} USD)"
+
+    budget_str = (orig + usd_hint).strip()
+lines = [f"<b>{title}</b>"]
     if budget_str: lines.append(f"💰 <i>Budget: {budget_str}</i>")
     if desc: lines.append(desc)
 

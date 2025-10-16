@@ -453,6 +453,8 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if m:
             title = m.group(1).strip()
         if not title:
+            title = "Untitled"
+        if not title:
             title = (text_html.splitlines()[0] if text_html else "")[:200]
     except Exception:
         title = "Saved job"
@@ -478,8 +480,9 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "INSERT INTO saved_job (user_id,title,url,description) VALUES (:u,:t,:uurl,:d)"
                 ), {"u": user_id, "t": title, "uurl": original_url or "", "d": ""})
                 s.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger("bot").warning("Save failed: %s", e)
         try:
             if msg:
                 await msg.delete()
@@ -527,8 +530,9 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
             await context.bot.send_message(chat_id=paired_admin,
                                            text=f"✉️ From {sender_id}:\n\n{text_msg}",
                                            reply_markup=admin_contact_kb(sender_id))
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger("bot").warning("Save failed: %s", e)
         return
 
     for aid in all_admin_ids():
@@ -539,8 +543,9 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode=ParseMode.HTML,
                 reply_markup=admin_contact_kb(sender_id),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger("bot").warning("Save failed: %s", e)
     await update.message.reply_text("Thanks! Your message was forwarded to the admin 👌")
 
 # ---------- Expiry reminders ----------
