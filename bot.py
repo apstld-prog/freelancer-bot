@@ -58,9 +58,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = get_connection()
         cur = conn.cursor()
-        # 🔧 ΔΙΟΡΘΩΣΗ ΕΔΩ: γράφει is_blocked=false
+        # set is_blocked=false και created_at=NOW()
         cur.execute(
-            'INSERT INTO "user"(telegram_id, is_blocked) VALUES (%s, false) ON CONFLICT (telegram_id) DO NOTHING;',
+            'INSERT INTO "user"(telegram_id, is_blocked, created_at) VALUES (%s, false, NOW()) '
+            'ON CONFLICT (telegram_id) DO NOTHING;',
             (tg_id,),
         )
         conn.commit()
