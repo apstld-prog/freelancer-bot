@@ -340,58 +340,67 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
     if data == "act:saved":
         try:
+            # Direct DB hotfix (no external module)
             from sqlalchemy import text as _t
             from db import get_session as _gs
-            from db import get_or_create_user_by_tid as _get_user
-    
+
+            # Ensure table exists (safe no-op)
+            with _gs() as s:
+                s.execute(_t("""
+                    CREATE TABLE IF NOT EXISTS saved_job (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        title TEXT NOT NULL,
+                        url TEXT,
+                        description TEXT,
+                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                    )
+                """))
+                s.commit()
+
             uid = update.effective_user.id
             with _gs() as s:
-                # ensure user row exists for FK
+                from db import get_or_create_user_by_tid as _get_user
                 uobj = _get_user(s, uid)
                 db_user_id = uobj.id
-    
                 rows = s.execute(
-                    _t(
-                        "SELECT id, title, url, COALESCE(description,'') "
-                        "FROM saved_job WHERE user_id=:uid_db "
-                        "ORDER BY saved_at DESC LIMIT 10"
-                    ),
+                    _t("SELECT title, url FROM saved_job WHERE user_id=:uid_db ORDER BY saved_at DESC LIMIT 10"),
                     {"uid_db": db_user_id}
                 ).fetchall()
-    
+
             if not rows:
                 await q.message.reply_text("Saved list: (empty)")
-                await q.answer()
-                return
-    
+            else:
+                lines = ["Saved jobs:"]
+                for t, u in rows:
+                    t = (t or '').strip() or '(no title)'
+                    u = (u or '').strip()
+                    lines.append(f"• {t}\n{u}" if u else f"• {t}")
+                await q.message.reply_text('\n\n'.join(lines))
+        except Exception:
+            await q.message.reply_text("Saved list: (unavailable)")
+        await q.answer(); return
             for rid, t, u, d in rows:
                 card_html = (d or '').strip()
                 if not card_html:
                     title_txt = (t or '').strip() or '(no title)'
                     card_html = f"<b>{title_txt}</b>"
-
+    
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton('📄 Proposal', url=u or ''),
-                     InlineKeyboardButton('🔗 Original', url=u or '')],
+                    [InlineKeyboardButton('📄 Proposal', url=u or ''), InlineKeyboardButton('🔗 Original', url=u or '')],
                     [InlineKeyboardButton('🗑️ Delete', callback_data=f'saved:del:{rid}')]
                 ])
-
+    
                 await q.message.chat.send_message(
                     card_html,
                     parse_mode=ParseMode.HTML,
                     reply_markup=kb,
                     disable_web_page_preview=True
                 )
-
-            await q.answer()
-            return
-
-        except Exception:
-            await q.answer()
-            return
     
-        except Exception:
-            return await q.answer()
+            await q.answer()
+            return
+
     if data == "act:contact":
         await q.message.reply_text("Send a message for the admin. After they tap Reply, this becomes a continuous chat.")
         await q.answer(); return
@@ -495,7 +504,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db_user_id = uobj.id
                 s.execute(_t(
                     "INSERT INTO saved_job (user_id,title,url,description) VALUES (:uid_db,:t,:uurl,:d)"
-                ), {"uid_db": db_user_id, "t": title, "uurl": (original_url or ""), "d": card_html})
+                ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": card_html})
                 s.commit()
         except Exception:
             pass
