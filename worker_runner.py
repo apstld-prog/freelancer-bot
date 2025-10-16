@@ -95,36 +95,10 @@ def _find_match_keyword(it: Dict, kws: List[str]) -> Optional[str]:
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
-    if len(desc) > 700: desc = desc[:700] + "…"
+    if len(desc) > 700:
+        desc = desc[:700] + "…"
     src = it.get("source", "freelancer")
 
-    display_ccy = (
-        it.get("currency_display")
-        or it.get("budget_currency")
-        or it.get("original_currency")
-        or it.get("currency_code_detected")
-        or it.get("currency")
-        or "USD"
-    )
-    budget_min, budget_max = it.get("budget_min"), it.get("budget_max")
-    usd_min, usd_max = it.get("budget_min_usd"), it.get("budget_max_usd")
-
-    def _fmt(v):
-        try:
-            f = float(v); s = f"{f:.1f}"
-            return s.rstrip("0").rstrip(".")
-        except Exception:
-            return str(v)
-
-    budget_str = ""
-    if budget_min is not None and budget_max is not None:
-        orig = f"{_fmt(budget_min)}–{_fmt(budget_max)} {display_ccy}".strip()
-        budget_str = f"{orig} (~${_fmt(usd_min USD)}–${_fmt(usd_max)})" if (usd_min is not None and usd_max is not None) else orig
-    elif budget_min is not None:
-        orig = f"from {_fmt(budget_min)} {display_ccy}".strip()
-        budget_str = orig + (f" (~${_fmt(usd_min USD)})" if usd_min is not None else "")
-    elif budget_max is not None:
-        orig = f"up to {_fmt(budget_max)} {
     display_ccy = (
         it.get("currency_display")
         or it.get("budget_currency")
@@ -136,8 +110,8 @@ def _compose_message(it: Dict) -> str:
 
     budget_min = it.get("budget_min")
     budget_max = it.get("budget_max")
-    usd_min = it.get("usd_min")
-    usd_max = it.get("usd_max")
+    usd_min = it.get("budget_min_usd")
+    usd_max = it.get("budget_max_usd")
 
     def _fmt(v):
         try:
@@ -166,15 +140,19 @@ def _compose_message(it: Dict) -> str:
         usd_hint = f" (~${_fmt(usd_max)} USD)"
 
     budget_str = (orig + usd_hint).strip()
-lines = [f"<b>{title}</b>"]
-    if budget_str: lines.append(f"💰 <i>Budget: {budget_str}</i>")
-    if desc: lines.append(desc)
+
+    if budget_str:
+        lines.append(f"💰 <i>Budget: {budget_str}</i>")
+    if desc:
+        lines.append(desc)
 
     mk = it.get("matched_keyword") or it.get("match") or it.get("keyword")
-    if mk: lines.append(f"🔎 <i>Keyword: {mk}</i>")
+    if mk:
+        lines.append(f"🔎 <i>Keyword: {mk}</i>")
 
     lines.append(f"🏷️ <i>{src}</i>")
     return "\n".join(lines)
+
 
 def _build_keyboard(links: Dict[str, Optional[str]]):
     try:

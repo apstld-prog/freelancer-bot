@@ -360,9 +360,13 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             uid = update.effective_user.id
             with _gs() as s:
+                # Map Telegram ID -> internal user.id for FK-safe query
+                from db import get_or_create_user_by_tid as _get_user
+                uobj = _get_user(s, uid)
+                db_user_id = uobj.id
                 rows = s.execute(
-                    _t("SELECT title, url FROM saved_job WHERE user_id=:u ORDER BY saved_at DESC LIMIT 10"),
-                    {"u": uid}
+                    _t("SELECT title, url FROM saved_job WHERE user_id=:uid_db ORDER BY saved_at DESC LIMIT 10"),
+                    {"uid_db": db_user_id}
                 ).fetchall()
 
             if not rows:
@@ -479,7 +483,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from db import get_or_create_user_by_tid as _get_user
                 uobj = _get_user(s, user_id)
                 db_user_id = uobj.id
-s.execute(_t(
+                s.execute(_t(
                     "INSERT INTO saved_job (user_id,title,url,description) VALUES (:uid_db,:t,:uurl,:d)"
                 ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": ""})
                 s.commit()
