@@ -467,6 +467,10 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m = _re.search(r"<b>([^<]+)</b>", text_html)
         if m:
             title = m.group(1).strip()
+            full_text = (msg.text_html or msg.caption_html or "")
+            parts = full_text.splitlines()
+            body_text = "\n".join(parts[1:]).strip() if len(parts) > 1 else ""
+            desc_to_save = body_text
         if not title:
             title = (text_html.splitlines()[0] if text_html else "")[:200]
     except Exception:
@@ -496,7 +500,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db_user_id = uobj.id
 s.execute(_t(
                     "INSERT INTO saved_job (user_id,title,url,description) VALUES (:uid_db,:t,:uurl,:d)"
-                ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": ""})
+                ), {"uid_db": db_user_id, "t": title, "uurl": original_url or "", "d": desc_to_save})
                 s.commit()
         except Exception:
             pass
