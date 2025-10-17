@@ -149,11 +149,12 @@ def _compose_message(it: Dict) -> str:
     lines: List[str] = [f"<b>{_h(title)}</b>"]
     if budget_str:
         lines.append(f"<b>Budget:</b> {_h(budget_str)}")
-    lines.append(_h(desc) if desc else "")
+    lines.append(f"<b>Source:</b> {_h(src)}")
     mk = it.get("matched_keyword") or it.get("match") or it.get("keyword")
     if mk:
         lines.append(f"<b>Match:</b> {_h(mk)}")
-    lines.append(f"<b>Source:</b> {_h(src)}")
+    if desc:
+        lines.append(_h(desc))
     return "\n".join([ln for ln in lines if ln])
 
 def _build_keyboard(links: Dict[str, Optional[str]]):

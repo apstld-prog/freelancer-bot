@@ -375,17 +375,20 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.answer()
                 return
 
-            # Στέλνουμε ΚΑΘΕ saved ως κανονική κάρτα (όπως όταν έρχεται από worker)
+            # Κάθε saved ως ΚΑΝΟΝΙΚΗ κάρτα: ίδιο HTML & κουμπιά Original(+Delete)
             for rid, t, u, d in rows:
                 card_html = (d or "").strip()
                 if not card_html:
                     title_txt = (t or "").strip() or "(no title)"
                     card_html = f"<b>{title_txt}</b>"
-                # Προσοχή: ΜΟΝΟ Original + Delete για Saved (όχι Save).
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔗 Original", url=u or "")],
-                    [InlineKeyboardButton("🗑️ Delete", callback_data=f"saved:del:{rid}")]
-                ])
+
+                # Build keyboard safely (skip Original if no URL to avoid Telegram error)
+                kb_rows = []
+                if u and u.strip():
+                    kb_rows.append([InlineKeyboardButton("🔗 Original", url=u)])
+                kb_rows.append([InlineKeyboardButton("🗑️ Delete", callback_data=f"saved:del:{rid}")])
+                kb = InlineKeyboardMarkup(kb_rows)
+
                 await q.message.chat.send_message(
                     card_html,
                     parse_mode=ParseMode.HTML,
@@ -535,11 +538,16 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s.commit()
         except Exception as e:
             log.exception("job:save db error: %s", e)
+        # ΖΗΤΗΘΗΚΕ: να σβήνει η κάρτα από το chat μετά το Save
         try:
             if msg:
-                await msg.edit_reply_markup(reply_markup=None)
+                await msg.delete()
         except Exception:
-            pass
+            try:
+                if msg:
+                    await msg.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
         return await q.answer("Saved")
 
     if data == "job:delete":
