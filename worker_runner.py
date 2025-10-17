@@ -4,7 +4,7 @@ def _h(s: str) -> str:
     return _esc((s or '').strip(), quote=False)
 
 #!/usr/bin/env python3
-# worker_runner.py — per-user fetch, keyword-only filter, force match display, DB dedup, correct budget formatting
+# worker_runner.py — per-user fetch, keyword-only filter, DB dedup, correct budget formatting
 
 import os, logging, asyncio, hashlib
 from typing import Dict, List, Optional, Set
@@ -102,7 +102,7 @@ def _compose_message(it: Dict) -> str:
     desc = (it.get("description") or "").strip()
     if len(desc) > 700:
         desc = desc[:700] + "…"
-    src = it.get("source", "freelancer")
+    src = (it.get("source") or "Freelancer").strip() or "Freelancer"
 
     display_ccy = (
         it.get("currency_display")
@@ -146,18 +146,15 @@ def _compose_message(it: Dict) -> str:
 
     budget_str = (orig + usd_hint).strip()
 
+    lines: List[str] = [f"<b>{_h(title)}</b>"]
     if budget_str:
-        lines.append(f"💰 <i>Budget: {budget_str}</i>")
-    if desc:
-        lines.append(desc)
-
+        lines.append(f"<b>Budget:</b> {_h(budget_str)}")
+    lines.append(_h(desc) if desc else "")
     mk = it.get("matched_keyword") or it.get("match") or it.get("keyword")
     if mk:
-        lines.append(f"🔎 <i>Keyword: {mk}</i>")
-
-    lines.append(f"🏷️ <i>{src}</i>")
-    return "\n".join(lines)
-
+        lines.append(f"<b>Match:</b> {_h(mk)}")
+    lines.append(f"<b>Source:</b> {_h(src)}")
+    return "\n".join([ln for ln in lines if ln])
 
 def _build_keyboard(links: Dict[str, Optional[str]]):
     try:
@@ -165,8 +162,8 @@ def _build_keyboard(links: Dict[str, Optional[str]]):
         return _job_kb(links["original"], links["proposal"], links["affiliate"])
     except Exception:
         row1 = [
-            InlineKeyboardButton("📝 Proposal", url=links["proposal"] or links["original"] or ""),
-            InlineKeyboardButton("🔗 Original", url=links["original"] or ""),
+            InlineKeyboardButton("📄 Proposal", url=(links.get("proposal") or links.get("original") or "")),
+            InlineKeyboardButton("🔗 Original", url=(links.get("original") or "")),
         ]
         row2 = [
             InlineKeyboardButton("⭐ Save", callback_data="job:save"),

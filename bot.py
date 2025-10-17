@@ -231,7 +231,7 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Match:</b> logo\n"
         "✏️ Please create an editable version of the email signature based on the provided logo.\n"
     )
-    url = "https://www.freelancer.com/get/apstld?f=give&dl=https://www.freelancer.com/projects/sample"
+    url = "https://www.freelancer.com/projects/sample"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Proposal", url=url),
          InlineKeyboardButton("🔗 Original", url=url)],
@@ -379,13 +379,11 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for rid, t, u, d in rows:
                 card_html = (d or "").strip()
                 if not card_html:
-                    # fallback μορφή – απλή κάρτα με τίτλο
                     title_txt = (t or "").strip() or "(no title)"
                     card_html = f"<b>{title_txt}</b>"
-
+                # Προσοχή: ΜΟΝΟ Original + Delete για Saved (όχι Save).
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📄 Proposal", url=u or ""),
-                     InlineKeyboardButton("🔗 Original", url=u or "")],
+                    [InlineKeyboardButton("🔗 Original", url=u or "")],
                     [InlineKeyboardButton("🗑️ Delete", callback_data=f"saved:del:{rid}")]
                 ])
                 await q.message.chat.send_message(
@@ -473,7 +471,6 @@ async def saved_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             uobj = _get_user(s, q.from_user.id)
             s.execute(_t("DELETE FROM saved_job WHERE id=:rid AND user_id=:uid"), {"rid": rid, "uid": uobj.id})
             s.commit()
-        # remove markup from the message so φαίνεται ότι διαγράφηκε
         try:
             await q.message.edit_reply_markup(reply_markup=None)
         except Exception:
@@ -529,7 +526,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
                     )
                 """))
-                # Ensure DB user exists and get internal id (FK-safe)
                 from db import get_or_create_user_by_tid as _get_user
                 uobj = _get_user(s, user_id)
                 db_user_id = uobj.id
