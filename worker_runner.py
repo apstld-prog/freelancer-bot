@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # worker_runner.py — per-user fetch, keyword-only filter, DB dedup, correct budget formatting
+# + Update: global 2-day freshness filter for ALL platforms & chronological sorting
 
 import os, logging, asyncio, hashlib
 from typing import Dict, List, Optional, Set
@@ -17,6 +18,9 @@ from telegram.constants import ParseMode
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
+
+# Freshness window (hours). Per user request: last 2 days across ALL platforms.
+FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 
 def _h(s: str) -> str:
     return _esc((s or '').strip(), quote=False)
@@ -92,7 +96,7 @@ def _find_match_keyword(it: Dict, kws: List[str]) -> Optional[str]:
     if not kws: return None
     hay = f"{(it.get('title') or '').lower()}\n{(it.get('description') or '').lower()}"
     for kw in kws:
-        if (kw or "").strip().lower() in hay:
+        if (kw or '').strip().lower() in hay:
             return kw  # keep original casing
     return None
 
@@ -125,6 +129,7 @@ def _to_dt(val) -> Optional[datetime]:
             "%Y-%m-%dT%H:%M:%S.%f%z",
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%dT%H:%M:%S",
+            "%a, %d %b %Y %H:%M:%S %z",  # RSS pubDate
         ):
             try:
                 dt = datetime.strptime(s2, fmt)
@@ -139,16 +144,25 @@ def _to_dt(val) -> Optional[datetime]:
         return None
     return None
 
+def _extract_dt(it: Dict) -> Optional[datetime]:
+    ts_candidates = [
+        it.get("time_submitted"),
+        it.get("posted_at"),
+        it.get("created_at"),
+        it.get("timestamp"),
+        it.get("date"),
+        it.get("pub_date"),
+        it.get("published"),
+    ]
+    for ts in ts_candidates:
+        dt = _to_dt(ts)
+        if dt:
+            return dt
+    return None
+
 def _time_ago_from_item(it: Dict) -> Optional[str]:
     """Return 'X minutes ago' style string if we can parse a timestamp from the item."""
-    ts = (
-        it.get("time_submitted")
-        or it.get("posted_at")
-        or it.get("created_at")
-        or it.get("timestamp")
-        or it.get("date")
-    )
-    dt = _to_dt(ts)
+    dt = _extract_dt(it)
     if not dt:
         return None
     now = datetime.now(timezone.utc)
@@ -226,7 +240,7 @@ def _compose_message(it: Dict) -> str:
         lines.append(f"<b>Budget:</b> {_h(budget_str)}")
     lines.append(f"<b>Source:</b> {_h(src)}")
 
-    # NEW: relative time if available
+    # Relative time if available
     rel = _time_ago_from_item(it)
     if rel:
         lines.append(f"<b>Posted:</b> {_h(rel)}")
@@ -301,11 +315,12 @@ async def amain():
         try:
             users = await asyncio.to_thread(_fetch_all_users)
             if users:
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
                 for tid in users:
                     kws = await asyncio.to_thread(_fetch_user_keywords, tid)
                     items = await asyncio.to_thread(_worker.run_pipeline, kws)
 
-                    # ⭐ Filter: keep ONLY items with a keyword match
+                    # Keyword filter (keep only items with a keyword match)
                     filtered: List[Dict] = []
                     for it in items:
                         mk = it.get("matched_keyword") or _find_match_keyword(it, kws)
@@ -313,7 +328,16 @@ async def amain():
                             continue  # skip non-matching items
                         if mk:
                             it["matched_keyword"] = mk  # ensure it's visible in message
+
+                        # Global freshness filter (2 days) for ALL platforms
+                        dt = _extract_dt(it)
+                        if not dt or dt < cutoff:
+                            continue
+
                         filtered.append(it)
+
+                    # Sort merged stream by publish time (desc, newest first)
+                    filtered.sort(key=lambda x: _extract_dt(x) or cutoff, reverse=True)
 
                     if filtered:
                         await _send_items(bot, tid, filtered, per_user_batch)

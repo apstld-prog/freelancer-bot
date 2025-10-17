@@ -1,69 +1,153 @@
-# platform_peopleperhour.py
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urlencode
+# platform_peopleperhour.py — RSS-based fetcher for PeoplePerHour
+# Returns items aligned with existing schema used by worker/runner.
+# Env:
+#   ENABLE_PPH=1
+#   P_PEOPLEPERHOUR=1
+#   PPH_RSS_URLS="https://www.peopleperhour.com/freelance-jobs/rss?query=logo,https://www.peopleperhour.com/freelance-jobs/rss?query=lighting"
+#
+# Notes:
+# - Only items from the last 48 hours are returned (global freshness consistency).
+# - Keyword filtering is STILL applied in worker_runner (kept here only as an optional optimization).
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
+from typing import List, Dict, Optional
+import os, re, time, math, html
+from datetime import datetime, timezone, timedelta
+import httpx
+import xml.etree.ElementTree as ET
 
-BASE = "https://www.peopleperhour.com"
-SEARCH = BASE + "/freelance-jobs"
+FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 
-def fetch(query: str | None = None, max_items: int = 50):
-    """
-    Αν δεν στείλεις query -> επιστρέφει τα πιο πρόσφατα jobs από την κεντρική αναζήτηση.
-    Επιστρέφει list[dict] με πεδία: title, url, description, source, platform, budget_min, budget_max (όπου βρεθεί).
-    """
-    out = []
-    params = {}
-    if query:
-        params["q"] = query
-    url = SEARCH + ("?" + urlencode(params) if params else "")
-    resp = requests.get(url, headers=HEADERS, timeout=20)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (compatible; JobBot/1.0; +https://example.com/bot)")
 
-    # Κάρτες εργασιών — οι selectors αλλάζουν, οπότε έχουμε fallback αλυσίδα
-    cards = soup.select("[data-at='job-card'], .job, article, li")
-    seen = set()
-    for c in cards:
-        a = c.find("a", href=True)
-        if not a:
-            continue
-        href = a["href"]
-        if href.startswith("/"):
-            href = BASE + href
-        title = a.get_text(strip=True)
-        if (title, href) in seen:
-            continue
-        seen.add((title, href))
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
-        # Περιγραφή / budget (best effort)
-        desc_el = c.find("p") or c.find("div", class_=lambda x: x and "desc" in x.lower()) or c
-        desc = desc_el.get_text(" ", strip=True) if desc_el else ""
-        budget_min = budget_max = None
-        budgel = c.find(string=lambda s: s and ("$" in s or "€" in s or "£" in s))
-        if budgel:
-            # απλή εξαγωγή ποσών
-            import re
-            nums = [n.replace(",", "") for n in re.findall(r"(\d+[.,]?\d*)", budgel)]
-            if len(nums) == 1:
-                budget_min = float(nums[0])
-            elif len(nums) >= 2:
-                try:
-                    budget_min = float(nums[0]); budget_max = float(nums[1])
-                except:
-                    pass
+def _parse_rss_datetime(s: str) -> Optional[datetime]:
+    if not s:
+        return None
+    s = s.strip()
+    # Common RSS/HTTP date formats
+    fmts = [
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S %Z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+    for fmt in fmts:
+        try:
+            dt = datetime.strptime(s.replace("GMT","+0000"), fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt
+        except Exception:
+            pass
+    return None
 
-        out.append({
+def _strip_html(s: str) -> str:
+    try:
+        # naive strip of tags
+        text = re.sub(r"<[^>]+>", " ", s or "", flags=re.S|re.I)
+        return html.unescape(re.sub(r"\s+", " ", text)).strip()
+    except Exception:
+        return (s or "").strip()
+
+def _match_keyword(title: str, description: str, keywords: List[str]) -> Optional[str]:
+    hay = f"{(title or '').lower()}\n{(description or '').lower()}"
+    for kw in keywords or []:
+        k = (kw or "").strip().lower()
+        if k and k in hay:
+            return kw  # keep original casing
+    return None
+
+def _fetch_rss(url: str, timeout: float = 15.0) -> List[Dict]:
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"}
+    r = httpx.get(url, headers=headers, timeout=timeout, follow_redirects=True)
+    r.raise_for_status()
+    # Parse XML
+    items: List[Dict] = []
+    try:
+        root = ET.fromstring(r.text)
+    except Exception:
+        return items
+
+    # Support both RSS 2.0 and Atom if needed
+    # RSS: channel/item
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        pub = (item.findtext("pubDate") or "").strip()
+        desc = _strip_html(item.findtext("description") or "")
+        items.append({
             "title": title,
-            "url": href,
             "description": desc,
-            "source": "PeoplePerHour",
-            "platform": "peopleperhour",
-            "budget_min": budget_min,
-            "budget_max": budget_max,
+            "url": link,
+            "original_url": link,
+            "source": "peopleperhour",
+            "date": pub,  # parsed downstream
         })
-        if len(out) >= max_items:
-            break
 
-    return out
+    # Atom fallback
+    if not items:
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall(".//a:entry", ns):
+            title = (entry.findtext("a:title", default="", namespaces=ns) or "").strip()
+            link_el = entry.find("a:link", ns)
+            link = (link_el.attrib.get("href") if link_el is not None else "").strip()
+            pub = (entry.findtext("a:updated", default="", namespaces=ns) or "").strip()
+            desc = _strip_html(entry.findtext("a:summary", default="", namespaces=ns) or "")
+            items.append({
+                "title": title,
+                "description": desc,
+                "url": link,
+                "original_url": link,
+                "source": "peopleperhour",
+                "date": pub,
+            })
+
+    return items
+
+def get_items(keywords: List[str]) -> List[Dict]:
+    """Public entry used by worker to fetch PeoplePerHour items."""
+    if not (os.getenv("ENABLE_PPH", "0") == "1" and os.getenv("P_PEOPLEPERHOUR", "0") == "1"):
+        return []
+
+    urls_env = os.getenv("PPH_RSS_URLS", "").strip()
+    if not urls_env:
+        return []
+
+    urls = [u.strip() for u in urls_env.split(",") if u.strip()]
+    cutoff = _now_utc() - timedelta(hours=FRESH_HOURS)
+
+    out: List[Dict] = []
+    for url in urls:
+        try:
+            items = _fetch_rss(url)
+        except Exception:
+            items = []
+        for it in items:
+            # freshness
+            dt = _parse_rss_datetime(it.get("date") or "")
+            if not dt or dt < cutoff:
+                continue
+            # optional local keyword pre-filter (runner also filters)
+            mk = _match_keyword(it.get("title", ""), it.get("description",""), keywords or [])
+            if mk:
+                it["matched_keyword"] = mk
+            out.append(it)
+
+    # De-dup by URL
+    seen = set()
+    uniq: List[Dict] = []
+    for it in out:
+        key = (it.get("url") or it.get("original_url") or "").strip()
+        if not key:
+            key = f"peopleperhour::{(it.get('title') or '')[:160]}"
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(it)
+    return uniq
