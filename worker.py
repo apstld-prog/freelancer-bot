@@ -1,4 +1,5 @@
 # worker.py — fetch, per-user filter, annotate match, dedup, currency prepare (prefers non-USD)
+# NEW: Add humanized "posted_ago" from time_submitted (if available)
 
 from typing import List, Dict, Optional, Tuple
 from config import (
@@ -11,6 +12,7 @@ import platform_skywalker as sky
 import platform_placeholders as ph
 import platform_freelancer as fr
 from db_events import ensure_feed_events_schema as ensure_schema, record_event as log_platform_event
+import time, datetime
 
 ensure_schema()
 
@@ -84,7 +86,7 @@ def deduplicate(items: List[Dict]) -> List[Dict]:
             keep[k] = it
     return list(keep.values())
 
-# ---------- currency detection ----------
+# ---------- currency + time helpers ----------
 _SYMBOL_TO_CODE = {
     "€":"EUR","£":"GBP","₹":"INR","₽":"RUB","₺":"TRY","¥":"JPY","₩":"KRW","₪":"ILS",
     "R$":"BRL","A$":"AUD","C$":"CAD","$":"USD"
@@ -119,6 +121,32 @@ def _detect_currency(item: Dict) -> Tuple[str, str]:
     display = sym or code
     return code, display
 
+def _humanize_ago(epoch_s: Optional[int]) -> Optional[str]:
+    """
+    Turn epoch seconds into '1 min ago' / '2 h ago' / '3 d ago' / 'YYYY-MM-DD'.
+    English on purpose (UI/menus requested in English).
+    """
+    if not epoch_s:
+        return None
+    try:
+        now = int(time.time())
+        diff = max(0, now - int(epoch_s))
+        if diff < 60:
+            return "just now"
+        mins = diff // 60
+        if mins < 60:
+            return f"{mins} min ago"
+        hrs = mins // 60
+        if hrs < 24:
+            return f"{hrs} h ago"
+        days = hrs // 24
+        if days < 7:
+            return f"{days} d ago"
+        # older: show date
+        return datetime.datetime.utcfromtimestamp(epoch_s).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
 def prepare_display(item: Dict, rates: Dict) -> Dict:
     out = dict(item)
     code, display = _detect_currency(out)
@@ -130,6 +158,11 @@ def prepare_display(item: Dict, rates: Dict) -> Dict:
     # ✅ Preserve matched keyword so it appears in Telegram
     if "matched_keyword" in item:
         out["matched_keyword"] = item["matched_keyword"]
+    # ✅ NEW: pass through time_submitted + humanized string
+    ts = item.get("time_submitted")
+    if ts:
+        out["time_submitted"] = int(ts)
+        out["posted_ago"] = _humanize_ago(int(ts))
     return out
 
 def wrap_freelancer(url: str) -> str:

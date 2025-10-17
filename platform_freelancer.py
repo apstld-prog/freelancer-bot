@@ -4,9 +4,10 @@
 # - Provides budget_min/budget_max, original_currency, currency_symbol
 # - Emits 'matched_keyword' when keywords_query provided
 # - Leaves presentation to worker/runner
+# - NEW: Expose submission time (time_submitted epoch + ISO)
 
 from typing import List, Dict, Optional
-import os, time, json, math
+import os, time, json, math, datetime
 import httpx
 
 # Public feed endpoint (no secret)
@@ -41,6 +42,30 @@ def _make_url(project) -> str:
     pid = project.get("id")
     return f"https://www.freelancer.com/projects/{pid}"
 
+def _extract_time_submitted(p) -> Optional[int]:
+    """
+    Try hard to get a unix epoch (seconds) for time submitted.
+    The API usually returns `time_submitted` as seconds since epoch.
+    """
+    ts = p.get("time_submitted")
+    # Some payloads may use 'submitdate' or 'submitted'
+    if ts is None:
+        ts = p.get("submitdate") or p.get("submitted")
+    # Normalize to int epoch seconds if possible
+    try:
+        # already epoch?
+        f = float(ts)
+        if f > 1e12:  # ms -> s
+            f = f / 1000.0
+        return int(f)
+    except Exception:
+        # Maybe ISO string
+        try:
+            dt = datetime.datetime.fromisoformat(str(ts).replace("Z","+00:00"))
+            return int(dt.timestamp())
+        except Exception:
+            return None
+
 def _normalize_project(p) -> Dict:
     title = p.get("title") or ""
     desc = p.get("preview_description") or p.get("description") or ""
@@ -59,6 +84,12 @@ def _normalize_project(p) -> Dict:
     min_amt = _safe_num(b.get("minimum"))
     max_amt = _safe_num(b.get("maximum"))
 
+    # time submitted
+    ts = _extract_time_submitted(p)
+    iso = None
+    if ts:
+        iso = datetime.datetime.utcfromtimestamp(ts).isoformat() + "Z"
+
     out = {
         "source": "freelancer",
         "title": title.strip(),
@@ -68,6 +99,9 @@ def _normalize_project(p) -> Dict:
         "budget_max": max_amt,
         "original_currency": ccy,
         "currency_symbol": _ccy_symbol(ccy),
+        # NEW:
+        "time_submitted": ts,           # epoch seconds (UTC)
+        "time_submitted_iso": iso,      # ISO string (UTC)
     }
     # convenience aliases used by runner
     out["currency_display"] = out["currency_symbol"] if out["currency_symbol"] else (ccy or "USD")
