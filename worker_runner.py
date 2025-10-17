@@ -1,13 +1,10 @@
-from html import escape as _esc
-
-def _h(s: str) -> str:
-    return _esc((s or '').strip(), quote=False)
-
 #!/usr/bin/env python3
 # worker_runner.py — per-user fetch, keyword-only filter, DB dedup, correct budget formatting
 
 import os, logging, asyncio, hashlib
 from typing import Dict, List, Optional, Set
+from html import escape as _esc
+from datetime import datetime, timezone, timedelta
 
 import worker as _worker
 from sqlalchemy import text as _sql_text
@@ -20,6 +17,9 @@ from telegram.constants import ParseMode
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
+
+def _h(s: str) -> str:
+    return _esc((s or '').strip(), quote=False)
 
 # ============ DB: sent dedup ============
 def _ensure_sent_schema():
@@ -96,6 +96,81 @@ def _find_match_keyword(it: Dict, kws: List[str]) -> Optional[str]:
             return kw  # keep original casing
     return None
 
+# ============ Time helpers ============
+def _to_dt(val) -> Optional[datetime]:
+    """Best-effort convert various timestamp formats to aware UTC datetime."""
+    if val is None:
+        return None
+    try:
+        # numeric epoch seconds or milliseconds
+        if isinstance(val, (int, float)):
+            sec = float(val)
+            if sec > 1e12:  # likely ms
+                sec /= 1000.0
+            return datetime.fromtimestamp(sec, tz=timezone.utc)
+        # strings
+        s = str(val).strip()
+        # try integer string
+        if s.isdigit():
+            sec = int(s)
+            if sec > 1e12:
+                sec /= 1000.0
+            return datetime.fromtimestamp(sec, tz=timezone.utc)
+        # normalize Z
+        s2 = s.replace("Z", "+00:00")
+        # common ISO formats
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S.%f%z",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+        ):
+            try:
+                dt = datetime.strptime(s2, fmt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                else:
+                    dt = dt.astimezone(timezone.utc)
+                return dt
+            except Exception:
+                pass
+    except Exception:
+        return None
+    return None
+
+def _time_ago_from_item(it: Dict) -> Optional[str]:
+    """Return 'X minutes ago' style string if we can parse a timestamp from the item."""
+    ts = (
+        it.get("time_submitted")
+        or it.get("posted_at")
+        or it.get("created_at")
+        or it.get("timestamp")
+        or it.get("date")
+    )
+    dt = _to_dt(ts)
+    if not dt:
+        return None
+    now = datetime.now(timezone.utc)
+    delta: timedelta = now - dt
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    if days < 30:
+        return f"{days} day{'s' if days != 1 else ''} ago"
+    months = days // 30
+    if months < 12:
+        return f"{months} month{'s' if months != 1 else ''} ago"
+    years = months // 12
+    return f"{years} year{'s' if years != 1 else ''} ago"
+
 # ============ Message compose ============
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
@@ -150,6 +225,12 @@ def _compose_message(it: Dict) -> str:
     if budget_str:
         lines.append(f"<b>Budget:</b> {_h(budget_str)}")
     lines.append(f"<b>Source:</b> {_h(src)}")
+
+    # NEW: relative time if available
+    rel = _time_ago_from_item(it)
+    if rel:
+        lines.append(f"<b>Posted:</b> {_h(rel)}")
+
     mk = it.get("matched_keyword") or it.get("match") or it.get("keyword")
     if mk:
         lines.append(f"<b>Match:</b> {_h(mk)}")
