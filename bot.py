@@ -474,10 +474,17 @@ async def saved_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             uobj = _get_user(s, q.from_user.id)
             s.execute(_t("DELETE FROM saved_job WHERE id=:rid AND user_id=:uid"), {"rid": rid, "uid": uobj.id})
             s.commit()
+
+        # Διαγράφουμε και το μήνυμα της κάρτας από το chat.
         try:
-            await q.message.edit_reply_markup(reply_markup=None)
+            await q.message.delete()
         except Exception:
-            pass
+            # fallback: τουλάχιστον βγάζουμε τα κουμπιά
+            try:
+                await q.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+
         await q.answer("Deleted")
     except Exception as e:
         log.exception("saved:del error: %s", e)
