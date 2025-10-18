@@ -1,4 +1,4 @@
-# platform_peopleperhour.py — PPH real jobs + budget/desc + fallback browse
+# platform_peopleperhour.py — PPH real jobs + budget/desc + aggressive fallback scan
 from typing import List, Dict, Optional, Tuple
 import os, re, html, urllib.parse, logging, json
 from datetime import datetime, timezone, timedelta
@@ -8,12 +8,12 @@ log = logging.getLogger("pph")
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 JobBot/1.3")
+                                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 JobBot/1.4")
 PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "0") == "1"
 PPH_DYNAMIC_FROM_KEYWORDS = os.getenv("PPH_DYNAMIC_FROM_KEYWORDS", "0") == "1"
 PPH_BASE = os.getenv("PPH_BASE_URL", "https://www.peopleperhour.com/freelance-jobs?search={kw}")
 PPH_PER_KEYWORD_LIMIT = int(os.getenv("PPH_PER_KEYWORD_LIMIT", "8"))
-PPH_FALLBACK_BROWSE = os.getenv("PPH_FALLBACK_BROWSE", "1") == "1"   # <— NEW: on by default
+PPH_FALLBACK_BROWSE = os.getenv("PPH_FALLBACK_BROWSE", "1") == "1"
 
 _CURRENCY_MAP = {"£":"GBP","€":"EUR","$":"USD","C$":"CAD","A$":"AUD","₹":"INR","NZ$":"NZD","CHF":"CHF"}
 _SYM_ORDER = sorted(_CURRENCY_MAP.keys(), key=len, reverse=True)
@@ -21,17 +21,12 @@ _SYM_ORDER = sorted(_CURRENCY_MAP.keys(), key=len, reverse=True)
 def _parse_rss_datetime(s: str) -> Optional[datetime]:
     if not s: return None
     s = s.strip()
-    fmts = [
-        "%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z",
-        "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S",
-    ]
-    for fmt in fmts:
+    for fmt in ("%a, %d %b %Y %H:%M:%S %z","%a, %d %b %Y %H:%M:%S %Z",
+                "%Y-%m-%dT%H:%M:%S%z","%Y-%m-%d %H:%M:%S%z",
+                "%Y-%m-%dT%H:%M:%S","%Y-%m-%d %H:%M:%S"):
         try:
             dt = datetime.strptime(s.replace("GMT","+0000"), fmt)
-            if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
-            else: dt = dt.astimezone(timezone.utc)
-            return dt
+            return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
         except Exception:
             pass
     return None
@@ -80,21 +75,23 @@ def _fetch(url: str, timeout: float = 15.0):
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
         "Referer": "https://www.peopleperhour.com/",
+        "Accept-Language": "en-US,en;q=0.9",
     }
     r = httpx.get(url, headers=headers, timeout=timeout, follow_redirects=True)
     r.raise_for_status()
-    ctype = r.headers.get("Content-Type","").lower()
-    return r.text, ctype
+    return r.text, (r.headers.get("Content-Type","").lower())
 
 # ---------- Listing → job URLs ----------
 _RE_HREF_JOB = re.compile(r'href="(?P<href>/(?:job/\d+(?:-[^" ]*)?|freelance-jobs/[^/" ]+-\d+))"', re.I)
-_RE_DATA_JOB = re.compile(r'data-(?:job|project)-id="(?P<id>\d+)"', re.I)  # π.χ. data-job-id="123456"
+_RE_DATA_JOB = re.compile(r'data-(?:job|project)-id="(?P<id>\d+)"', re.I)
+# aggressive: πιάσε /job/123456 ή /freelance-jobs/...-123456 οπουδήποτε (HTML ή JS strings)
+_RE_ANY_JOB = re.compile(r'/(?:job/(?P<id>\d{4,12})(?:-[^"\'\s]*)?|freelance-jobs/[^/"\'\s]+-(?P<id2>\d{4,12}))', re.I)
 
 def _parse_listing_for_job_urls(html_text: str) -> List[str]:
     txt = re.sub(r"\s+", " ", html_text)
     urls, seen = [], set()
 
-    # 1) από href με id
+    # 1) href-based
     for m in _RE_HREF_JOB.finditer(txt):
         href = m.group("href")
         if href in seen: continue
@@ -102,13 +99,31 @@ def _parse_listing_for_job_urls(html_text: str) -> List[str]:
         urls.append("https://www.peopleperhour.com" + href)
         if len(urls) >= 60: break
 
-    # 2) από data-job-id / data-project-id ⇒ συνθέτουμε /job/<id>
-    for m in _RE_DATA_JOB.finditer(txt):
-        jid = m.group("id")
-        url = f"https://www.peopleperhour.com/job/{jid}"
-        if url in urls: continue
-        urls.append(url)
-        if len(urls) >= 60: break
+    # 2) data-id cards
+    if len(urls) < 12:
+        for m in _RE_DATA_JOB.finditer(txt):
+            jid = m.group("id")
+            url = f"https://www.peopleperhour.com/job/{jid}"
+            if url in urls: continue
+            urls.append(url)
+            if len(urls) >= 60: break
+
+    # 3) aggressive scan (HTML/JS)
+    if len(urls) < 12:
+        seen_ids = set()
+        for m in _RE_ANY_JOB.finditer(txt):
+            if m.group("id"):
+                jid = m.group("id")
+                if jid in seen_ids: continue
+                seen_ids.add(jid)
+                urls.append(f"https://www.peopleperhour.com/job/{jid}")
+            else:
+                # whole matched path already includes slug-id
+                path = m.group(0)
+                if path in seen: continue
+                seen.add(path)
+                urls.append("https://www.peopleperhour.com" + path)
+            if len(urls) >= 60: break
 
     return urls
 
@@ -236,15 +251,13 @@ def get_items(keywords: List[str]) -> List[Dict]:
                 low_kws = { (k or '').strip().lower(): k for k in keywords }
                 for t in url_terms:
                     lk = t.lower()
-                    if lk in low_kws:
-                        mk = low_kws[lk]; break
+                    if lk in low_kws: mk = low_kws[lk]; break
             if mk:
                 item["matched_keyword"] = mk
                 out.append(item)
             else:
                 if PPH_SEND_ALL:
-                    if url_terms:
-                        item["matched_keyword"] = url_terms[0]
+                    if url_terms: item["matched_keyword"] = url_terms[0]
                     out.append(item)
 
     for url in urls:
@@ -254,12 +267,10 @@ def get_items(keywords: List[str]) -> List[Dict]:
             logging.warning("PPH fetch failed: %s", e); 
             continue
 
-        before_count = len(out)
+        before = len(out)
         _collect_from_listing(body, _terms_from_url(url))
 
-        # FALLBACK: αν δεν βρέθηκε τίποτα από το συγκεκριμένο search,
-        # δοκίμασε τη γενική λίστα και κάνε client-side match.
-        if PPH_FALLBACK_BROWSE and len(out) == before_count:
+        if PPH_FALLBACK_BROWSE and len(out) == before:
             try:
                 generic_body, _ = _fetch("https://www.peopleperhour.com/freelance-jobs")
                 _collect_from_listing(generic_body, [])
