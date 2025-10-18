@@ -1,1 +1,1 @@
-Copy files, Restart Service. Ensure ENABLE_PPH=1, P_PEOPLEPERHOUR=1, PPH_RSS_URLS=..., FRESH_WINDOW_HOURS=48.
+Replace bot.py, platform_peopleperhour.py, worker_runner.py. Restart Service. Ensure ENABLE_PPH=1, P_PEOPLEPERHOUR=1, PPH_RSS_URLS set.

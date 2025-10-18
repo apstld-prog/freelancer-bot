@@ -1,4 +1,4 @@
-# platform_peopleperhour.py — RSS-based PeoplePerHour fetcher
+# platform_peopleperhour.py — RSS-based PeoplePerHour fetcher (48h freshness)
 from typing import List, Dict, Optional
 import os, re, html
 from datetime import datetime, timezone, timedelta
@@ -32,7 +32,7 @@ def _parse_rss_datetime(s: str) -> Optional[datetime]:
 def _strip_html(s: str) -> str:
     try:
         text = re.sub(r"<[^>]+>", " ", s or "", flags=re.S|re.I)
-        return html.unescape(re.sub(r"\s+", " ", text)).strip()
+        return html.unescape(resub(r"\s+", " ", text)).strip()
     except Exception:
         return (s or "").strip()
 
