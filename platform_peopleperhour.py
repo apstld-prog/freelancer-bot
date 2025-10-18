@@ -1,12 +1,14 @@
+
 # platform_peopleperhour.py — RSS-based PeoplePerHour fetcher (48h freshness)
 from typing import List, Dict, Optional
-import os, re, html
+import os, re, html, urllib.parse
 from datetime import datetime, timezone, timedelta
 import httpx
 import xml.etree.ElementTree as ET
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (compatible; JobBot/1.0)")
+PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "0") == "1"  # if 1, pass all (within 48h) relying on PPH search in URL
 
 def _parse_rss_datetime(s: str) -> Optional[datetime]:
     if not s: return None
@@ -32,7 +34,7 @@ def _parse_rss_datetime(s: str) -> Optional[datetime]:
 def _strip_html(s: str) -> str:
     try:
         text = re.sub(r"<[^>]+>", " ", s or "", flags=re.S|re.I)
-        return html.unescape(resub(r"\s+", " ", text)).strip()
+        return html.unescape(re.sub(r"\s+", " ", text)).strip()
     except Exception:
         return (s or "").strip()
 
@@ -42,6 +44,17 @@ def _match_keyword(title: str, description: str, keywords: List[str]) -> Optiona
         k = (kw or "").strip().lower()
         if k and k in hay: return kw
     return None
+
+def _terms_from_url(url: str) -> List[str]:
+    try:
+        q = urllib.parse.urlparse(url).query
+        params = urllib.parse.parse_qs(q)
+        raw = ",".join(params.get("search", [])).strip()
+        if not raw: return []
+        parts = re.split(r"[,+\s]+", urllib.parse.unquote_plus(raw))
+        return [p.strip() for p in parts if p.strip()]
+    except Exception:
+        return []
 
 def _fetch_rss(url: str, timeout: float = 15.0) -> List[Dict]:
     headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"}
@@ -82,12 +95,27 @@ def get_items(keywords: List[str]) -> List[Dict]:
             items = _fetch_rss(url)
         except Exception:
             items = []
+        url_terms = _terms_from_url(url)
         for it in items:
             dt = _parse_rss_datetime(it.get("date") or "")
-            if not dt or dt < cutoff: continue
+            if not dt or dt < cutoff: 
+                continue
             mk = _match_keyword(it.get("title",""), it.get("description",""), keywords or [])
-            if mk: it["matched_keyword"] = mk
-            out.append(it)
+            if not mk and url_terms and keywords:
+                low_kws = { (k or '').strip().lower(): k for k in keywords }
+                for t in url_terms:
+                    lk = t.lower()
+                    if lk in low_kws:
+                        mk = low_kws[lk]
+                        break
+            if mk:
+                it["matched_keyword"] = mk
+                out.append(it)
+            else:
+                if PPH_SEND_ALL:
+                    if url_terms:
+                        it["matched_keyword"] = url_terms[0]
+                    out.append(it)
     seen=set(); uniq=[]
     for it in out:
         key = (it.get("url") or it.get("original_url") or "").strip() or f"pph::{(it.get('title') or '')[:160]}"
