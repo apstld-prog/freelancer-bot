@@ -75,12 +75,12 @@ def _to_dt(val) -> Optional[datetime]:
     if val is None: return None
     try:
         if isinstance(val,(int,float)):
-            sec=float(val); 
+            sec=float(val)
             if sec>1e12: sec/=1000.0
             return datetime.fromtimestamp(sec,tz=timezone.utc)
         s=str(val).strip()
         if s.isdigit():
-            sec=int(s); 
+            sec=int(s)
             if sec>1e12: sec/=1000.0
             return datetime.fromtimestamp(sec,tz=timezone.utc)
         s2=s.replace("Z","+00:00")
@@ -206,6 +206,30 @@ def _gather_items(keywords: List[str]) -> List[Dict]:
 
     return items
 
+# ---------------- NEW: interleave per source ----------------
+def interleave_by_source(items: List[Dict]) -> List[Dict]:
+    """
+    Keeps global recency but alternates sources (e.g., freelancer / peopleperhour),
+    so καμία πλατφόρμα δεν “σκεπάζει” την άλλη στο batch.
+    """
+    from collections import deque
+    buckets = {}
+    for it in items:
+        src = (it.get("source") or "freelancer").lower()
+        buckets.setdefault(src, []).append(it)
+    dqs = {src: deque(lst) for src, lst in buckets.items()}
+    order = list(dqs.keys())   # e.g. ['freelancer','peopleperhour']
+    out: List[Dict] = []
+    while True:
+        progressed = False
+        for src in order:
+            if dqs[src]:
+                out.append(dqs[src].popleft())
+                progressed = True
+        if not progressed:
+            break
+    return out
+
 async def amain():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
     if not token:
@@ -244,11 +268,12 @@ async def amain():
                         continue
                     filtered.append(it)
 
-                # newest first
+                # newest first, then interleave per source
                 filtered.sort(key=lambda x: _extract_dt(x) or cutoff, reverse=True)
+                mixed = interleave_by_source(filtered)
 
-                if filtered:
-                    await _send_items(bot, tid, filtered, per_user_batch)
+                if mixed:
+                    await _send_items(bot, tid, mixed, per_user_batch)
         except Exception as e:
             log.error("[runner compat] pipeline error: %s", e)
         await asyncio.sleep(interval)
