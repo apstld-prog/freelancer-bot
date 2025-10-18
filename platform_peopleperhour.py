@@ -1,20 +1,18 @@
-# platform_peopleperhour.py — dynamic RSS from user keywords
+
+# platform_peopleperhour.py — dynamic RSS from user keywords with HTML fallback
 from typing import List, Dict, Optional
 import os, re, html, urllib.parse, logging
 from datetime import datetime, timezone, timedelta
 import httpx
-import xml.etree.ElementTree as ET
 
 log = logging.getLogger("pph")
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
-USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (compatible; JobBot/1.0)")
+USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 JobBot/1.0")
 PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "0") == "1"
 PPH_DYNAMIC_FROM_KEYWORDS = os.getenv("PPH_DYNAMIC_FROM_KEYWORDS", "0") == "1"
-PPH_BASE = os.getenv(
-    "PPH_BASE_URL",
-    "https://www.peopleperhour.com/freelance-jobs?rss=1&search={kw}",
-)
+PPH_BASE = os.getenv("PPH_BASE_URL", "https://www.peopleperhour.com/freelance-jobs?search={kw}")
 
 def _parse_rss_datetime(s: str) -> Optional[datetime]:
     if not s: return None
@@ -64,11 +62,9 @@ def _terms_from_url(url: str) -> List[str]:
 
 def _build_urls(keywords: List[str]) -> List[str]:
     urls_env = (os.getenv("PPH_RSS_URLS","") or "").strip()
-    # Template: PPH_RSS_URLS="https://.../freelance-jobs?rss=1&search={keywords}"
     if "{keywords}" in urls_env:
         joined = ",".join([urllib.parse.quote_plus(k.strip()) for k in keywords if k.strip()])
         return [urls_env.replace("{keywords}", joined)] if joined else []
-    # Dynamic ανά keyword, ή fallback αν δεν έχεις βάλει PPH_RSS_URLS
     if PPH_DYNAMIC_FROM_KEYWORDS or not urls_env:
         urls = []
         for kw in keywords or []:
@@ -76,19 +72,26 @@ def _build_urls(keywords: List[str]) -> List[str]:
             if not k: continue
             urls.append(PPH_BASE.replace("{kw}", urllib.parse.quote_plus(k)))
         return urls
-    # Στατικό (υπάρχουσα συμπεριφορά)
     return [u.strip() for u in urls_env.split(",") if u.strip()]
 
-def _fetch_rss(url: str, timeout: float = 15.0) -> List[Dict]:
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"}
+def _fetch(url: str, timeout: float = 15.0):
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/rss+xml, application/xml;q=0.9, text/html;q=0.8, */*;q=0.7",
+        "Referer": "https://www.peopleperhour.com/",
+    }
     r = httpx.get(url, headers=headers, timeout=timeout, follow_redirects=True)
     r.raise_for_status()
+    ctype = r.headers.get("Content-Type","").lower()
+    return r.text, ctype
+
+def _parse_rss(xml_text: str) -> List[Dict]:
+    import xml.etree.ElementTree as ET
     items: List[Dict] = []
     try:
-        root = ET.fromstring(r.text)
+        root = ET.fromstring(xml_text)
     except Exception:
         return items
-    # RSS 2.0
     for item in root.findall(".//item"):
         title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
@@ -102,7 +105,6 @@ def _fetch_rss(url: str, timeout: float = 15.0) -> List[Dict]:
             "source": "peopleperhour",
             "date": pub,
         })
-    # Atom fallback
     if not items:
         ns = {"a": "http://www.w3.org/2005/Atom"}
         for entry in root.findall(".//a:entry", ns):
@@ -121,6 +123,30 @@ def _fetch_rss(url: str, timeout: float = 15.0) -> List[Dict]:
             })
     return items
 
+def _parse_html_list(html_text: str) -> List[Dict]:
+    items: List[Dict] = []
+    txt = re.sub(r"\s+", " ", html_text)
+    pattern = re.compile(r'<a[^>]+href="(?P<href>/(?:freelance-jobs|job)/[^" ]+)"[^>]*>(?P<title>[^<]{5,120})</a>', re.I)
+    seen = set()
+    for m in pattern.finditer(txt):
+        href = m.group("href")
+        title = _strip_html(m.group("title"))
+        if not title or not href: continue
+        if href in seen: continue
+        seen.add(href)
+        full = "https://www.peopleperhour.com" + href
+        items.append({
+            "title": title,
+            "description": "",
+            "url": full,
+            "original_url": full,
+            "source": "peopleperhour",
+            "date": datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z"),
+        })
+        if len(items) >= 50:
+            break
+    return items
+
 def get_items(keywords: List[str]) -> List[Dict]:
     if not (os.getenv("ENABLE_PPH","0")=="1" and os.getenv("P_PEOPLEPERHOUR","0")=="1"):
         return []
@@ -128,19 +154,28 @@ def get_items(keywords: List[str]) -> List[Dict]:
     if not urls: return []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
     out: List[Dict] = []
-    fetched = fresh = matched = 0
+    total_fetched = total_fresh = 0
     for url in urls:
         try:
-            items = _fetch_rss(url)
-        except Exception:
-            items = []
+            body, ctype = _fetch(url)
+        except Exception as e:
+            log.warning("PPH fetch failed: %s", e)
+            continue
+        items: List[Dict] = []
+        if "xml" in ctype:
+            items = _parse_rss(body)
+        else:
+            items = _parse_rss(body)  # try XML first in case mislabelled
+            if not items:
+                items = _parse_html_list(body)
+
+        total_fetched += len(items)
         url_terms = _terms_from_url(url)
-        fetched += len(items)
         for it in items:
-            dt = _parse_rss_datetime(it.get("date") or "")
-            if not dt or dt < cutoff:
+            dt = _parse_rss_datetime(it.get("date") or "") or datetime.now(timezone.utc)
+            if dt < cutoff:
                 continue
-            fresh += 1
+            total_fresh += 1
             mk = _match_keyword(it.get("title",""), it.get("description",""), keywords or [])
             if not mk and url_terms and keywords:
                 low_kws = { (k or '').strip().lower(): k for k in keywords }
@@ -151,14 +186,13 @@ def get_items(keywords: List[str]) -> List[Dict]:
                         break
             if mk:
                 it["matched_keyword"] = mk
-                out.append(it); matched += 1
+                out.append(it)
             else:
                 if PPH_SEND_ALL:
                     if url_terms:
                         it["matched_keyword"] = url_terms[0]
                     out.append(it)
-    log.debug("PPH stats: fetched=%s fresh=%s sent=%s", fetched, fresh, len(out))
-    # de-dup by url
+    log.debug("PPH stats: fetched=%s fresh=%s sent=%s", total_fetched, total_fresh, len(out))
     seen=set(); uniq=[]
     for it in out:
         key = (it.get("url") or it.get("original_url") or "").strip() or f"pph::{(it.get('title') or '')[:160]}"
