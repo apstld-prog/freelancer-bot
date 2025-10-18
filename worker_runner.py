@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # worker_runner.py — per-user fetch, keyword-only filter, DB dedup, correct budget formatting
+# NOTE: UI/texts & buttons remain unchanged. Only logic added for PPH + intervals.
 
-import os, logging, asyncio, hashlib
+import os, logging, asyncio, hashlib, time
 from typing import Dict, List, Optional, Set
 from html import escape as _esc
 from datetime import datetime, timezone, timedelta
@@ -293,12 +294,27 @@ async def amain():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
-    interval = int(os.getenv("WORKER_INTERVAL", "120"))
+
+    # Base loop interval (Freelancer cadence)
+    interval = int(os.getenv("WORKER_INTERVAL", "60"))
     per_user_batch = int(os.getenv("BATCH_PER_TICK", "5"))
     bot = Bot(token=token)
-    # Dual-interval settings: Freelancer every 60s (loop), PPH every 600s (10 min)
-    pph_interval = int(os.getenv('PPH_INTERVAL_SECONDS', '600'))
-    _pph_last_ts: float = 0.0
+
+    # Per-platform cadence
+    pph_enabled = os.getenv("ENABLE_PPH", "0") == "1"
+    pph_interval = int(os.getenv("PPH_INTERVAL_SECONDS", "600"))   # default 10 minutes
+    pph_last_run = 0.0
+    pph_first_run = True
+
+    # Import lazily so we don't break when PPH is disabled
+    pph_mod = None
+    if pph_enabled:
+        try:
+            import platform_peopleperhour as _pph
+            pph_mod = _pph
+        except Exception as e:
+            log.warning("Could not import platform_peopleperhour: %s", e)
+            pph_enabled = False
 
     while True:
         try:
@@ -306,49 +322,34 @@ async def amain():
             if users:
                 for tid in users:
                     kws = await asyncio.to_thread(_fetch_user_keywords, tid)
-                    # Toggle ENABLE_PPH based on per-platform interval
-                    _enable_pph_original = os.getenv('ENABLE_PPH', '0')
-                    now_ts = __import__('time').time()
-                    _include_pph = False
-                    if _enable_pph_original == '1':
-                        if (now_ts - _pph_last_ts) >= pph_interval:
-                            _include_pph = True
-                        else:
-                            os.environ['ENABLE_PPH'] = '0'
-                    
-# Always run pipeline WITHOUT PPH (prevent sticky import-time flags)
-_orig_enable_pph = os.getenv('ENABLE_PPH', '0')
-os.environ['ENABLE_PPH'] = '0'
-items = await asyncio.to_thread(_worker.run_pipeline, kws)
-# Restore env
-os.environ['ENABLE_PPH'] = _orig_enable_pph
 
-# PPH separate fetch (interval + first run)
-now_ts = __import__('time').time()
-if _orig_enable_pph == '1' and ( _pph_first_run or (now_ts - _pph_last_ts) >= pph_interval ):
-    try:
-        import platform_peopleperhour as _pph
-        pph_items = await asyncio.to_thread(_pph.get_items, kws)
-        if pph_items:
-            items.extend(pph_items)
-            log.info("PPH (sitemap) fetched=%d", len(pph_items))
-        else:
-            log.info("PPH (sitemap) fetched=0")
-        _pph_last_ts = now_ts
-        _pph_first_run = False
-    except Exception as e:
-        log.warning("PPH separate fetch error: %s", e)
-if _enable_pph_original is not None:
-                        os.environ['ENABLE_PPH'] = _enable_pph_original
-                    if _include_pph:
-                        _pph_last_ts = now_ts
+                    # 1) Fetch from existing pipeline (Freelancer, etc.) — but force PPH off inside
+                    orig_enable_pph = os.getenv("ENABLE_PPH", "0")
+                    os.environ["ENABLE_PPH"] = "0"
+                    items = await asyncio.to_thread(_worker.run_pipeline, kws)
+                    os.environ["ENABLE_PPH"] = orig_enable_pph  # restore
+
+                    # 2) Optionally fetch from PPH on its own cadence
+                    now_ts = time.time()
+                    if pph_enabled and (pph_first_run or (now_ts - pph_last_run) >= pph_interval):
+                        try:
+                            pph_items = await asyncio.to_thread(pph_mod.get_items, kws)
+                            if pph_items:
+                                items.extend(pph_items)
+                                log.info("PPH fetched=%d", len(pph_items))
+                            else:
+                                log.info("PPH fetched=0")
+                        except Exception as e:
+                            log.warning("PPH fetch error: %s", e)
+                        pph_last_run = now_ts
+                        pph_first_run = False
 
                     # ⭐ Filter: keep ONLY items with a keyword match
                     filtered: List[Dict] = []
-                    for it in items:
+                    for it in items or []:
                         mk = it.get("matched_keyword") or _find_match_keyword(it, kws)
                         if kws and not mk:
-                            continue  # skip non-matching items
+                            continue
                         if mk:
                             it["matched_keyword"] = mk  # ensure it's visible in message
                         filtered.append(it)
