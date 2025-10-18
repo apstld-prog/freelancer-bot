@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Set
 from html import escape as _esc
 from datetime import datetime, timezone, timedelta
 
-import worker as _worker  # keep your original pipeline intact
+import worker as _worker
 from sqlalchemy import text as _sql_text
 from db import get_session as _get_session
 from db_keywords import list_keywords as _list_keywords
@@ -53,11 +53,8 @@ def _mark_sent(user_id: int, job_key: str) -> None:
 def _fetch_all_users() -> List[int]:
     ids: Set[int] = set()
     with _get_session() as s:
-        try:
-            rows = s.execute(_sql_text('SELECT DISTINCT telegram_id FROM "user" WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true')).fetchall()
-            ids.update(int(r[0]) for r in rows if r[0] is not None)
-        except Exception:
-            pass
+        rows = s.execute(_sql_text('SELECT DISTINCT telegram_id FROM "user" WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true')).fetchall()
+        ids.update(int(r[0]) for r in rows if r[0] is not None)
     return sorted(list(ids))
 
 def _fetch_user_keywords(telegram_id: int) -> List[str]:
@@ -75,12 +72,12 @@ def _to_dt(val) -> Optional[datetime]:
     if val is None: return None
     try:
         if isinstance(val,(int,float)):
-            sec=float(val)
+            sec=float(val); 
             if sec>1e12: sec/=1000.0
             return datetime.fromtimestamp(sec,tz=timezone.utc)
         s=str(val).strip()
         if s.isdigit():
-            sec=int(s)
+            sec=int(s); 
             if sec>1e12: sec/=1000.0
             return datetime.fromtimestamp(sec,tz=timezone.utc)
         s2=s.replace("Z","+00:00")
@@ -170,48 +167,26 @@ def _job_key(it: Dict) -> str:
     if not base: base = f"{it.get('source','')}::{(it.get('title') or '')[:160]}"
     return hashlib.sha1(base.encode("utf-8","ignore")).hexdigest()
 
-async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
-    sent = 0
-    for it in items:
-        if sent >= per_user_batch: break
-        key = _job_key(it)
-        if _already_sent(chat_id, key): continue
-        try:
-            text = _compose_message(it)
-            kb = _build_keyboard(_resolve_links(it))
-            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
-                                   reply_markup=kb, disable_web_page_preview=True)
-            _mark_sent(chat_id, key)
-            sent += 1
-            await asyncio.sleep(0.35)
-        except Exception as e:
-            log.warning("send_message failed for %s: %s", chat_id, e)
-
 def _gather_items(keywords: List[str]) -> List[Dict]:
-    # 1) Existing pipeline (keeps Freelancer and anything else you already had)
     try:
         items = _worker.run_pipeline(keywords)
     except Exception as e:
         log.warning("worker.run_pipeline failed: %s", e)
         items = []
 
-    # 2) Merge PeoplePerHour if enabled (independent of worker implementation)
     if os.getenv("ENABLE_PPH","0")=="1" and os.getenv("P_PEOPLEPERHOUR","0")=="1":
         try:
             import platform_peopleperhour as pph
             pph_items = pph.get_items(keywords)
             items.extend(pph_items)
+            log.debug("PPH merged: %d items", len(pph_items))
         except Exception as e:
             log.warning("platform_peopleperhour failed: %s", e)
 
     return items
 
-# ---------------- NEW: interleave per source ----------------
+# -------- interleave per source --------
 def interleave_by_source(items: List[Dict]) -> List[Dict]:
-    """
-    Keeps global recency but alternates sources (e.g., freelancer / peopleperhour),
-    so καμία πλατφόρμα δεν “σκεπάζει” την άλλη στο batch.
-    """
     from collections import deque
     buckets = {}
     for it in items:
@@ -230,6 +205,23 @@ def interleave_by_source(items: List[Dict]) -> List[Dict]:
             break
     return out
 
+async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
+    sent = 0
+    for it in items:
+        if sent >= per_user_batch: break
+        key = _job_key(it)
+        if _already_sent(chat_id, key): continue
+        try:
+            await bot.send_message(chat_id=chat_id, text=_compose_message(it),
+                                   parse_mode=ParseMode.HTML,
+                                   reply_markup=_build_keyboard(_resolve_links(it)),
+                                   disable_web_page_preview=True)
+            _mark_sent(chat_id, key)
+            sent += 1
+            await asyncio.sleep(0.35)
+        except Exception as e:
+            log.warning("send_message failed for %s: %s", chat_id, e)
+
 async def amain():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
     if not token:
@@ -238,7 +230,6 @@ async def amain():
     per_user_batch = int(os.getenv("BATCH_PER_TICK", "5"))
     bot = Bot(token=token)
 
-    # prefetch users
     users = _fetch_all_users()
 
     while True:
@@ -248,13 +239,10 @@ async def amain():
                 kws = _fetch_user_keywords(tid)
                 items = _gather_items(kws)
 
-                # per-user keyword filter and freshness
                 filtered: List[Dict] = []
                 for it in items:
-                    # Ensure matched_keyword if present
                     mk = it.get("matched_keyword")
                     if not mk:
-                        # secondary keyword check (safeguard)
                         hay = f"{(it.get('title') or '').lower()}\n{(it.get('description') or '').lower()}"
                         for kw in kws:
                             if (kw or '').strip().lower() in hay:
@@ -271,6 +259,7 @@ async def amain():
                 # newest first, then interleave per source
                 filtered.sort(key=lambda x: _extract_dt(x) or cutoff, reverse=True)
                 mixed = interleave_by_source(filtered)
+                log.debug("tick user=%s filtered=%d mixed=%d", tid, len(filtered), len(mixed))
 
                 if mixed:
                     await _send_items(bot, tid, mixed, per_user_batch)

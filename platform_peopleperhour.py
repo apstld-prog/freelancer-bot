@@ -1,9 +1,11 @@
 # platform_peopleperhour.py — dynamic RSS from user keywords
 from typing import List, Dict, Optional
-import os, re, html, urllib.parse
+import os, re, html, urllib.parse, logging
 from datetime import datetime, timezone, timedelta
 import httpx
 import xml.etree.ElementTree as ET
+
+log = logging.getLogger("pph")
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (compatible; JobBot/1.0)")
@@ -74,7 +76,7 @@ def _build_urls(keywords: List[str]) -> List[str]:
             if not k: continue
             urls.append(PPH_BASE.replace("{kw}", urllib.parse.quote_plus(k)))
         return urls
-    # Στατικό (υπάρχον συμπεριφορά)
+    # Στατικό (υπάρχουσα συμπεριφορά)
     return [u.strip() for u in urls_env.split(",") if u.strip()]
 
 def _fetch_rss(url: str, timeout: float = 15.0) -> List[Dict]:
@@ -126,16 +128,19 @@ def get_items(keywords: List[str]) -> List[Dict]:
     if not urls: return []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
     out: List[Dict] = []
+    fetched = fresh = matched = 0
     for url in urls:
         try:
             items = _fetch_rss(url)
         except Exception:
             items = []
         url_terms = _terms_from_url(url)
+        fetched += len(items)
         for it in items:
             dt = _parse_rss_datetime(it.get("date") or "")
-            if not dt or dt < cutoff: 
+            if not dt or dt < cutoff:
                 continue
+            fresh += 1
             mk = _match_keyword(it.get("title",""), it.get("description",""), keywords or [])
             if not mk and url_terms and keywords:
                 low_kws = { (k or '').strip().lower(): k for k in keywords }
@@ -146,12 +151,13 @@ def get_items(keywords: List[str]) -> List[Dict]:
                         break
             if mk:
                 it["matched_keyword"] = mk
-                out.append(it)
+                out.append(it); matched += 1
             else:
                 if PPH_SEND_ALL:
                     if url_terms:
                         it["matched_keyword"] = url_terms[0]
                     out.append(it)
+    log.debug("PPH stats: fetched=%s fresh=%s sent=%s", fetched, fresh, len(out))
     # de-dup by url
     seen=set(); uniq=[]
     for it in out:
