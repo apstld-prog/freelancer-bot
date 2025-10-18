@@ -1,4 +1,4 @@
-# platform_peopleperhour.py — refined HTML fallback (real job pages + budget/desc) v2
+# platform_peopleperhour.py — PPH real jobs + budget/desc + fallback browse
 from typing import List, Dict, Optional, Tuple
 import os, re, html, urllib.parse, logging, json
 from datetime import datetime, timezone, timedelta
@@ -8,11 +8,12 @@ log = logging.getLogger("pph")
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 JobBot/1.2")
+                                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 JobBot/1.3")
 PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "0") == "1"
 PPH_DYNAMIC_FROM_KEYWORDS = os.getenv("PPH_DYNAMIC_FROM_KEYWORDS", "0") == "1"
 PPH_BASE = os.getenv("PPH_BASE_URL", "https://www.peopleperhour.com/freelance-jobs?search={kw}")
 PPH_PER_KEYWORD_LIMIT = int(os.getenv("PPH_PER_KEYWORD_LIMIT", "8"))
+PPH_FALLBACK_BROWSE = os.getenv("PPH_FALLBACK_BROWSE", "1") == "1"   # <— NEW: on by default
 
 _CURRENCY_MAP = {"£":"GBP","€":"EUR","$":"USD","C$":"CAD","A$":"AUD","₹":"INR","NZ$":"NZD","CHF":"CHF"}
 _SYM_ORDER = sorted(_CURRENCY_MAP.keys(), key=len, reverse=True)
@@ -21,12 +22,9 @@ def _parse_rss_datetime(s: str) -> Optional[datetime]:
     if not s: return None
     s = s.strip()
     fmts = [
-        "%a, %d %b %Y %H:%M:%S %z",
-        "%a, %d %b %Y %H:%M:%S %Z",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%d %H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
+        "%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z",
+        "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S",
     ]
     for fmt in fmts:
         try:
@@ -89,16 +87,14 @@ def _fetch(url: str, timeout: float = 15.0):
     return r.text, ctype
 
 # ---------- Listing → job URLs ----------
-# 1) κανονικά href με id
 _RE_HREF_JOB = re.compile(r'href="(?P<href>/(?:job/\d+(?:-[^" ]*)?|freelance-jobs/[^/" ]+-\d+))"', re.I)
-# 2) cards χωρίς href αλλά με data-job-id / data-project-id
-_RE_DATA_JOB = re.compile(r'data-(?:job|project)-id="(?P<id>\d+)"', re.I)
+_RE_DATA_JOB = re.compile(r'data-(?:job|project)-id="(?P<id>\d+)"', re.I)  # π.χ. data-job-id="123456"
 
 def _parse_listing_for_job_urls(html_text: str) -> List[str]:
     txt = re.sub(r"\s+", " ", html_text)
     urls, seen = [], set()
 
-    # href-based
+    # 1) από href με id
     for m in _RE_HREF_JOB.finditer(txt):
         href = m.group("href")
         if href in seen: continue
@@ -106,7 +102,7 @@ def _parse_listing_for_job_urls(html_text: str) -> List[str]:
         urls.append("https://www.peopleperhour.com" + href)
         if len(urls) >= 60: break
 
-    # data-id based (construct /job/<id>)
+    # 2) από data-job-id / data-project-id ⇒ συνθέτουμε /job/<id>
     for m in _RE_DATA_JOB.finditer(txt):
         jid = m.group("id")
         url = f"https://www.peopleperhour.com/job/{jid}"
@@ -117,9 +113,6 @@ def _parse_listing_for_job_urls(html_text: str) -> List[str]:
     return urls
 
 # ---------- Job page parsing ----------
-_CURRENCY_MAP = {"£":"GBP","€":"EUR","$":"USD","C$":"CAD","A$":"AUD","₹":"INR","NZ$":"NZD","CHF":"CHF"}
-_SYM_ORDER = sorted(_CURRENCY_MAP.keys(), key=len, reverse=True)
-
 def _extract_budget(text: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
     t = text
     for sym in _SYM_ORDER:
@@ -228,30 +221,10 @@ def get_items(keywords: List[str]) -> List[Dict]:
     if not urls: return []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
     out: List[Dict] = []
-    for url in urls:
-        try:
-            body, _ = _fetch(url)
-        except Exception as e:
-            logging.warning("PPH fetch failed: %s", e); 
-            continue
 
-        job_urls = _parse_listing_for_job_urls(body)
-        # Αν τύχει να είναι XML, πάρε και από <item>
-        if not job_urls:
-            try:
-                import xml.etree.ElementTree as ET
-                root = ET.fromstring(body)
-                for item in root.findall(".//item"):
-                    link = (item.findtext("link") or "").strip()
-                    if re.search(r"/(job/\d+|freelance-jobs/[^/]+-\d+)", link):
-                        job_urls.append(link)
-            except Exception:
-                pass
-
-        job_urls = job_urls[:PPH_PER_KEYWORD_LIMIT]
-        url_terms = _terms_from_url(url)
-
-        for jurl in job_urls:
+    def _collect_from_listing(listing_html: str, url_terms: List[str]):
+        job_urls = _parse_listing_for_job_urls(listing_html)
+        for jurl in job_urls[:PPH_PER_KEYWORD_LIMIT]:
             item = _fetch_job_details(jurl)
             if not item: 
                 continue
@@ -273,6 +246,25 @@ def get_items(keywords: List[str]) -> List[Dict]:
                     if url_terms:
                         item["matched_keyword"] = url_terms[0]
                     out.append(item)
+
+    for url in urls:
+        try:
+            body, _ = _fetch(url)
+        except Exception as e:
+            logging.warning("PPH fetch failed: %s", e); 
+            continue
+
+        before_count = len(out)
+        _collect_from_listing(body, _terms_from_url(url))
+
+        # FALLBACK: αν δεν βρέθηκε τίποτα από το συγκεκριμένο search,
+        # δοκίμασε τη γενική λίστα και κάνε client-side match.
+        if PPH_FALLBACK_BROWSE and len(out) == before_count:
+            try:
+                generic_body, _ = _fetch("https://www.peopleperhour.com/freelance-jobs")
+                _collect_from_listing(generic_body, [])
+            except Exception as e:
+                log.debug("PPH generic fetch failed: %s", e)
 
     # de-dup
     seen=set(); uniq=[]
