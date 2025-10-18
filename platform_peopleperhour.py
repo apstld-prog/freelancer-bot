@@ -1,50 +1,57 @@
-
-import httpx
-from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
 import logging
+import requests
+import time
+from bs4 import BeautifulSoup
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("pph")
+
+BASE_URL = "https://www.peopleperhour.com/freelance-jobs?search={keyword}"
 
 def fetch_jobs(keywords):
-    collected = []
-    base_url = "https://www.peopleperhour.com/freelance-jobs?search={kw}"
-
+    results = []
     for kw in keywords:
         try:
-            u = base_url.format(kw=kw)
-            log.debug(f"PPH debug: keyword='{kw}', url='{u}'")
-            with httpx.Client(timeout=10) as client:
-                resp = client.get(u)
-            log.debug(f"PPH debug: status={resp.status_code}")
-
+            url = BASE_URL.format(keyword=kw)
+            log.info(f"PPH debug: fetching {url}")
+            resp = requests.get(url, timeout=15)
             if resp.status_code != 200:
+                log.warning(f"PPH debug: bad response {resp.status_code} for {kw}")
                 continue
 
             soup = BeautifulSoup(resp.text, "html.parser")
-            cards = soup.select(".job-card, .freelance-job-card")
-            log.debug(f"PPH debug: keyword='{kw}', cards_found={len(cards)}")
+            cards = soup.select("section.section--card")
+            log.info(f"PPH debug: found {len(cards)} cards for {kw}")
 
-            for c in cards:
-                title = c.select_one(".job-title, h3")
-                desc = c.select_one(".job-description, p")
-                budget = c.select_one(".job-budget")
-                link = c.select_one("a[href]")
-                job = {
+            for card in cards:
+                title = card.select_one("a.title")
+                title_text = title.get_text(strip=True) if title else "No title"
+                link = title['href'] if title and title.has_attr('href') else ""
+                desc = card.select_one("p.description")
+                desc_text = desc.get_text(strip=True) if desc else ""
+                budget = card.select_one(".js-budget")
+                budget_text = budget.get_text(strip=True) if budget else "N/A"
+
+                if link and not link.startswith("http"):
+                    link = "https://www.peopleperhour.com" + link
+
+                results.append({
                     "platform": "peopleperhour",
-                    "title": title.text.strip() if title else "No title",
-                    "description": desc.text.strip() if desc else "",
-                    "budget_amount": budget.text.strip() if budget else None,
-                    "budget_currency": "GBP",
-                    "affiliate_url": link['href'] if link else None,
-                    "original_url": link['href'] if link else None,
-                    "created_at": datetime.utcnow().isoformat(),
-                    "keyword": kw,
-                }
-                collected.append(job)
+                    "title": title_text,
+                    "description": desc_text,
+                    "original_url": link,
+                    "affiliate_url": link,
+                    "budget_amount": budget_text,
+                    "budget_currency": "",
+                    "budget_usd": None,
+                    "created_at": time.time(),
+                })
 
         except Exception as e:
-            log.error(f"PPH debug: error on keyword '{kw}': {e}")
+            log.exception(f"PPH debug: error fetching {kw}: {e}")
+    return results
 
-    log.info(f"PPH debug: total {len(collected)} jobs from {len(keywords)} keywords")
-    return collected
+
+# Wrapper για συμβατότητα με worker_runner
+def get_items(keywords):
+    log.info("PPH debug: get_items() called")
+    return fetch_jobs(keywords)
