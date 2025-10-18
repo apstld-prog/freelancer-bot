@@ -202,7 +202,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg + "\n\nCurrent keywords:\n• " + (", ".join(current) if current else "—"),
                                     parse_mode=ParseMode.HTML)
 
-async def delkeyword_cmd(update: Update, Context: ContextTypes.DEFAULT_TYPE):
+async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Delete keywords. Example:\n<code>/delkeyword logo, sales</code>",
                                         parse_mode=ParseMode.HTML); return
