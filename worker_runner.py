@@ -315,8 +315,30 @@ async def amain():
                             _include_pph = True
                         else:
                             os.environ['ENABLE_PPH'] = '0'
-                    items = await asyncio.to_thread(_worker.run_pipeline, kws)
-                    if _enable_pph_original is not None:
+                    
+# Always run pipeline WITHOUT PPH (prevent sticky import-time flags)
+_orig_enable_pph = os.getenv('ENABLE_PPH', '0')
+os.environ['ENABLE_PPH'] = '0'
+items = await asyncio.to_thread(_worker.run_pipeline, kws)
+# Restore env
+os.environ['ENABLE_PPH'] = _orig_enable_pph
+
+# PPH separate fetch (interval + first run)
+now_ts = __import__('time').time()
+if _orig_enable_pph == '1' and ( _pph_first_run or (now_ts - _pph_last_ts) >= pph_interval ):
+    try:
+        import platform_peopleperhour as _pph
+        pph_items = await asyncio.to_thread(_pph.get_items, kws)
+        if pph_items:
+            items.extend(pph_items)
+            log.info("PPH (sitemap) fetched=%d", len(pph_items))
+        else:
+            log.info("PPH (sitemap) fetched=0")
+        _pph_last_ts = now_ts
+        _pph_first_run = False
+    except Exception as e:
+        log.warning("PPH separate fetch error: %s", e)
+if _enable_pph_original is not None:
                         os.environ['ENABLE_PPH'] = _enable_pph_original
                     if _include_pph:
                         _pph_last_ts = now_ts
