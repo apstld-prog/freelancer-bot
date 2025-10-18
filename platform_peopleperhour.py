@@ -1,4 +1,4 @@
-# platform_peopleperhour.py — refined HTML fallback (real job pages + budget/desc)
+# platform_peopleperhour.py — refined HTML fallback (real job pages + budget/desc) v2
 from typing import List, Dict, Optional, Tuple
 import os, re, html, urllib.parse, logging, json
 from datetime import datetime, timezone, timedelta
@@ -8,7 +8,7 @@ log = logging.getLogger("pph")
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 JobBot/1.1")
+                                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 JobBot/1.2")
 PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "0") == "1"
 PPH_DYNAMIC_FROM_KEYWORDS = os.getenv("PPH_DYNAMIC_FROM_KEYWORDS", "0") == "1"
 PPH_BASE = os.getenv("PPH_BASE_URL", "https://www.peopleperhour.com/freelance-jobs?search={kw}")
@@ -88,25 +88,39 @@ def _fetch(url: str, timeout: float = 15.0):
     ctype = r.headers.get("Content-Type","").lower()
     return r.text, ctype
 
-# ----- listing -> job URLs (με id) -----
-_JOB_URL_RE = re.compile(
-    r'href="(?P<href>/(?:job/\d+(?:-[^" ]*)?|freelance-jobs/[^/" ]+-\d+))"',
-    re.I
-)
+# ---------- Listing → job URLs ----------
+# 1) κανονικά href με id
+_RE_HREF_JOB = re.compile(r'href="(?P<href>/(?:job/\d+(?:-[^" ]*)?|freelance-jobs/[^/" ]+-\d+))"', re.I)
+# 2) cards χωρίς href αλλά με data-job-id / data-project-id
+_RE_DATA_JOB = re.compile(r'data-(?:job|project)-id="(?P<id>\d+)"', re.I)
 
 def _parse_listing_for_job_urls(html_text: str) -> List[str]:
     txt = re.sub(r"\s+", " ", html_text)
     urls, seen = [], set()
-    for m in _JOB_URL_RE.finditer(txt):
+
+    # href-based
+    for m in _RE_HREF_JOB.finditer(txt):
         href = m.group("href")
         if href in seen: continue
         seen.add(href)
         urls.append("https://www.peopleperhour.com" + href)
-        if len(urls) >= 40: break
+        if len(urls) >= 60: break
+
+    # data-id based (construct /job/<id>)
+    for m in _RE_DATA_JOB.finditer(txt):
+        jid = m.group("id")
+        url = f"https://www.peopleperhour.com/job/{jid}"
+        if url in urls: continue
+        urls.append(url)
+        if len(urls) >= 60: break
+
     return urls
 
-# ----- job page parsing -----
-def _extract_budget(text: str):
+# ---------- Job page parsing ----------
+_CURRENCY_MAP = {"£":"GBP","€":"EUR","$":"USD","C$":"CAD","A$":"AUD","₹":"INR","NZ$":"NZD","CHF":"CHF"}
+_SYM_ORDER = sorted(_CURRENCY_MAP.keys(), key=len, reverse=True)
+
+def _extract_budget(text: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
     t = text
     for sym in _SYM_ORDER:
         sym_esc = re.escape(sym)
@@ -124,7 +138,7 @@ def _extract_budget(text: str):
         return (v, v, code)
     return (None, None, None)
 
-def _parse_json_ld(html_text: str):
+def _parse_json_ld(html_text: str) -> Dict:
     for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html_text, re.S|re.I):
         try:
             data = json.loads(m.group(1))
@@ -141,7 +155,7 @@ def _fetch_job_details(url: str) -> Dict:
         log.debug("job fetch failed %s: %s", url, e); 
         return {}
 
-    # title
+    # Title
     title = None
     m = re.search(r"<h1[^>]*>(.*?)</h1>", body, re.I|re.S)
     if m: title = _strip_html(m.group(1))
@@ -149,7 +163,7 @@ def _fetch_job_details(url: str) -> Dict:
         m2 = re.search(r"<title[^>]*>(.*?)</title>", body, re.I|re.S)
         title = _strip_html(m2.group(1)) if m2 else ""
 
-    # description
+    # Description
     desc = ""
     data = _parse_json_ld(body)
     if isinstance(data, dict):
@@ -166,9 +180,8 @@ def _fetch_job_details(url: str) -> Dict:
     desc = (desc or "").strip()
     if len(desc) > 900: desc = desc[:900] + "…"
 
-    # budget
-    budget_min = budget_max = None
-    currency = None
+    # Budget
+    budget_min = budget_max = None; currency = None
     if isinstance(data, dict):
         val = data.get("estimatedSalary") or data.get("salary")
         if isinstance(val, dict):
@@ -181,7 +194,7 @@ def _fetch_job_details(url: str) -> Dict:
     if budget_min is None and budget_max is None:
         budget_min, budget_max, currency = _extract_budget(body)
 
-    # posted date
+    # Date
     dt = None
     for key in ("datePosted","datePublished","uploadDate"):
         if isinstance(data, dict) and data.get(key):
@@ -189,8 +202,7 @@ def _fetch_job_details(url: str) -> Dict:
                 s = str(data[key])
                 if s.endswith("Z"): s = s.replace("Z","+00:00")
                 dt = datetime.fromisoformat(s).astimezone(timezone.utc); break
-            except Exception:
-                pass
+            except Exception: pass
     if not dt:
         dt = datetime.now(timezone.utc)
 
@@ -220,13 +232,11 @@ def get_items(keywords: List[str]) -> List[Dict]:
         try:
             body, _ = _fetch(url)
         except Exception as e:
-            log.warning("PPH fetch failed: %s", e); 
+            logging.warning("PPH fetch failed: %s", e); 
             continue
 
-        # πάρε ΜΟΝΟ URLs αγγελιών με id (όχι κατηγορίες)
         job_urls = _parse_listing_for_job_urls(body)
-
-        # αν τύχει και είναι XML, χρησιμοποίησε και τα <item>
+        # Αν τύχει να είναι XML, πάρε και από <item>
         if not job_urls:
             try:
                 import xml.etree.ElementTree as ET
@@ -238,10 +248,9 @@ def get_items(keywords: List[str]) -> List[Dict]:
             except Exception:
                 pass
 
-        # όριο ανά keyword για να μη βαράει πολύ
         job_urls = job_urls[:PPH_PER_KEYWORD_LIMIT]
-
         url_terms = _terms_from_url(url)
+
         for jurl in job_urls:
             item = _fetch_job_details(jurl)
             if not item: 
@@ -265,7 +274,7 @@ def get_items(keywords: List[str]) -> List[Dict]:
                         item["matched_keyword"] = url_terms[0]
                     out.append(item)
 
-    # de-dup by url
+    # de-dup
     seen=set(); uniq=[]
     for it in out:
         key = (it.get("url") or it.get("original_url") or "").strip() or f"pph::{(it.get('title') or '')[:160]}"
