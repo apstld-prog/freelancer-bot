@@ -1,4 +1,4 @@
-# platform_peopleperhour.py — PPH real jobs + budget/desc + aggressive fallback scan
+# platform_peopleperhour.py — PPH real jobs + budget/desc + JSON/JS ID fallback
 from typing import List, Dict, Optional, Tuple
 import os, re, html, urllib.parse, logging, json
 from datetime import datetime, timezone, timedelta
@@ -8,7 +8,7 @@ log = logging.getLogger("pph")
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 JobBot/1.4")
+                                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 JobBot/1.5")
 PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "0") == "1"
 PPH_DYNAMIC_FROM_KEYWORDS = os.getenv("PPH_DYNAMIC_FROM_KEYWORDS", "0") == "1"
 PPH_BASE = os.getenv("PPH_BASE_URL", "https://www.peopleperhour.com/freelance-jobs?search={kw}")
@@ -84,8 +84,12 @@ def _fetch(url: str, timeout: float = 15.0):
 # ---------- Listing → job URLs ----------
 _RE_HREF_JOB = re.compile(r'href="(?P<href>/(?:job/\d+(?:-[^" ]*)?|freelance-jobs/[^/" ]+-\d+))"', re.I)
 _RE_DATA_JOB = re.compile(r'data-(?:job|project)-id="(?P<id>\d+)"', re.I)
-# aggressive: πιάσε /job/123456 ή /freelance-jobs/...-123456 οπουδήποτε (HTML ή JS strings)
-_RE_ANY_JOB = re.compile(r'/(?:job/(?P<id>\d{4,12})(?:-[^"\'\s]*)?|freelance-jobs/[^/"\'\s]+-(?P<id2>\d{4,12}))', re.I)
+# NEW: IDs μέσα σε JSON/JS (window.__data, React props κτλ.)
+_RE_JSON_JOBID = re.compile(r'(?:jobId|job_id|projectId)\s*[:=]\s*["\']?(\d{4,12})["\']?', re.I)
+# NEW: πλήρη URLs μέσα σε strings
+_RE_URL_IN_JS = re.compile(r'https://www\.peopleperhour\.com/(?:job/\d+(?:-[^"\'\s]*)?|freelance-jobs/[^/"\'\s]+-\d+)', re.I)
+# agressive: οποιοδήποτε path που μοιάζει με job
+_RE_ANY_JOB = re.compile(r'/(?:job/(\d{4,12})(?:-[^"\'\s]*)?|freelance-jobs/[^/"\'\s]+-(\d{4,12}))', re.I)
 
 def _parse_listing_for_job_urls(html_text: str) -> List[str]:
     txt = re.sub(r"\s+", " ", html_text)
@@ -108,21 +112,33 @@ def _parse_listing_for_job_urls(html_text: str) -> List[str]:
             urls.append(url)
             if len(urls) >= 60: break
 
-    # 3) aggressive scan (HTML/JS)
+    # 3) full URLs μέσα σε JS/JSON
+    if len(urls) < 12:
+        for m in _RE_URL_IN_JS.finditer(txt):
+            u = m.group(0)
+            if u in urls: continue
+            urls.append(u)
+            if len(urls) >= 60: break
+
+    # 4) σκέτα IDs μέσα σε JS/JSON
     if len(urls) < 12:
         seen_ids = set()
+        for m in _RE_JSON_JOBID.finditer(txt):
+            jid = m.group(1)
+            if jid in seen_ids: continue
+            seen_ids.add(jid)
+            u = f"https://www.peopleperhour.com/job/{jid}"
+            if u in urls: continue
+            urls.append(u)
+            if len(urls) >= 60: break
+
+    # 5) last-resort scan paths
+    if len(urls) < 8:
         for m in _RE_ANY_JOB.finditer(txt):
-            if m.group("id"):
-                jid = m.group("id")
-                if jid in seen_ids: continue
-                seen_ids.add(jid)
-                urls.append(f"https://www.peopleperhour.com/job/{jid}")
-            else:
-                # whole matched path already includes slug-id
-                path = m.group(0)
-                if path in seen: continue
-                seen.add(path)
-                urls.append("https://www.peopleperhour.com" + path)
+            path = m.group(0)
+            u = "https://www.peopleperhour.com" + path if path.startswith("/") else path
+            if u in urls: continue
+            urls.append(u)
             if len(urls) >= 60: break
 
     return urls
