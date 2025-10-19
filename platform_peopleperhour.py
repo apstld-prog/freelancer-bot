@@ -1,9 +1,8 @@
-# platform_peopleperhour.py — PeoplePerHour collector (RSS + SPA fallback) with 429 handling
-# - Tiered sources: RSS search -> Generic RSS -> SPA search-page
-# - Robust HTTP client: persistent session, retries, exponential backoff, Retry-After support
-# - Pacing between pages to avoid CloudFront 429
-# - 48h filter, matched_keyword, FX rates, interval 120s
-# - No UI changes
+# platform_peopleperhour.py — PPH collector v6 (strict match + USD/EUR budget_display)
+# - Sources: RSS search -> Generic RSS -> SPA search-page
+# - Strict keyword filter (title OR description must include kw). Toggle via REQUIRE_KEYWORD_MATCH (default=1)
+# - Always compute budget_display with USD/EUR conversion when currency available
+# - 48h filter, interval 120s, no UI changes
 
 from typing import List, Dict, Optional, Tuple
 import os, re, html, urllib.parse, logging, json, time, random
@@ -18,7 +17,8 @@ PPH_BASE_URL = os.getenv("PPH_BASE_URL", "https://www.peopleperhour.com/freelanc
 PPH_MAX_PAGES = int(os.getenv("PPH_MAX_PAGES", "10"))
 PPH_REQUEST_TIMEOUT = float(os.getenv("PPH_REQUEST_TIMEOUT", "15"))
 PPH_INTERVAL_SECONDS = int(os.getenv("PPH_INTERVAL_SECONDS", "120"))
-PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "1") == "1"
+PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "0") == "1"  # default OFF for PPH
+REQUIRE_KEYWORD_MATCH = os.getenv("PPH_REQUIRE_KEYWORD_MATCH", "1") == "1"  # default ON
 PPH_PER_KEYWORD_LIMIT = int(os.getenv("PPH_MAX_ITEMS_PER_TICK", "200"))
 PPH_SLEEP_BETWEEN_PAGES = float(os.getenv("PPH_SLEEP_BETWEEN_PAGES", "0.6"))
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
@@ -52,14 +52,12 @@ def _http_get(url: str) -> Optional[httpx.Response]:
         for attempt in range(1, HTTP_RETRIES + 1):
             try:
                 r = c.get(url)
-                # 429/503 handling
                 if r.status_code in (429, 503):
                     ra = r.headers.get("Retry-After")
                     wait = float(ra) if (ra and ra.isdigit()) else (HTTP_BACKOFF ** attempt) + random.random()
                     if DEBUG_LOG:
                         log.warning(f"[PPH] {r.status_code} on {url} — retry {attempt}/{HTTP_RETRIES} after {wait:.2f}s")
-                    time.sleep(wait)
-                    continue
+                    time.sleep(wait); continue
                 r.raise_for_status()
                 return r
             except Exception as e:
@@ -68,8 +66,7 @@ def _http_get(url: str) -> Optional[httpx.Response]:
                 if DEBUG_LOG:
                     log.debug(f"[PPH] GET failed ({type(e).__name__}) attempt {attempt}/{HTTP_RETRIES} — backoff {wait:.2f}s")
                 time.sleep(wait)
-        if DEBUG_LOG:
-            log.warning(f"[PPH] GET gave up: {url} ({last_exc})")
+        if DEBUG_LOG: log.warning(f"[PPH] GET gave up: {url} ({last_exc})")
         return None
 
 def _fetch(url: str) -> str:
@@ -149,59 +146,47 @@ def _parse_rss_items(body: str) -> List[Dict]:
         out.append({"rss_title": title, "rss_desc": desc, "rss_link": link, "rss_date": dt})
     return out
 
+def _rss_url(base: str, page: int) -> str:
+    return base if "{page}" in base else f"{base}{'&' if '?' in base else '?'}page={page}"
+
 def _rss_search(keyword: str, page: int) -> List[Dict]:
     base = PPH_BASE_URL.replace("{kw}", urllib.parse.quote_plus(keyword))
-    url = base if "{page}" in base else f"{base}{'&' if '?' in base else '?'}page={page}"
-    body = _fetch(url)
+    body = _fetch(_rss_url(base, page))
     items = _parse_rss_items(body)
-    if DEBUG_LOG:
-        log.log(logging.INFO if items else logging.DEBUG, f"[PPH] RSS(search) p{page} kw={keyword}: {len(items)} items")
+    if DEBUG_LOG: log.log(logging.INFO if items else logging.DEBUG, f"[PPH] RSS(search) p{page} kw={keyword}: {len(items)} items")
     return items
 
 def _generic_rss_base() -> str:
     base = PPH_BASE_URL
-    if "rss=1" not in base:
-        base = "https://www.peopleperhour.com/freelance-jobs?rss=1"
-    base = re.sub(r"[&?]search=\{?kw\}?","", base)
-    base = re.sub(r"[?&]$", "", base)
+    if "rss=1" not in base: base = "https://www.peopleperhour.com/freelance-jobs?rss=1"
+    base = re.sub(r"[&?]search=\{?kw\}?","", base); base = re.sub(r"[?&]$", "", base)
     return base
 
 GENERIC_RSS_BASE = _generic_rss_base()
 
 def _rss_generic(page: int) -> List[Dict]:
-    base = GENERIC_RSS_BASE
-    url = base if "{page}" in base else f"{base}{'&' if '?' in base else '?'}page={page}"
-    body = _fetch(url)
+    body = _fetch(_rss_url(GENERIC_RSS_BASE, page))
     items = _parse_rss_items(body)
-    if DEBUG_LOG:
-        log.info(f"[PPH] RSS(generic) p{page}: {len(items)} items")
+    if DEBUG_LOG: log.info(f"[PPH] RSS(generic) p{page}: {len(items)} items")
     return items
 
 # ---------------- SPA search-page fallback ----------------
 # Capture both legacy /job/<id>-slug and modern /freelance-jobs/.../<slug>-<id>
-_RE_JOB_URL = re.compile(
-    r'/(?:job/\d+(?:-[a-z0-9\-%_]+)?|freelance-jobs/[a-z0-9\-/]+-[0-9]{5,})',
-    re.I
-)
+_RE_JOB_URL = re.compile(r'/(?:job/\d+(?:-[a-z0-9\-%_]+)?|freelance-jobs/[a-z0-9\-/]+-[0-9]{5,})', re.I)
 
 def _spa_search_urls(keyword: str, page: int) -> List[str]:
     url = f"https://www.peopleperhour.com/freelance-jobs?q={urllib.parse.quote_plus(keyword)}&page={page}"
     body = _fetch(url)
-    urls = []
-    seen = set()
+    urls, seen = [], set()
     for m in _RE_JOB_URL.finditer(body):
         path = m.group(0)
         full = "https://www.peopleperhour.com" + path
         if "/freelance-jobs/" in path and not re.search(r"-\d{5,}$", path):
             continue
-        if full in seen:
-            continue
-        seen.add(full)
-        urls.append(full)
-        if len(urls) >= 300:
-            break
-    if DEBUG_LOG:
-        log.info(f"[PPH] SPA search p{page} kw={keyword}: extracted {len(urls)} job URLs")
+        if full in seen: continue
+        seen.add(full); urls.append(full)
+        if len(urls) >= 300: break
+    if DEBUG_LOG: log.info(f"[PPH] SPA search p{page} kw={keyword}: extracted {len(urls)} job URLs")
     return urls
 
 # ---------------- HTML details (job page) ----------------
@@ -211,8 +196,7 @@ def _parse_json_ld(html_text: str) -> Dict:
             data = json.loads(m.group(1))
             if isinstance(data, dict): return data
             if isinstance(data, list) and data: return data[0]
-        except Exception:
-            continue
+        except Exception: continue
     return {}
 
 def _extract_budget(text: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
@@ -235,7 +219,6 @@ def _extract_budget(text: str) -> Tuple[Optional[float], Optional[float], Option
 
 def _fetch_job_details(url: str) -> Dict:
     body = _fetch(url)
-
     # Title
     title = None
     m = re.search(r"<h1[^>]*>(.*?)</h1>", body, re.I | re.S)
@@ -243,7 +226,6 @@ def _fetch_job_details(url: str) -> Dict:
     if not title:
         m2 = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
         title = _strip_html(m2.group(1)) if m2 else "Untitled"
-
     # Description
     desc = ""
     data = _parse_json_ld(body)
@@ -253,15 +235,13 @@ def _fetch_job_details(url: str) -> Dict:
             if isinstance(v, str) and len(v) > 20:
                 desc = _strip_html(v); break
     if not desc:
-        m3 = re.search(r'<div[^>]+class="[^"]*(?:job-description|description|jobDesc)[^"]*"[^>]*>(.*?)</div>',
-                       body, re.I | re.S)
+        m3 = re.search(r'<div[^>]+class="[^"]*(?:job-description|description|jobDesc)[^"]*"[^>]*>(.*?)</div>', body, re.I | re.S)
         if m3: desc = _strip_html(m3.group(1))
     if not desc:
         m4 = re.search(r"Description</[^>]+>(.{60,800})<", body, re.I | re.S)
         if m4: desc = _strip_html(m4.group(1))
     desc = (desc or "").strip()
     if len(desc) > 900: desc = desc[:900] + "…"
-
     # Budget
     budget_min = budget_max = None; currency = None
     if isinstance(data, dict):
@@ -271,24 +251,18 @@ def _fetch_job_details(url: str) -> Dict:
                 budget_min = float(val.get("value", {}).get("minValue"))
                 budget_max = float(val.get("value", {}).get("maxValue"))
                 currency = val.get("currency")
-            except Exception:
-                pass
+            except Exception: pass
     if budget_min is None and budget_max is None:
         budget_min, budget_max, currency = _extract_budget(body)
-
     # Date
     dt = None
     for key in ("datePosted", "datePublished", "uploadDate"):
         if isinstance(data, dict) and data.get(key):
             try:
-                s = str(data[key])
-                if s.endswith("Z"): s = s.replace("Z", "+00:00")
+                s = str(data[key]); s = s.replace("Z","+00:00") if s.endswith("Z") else s
                 dt = datetime.fromisoformat(s).astimezone(timezone.utc); break
-            except Exception:
-                pass
-    if not dt:
-        dt = datetime.now(timezone.utc)
-
+            except Exception: pass
+    if not dt: dt = datetime.now(timezone.utc)
     item = {
         "title": title or "Untitled",
         "description": desc,
@@ -302,8 +276,11 @@ def _fetch_job_details(url: str) -> Dict:
     if currency:
         item["currency"] = currency.upper()
         item["currency_display"] = item["currency"]
-        if budget_min is not None:
-            item["budget_display"] = _convert_currency(budget_min, item["currency"])
+    # ALWAYS provide budget_display when we know currency (use min value if available)
+    if item.get("currency"):
+        amt = item.get("budget_min") or item.get("budget_max")
+        if amt is not None:
+            item["budget_display"] = _convert_currency(amt, item["currency"])
     return item
 
 # ---------------- Public API ----------------
@@ -311,117 +288,83 @@ def get_items(keywords: List[str]) -> List[Dict]:
     if not (os.getenv("ENABLE_PPH", "1") in ("1", "true", "True") and
             os.getenv("P_PEOPLEPERHOUR", "1") in ("1", "true", "True")):
         return []
-
     kw_list = [k.strip() for k in (keywords or []) if k and k.strip()]
-    if not kw_list:
-        return []
-
+    if not kw_list: return []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
     all_items: List[Dict] = []
-
     for kw in kw_list:
         search_items: List[Dict] = []
         # 1) RSS search
         for page in range(1, PPH_MAX_PAGES + 1):
-            try:
-                items = _rss_search(kw, page)
+            try: items = _rss_search(kw, page)
             except Exception as e:
-                log.warning(f"[PPH] RSS(search) fetch error kw={kw} p={page}: {e}")
-                items = []
+                log.warning(f"[PPH] RSS(search) fetch error kw={kw} p={page}: {e}"); items = []
             if not items:
-                if page == 1 and DEBUG_LOG:
-                    log.debug(f"[PPH] RSS: no items on page {page} for '{kw}'")
+                if page == 1 and DEBUG_LOG: log.debug(f"[PPH] RSS: no items on page {page} for '{kw}'")
                 break
             search_items.extend(items)
-            if len(search_items) >= PPH_PER_KEYWORD_LIMIT:
-                break
+            if len(search_items) >= PPH_PER_KEYWORD_LIMIT: break
             time.sleep(PPH_SLEEP_BETWEEN_PAGES)
-
         using_generic = False
         if not search_items:
             # 2) Generic RSS fallback
             using_generic = True
             generic_items: List[Dict] = []
             for page in range(1, PPH_MAX_PAGES + 1):
-                try:
-                    items = _rss_generic(page)
+                try: items = _rss_generic(page)
                 except Exception as e:
-                    log.warning(f"[PPH] RSS(generic) fetch error p={page}: {e}")
-                    break
-                if not items:
-                    break
+                    log.warning(f"[PPH] RSS(generic) fetch error p={page}: {e}"); break
+                if not items: break
                 generic_items.extend(items)
-                if len(generic_items) >= PPH_PER_KEYWORD_LIMIT:
-                    break
+                if len(generic_items) >= PPH_PER_KEYWORD_LIMIT: break
                 time.sleep(PPH_SLEEP_BETWEEN_PAGES)
             lowered_kw = kw.lower()
-            search_items = [
-                it for it in generic_items
-                if lowered_kw in (it["rss_title"] or "").lower() or lowered_kw in (it["rss_desc"] or "").lower()
-            ]
-            if DEBUG_LOG:
-                log.info(f"[PPH] Fallback generic RSS matched {len(search_items)} for kw={kw}")
-
+            search_items = [it for it in generic_items
+                            if lowered_kw in (it["rss_title"] or "").lower()
+                            or lowered_kw in (it["rss_desc"] or "").lower()]
+            if DEBUG_LOG: log.info(f"[PPH] Fallback generic RSS matched {len(search_items)} for kw={kw}")
         using_spa = False
         if not search_items:
             # 3) SPA search-page fallback
             using_spa = True
             urls = []
             for page in range(1, PPH_MAX_PAGES + 1):
-                try:
-                    urls.extend(_spa_search_urls(kw, page))
-                except Exception as e:
-                    log.debug(f"[PPH] SPA search page error p{page} kw={kw}: {e}")
-                if len(urls) >= PPH_PER_KEYWORD_LIMIT:
-                    break
+                try: urls.extend(_spa_search_urls(kw, page))
+                except Exception as e: log.debug(f"[PPH] SPA search page error p{page} kw={kw}: {e}")
+                if len(urls) >= PPH_PER_KEYWORD_LIMIT: break
                 time.sleep(PPH_SLEEP_BETWEEN_PAGES + random.random()*0.4)
             search_items = [{"rss_link": u, "rss_date": datetime.now(timezone.utc)} for u in urls]
-            if DEBUG_LOG:
-                log.info(f"[PPH] SPA search gathered {len(urls)} URLs for kw={kw}")
-
+            if DEBUG_LOG: log.info(f"[PPH] SPA search gathered {len(urls)} URLs for kw={kw}")
         # Enrich + filter by age + keyword
         count_before = len(all_items)
         for r in search_items:
             link = r.get("rss_link") or ""
-            if not link:
-                continue
-            try:
-                job = _fetch_job_details(link)
-            except Exception as e:
-                log.debug(f"[PPH] job fetch error {link}: {e}")
-                continue
-            try:
-                jdt = datetime.strptime(job["date"], "%a, %d %b %Y %H:%M:%S %z")
-            except Exception:
-                jdt = datetime.now(timezone.utc)
-            if jdt < cutoff:
-                continue
+            if not link: continue
+            try: job = _fetch_job_details(link)
+            except Exception as e: log.debug(f"[PPH] job fetch error {link}: {e}"); continue
+            try: jdt = datetime.strptime(job["date"], "%a, %d %b %Y %H:%M:%S %z")
+            except Exception: jdt = datetime.now(timezone.utc)
+            if jdt < cutoff: continue
             mk = _match_keyword(job.get("title",""), job.get("description",""), [kw])
-            if not mk and not PPH_SEND_ALL:
-                continue
+            # STRICT MATCH unless explicitly disabled
+            if REQUIRE_KEYWORD_MATCH and not mk: continue
+            if not mk and not PPH_SEND_ALL: continue
             job["matched_keyword"] = mk or kw
-            if "budget_display" not in job and job.get("budget_min") and job.get("currency"):
-                job["budget_display"] = _convert_currency(job["budget_min"], job["currency"])
+            # ensure budget_display
+            if "budget_display" not in job and job.get("currency"):
+                amt = job.get("budget_min") or job.get("budget_max")
+                if amt is not None: job["budget_display"] = _convert_currency(amt, job["currency"])
             all_items.append(job)
-            if len(all_items) - count_before >= PPH_PER_KEYWORD_LIMIT:
-                break
-
+            if len(all_items) - count_before >= PPH_PER_KEYWORD_LIMIT: break
         if DEBUG_LOG:
             log.info(f"[PPH] kw={kw} +{len(all_items)-count_before} items (total {len(all_items)})"
                      + (" [generic]" if using_generic else "") + (" [spa]" if using_spa else ""))
-
     # De-dup
     seen, uniq = set(), []
     for it in all_items:
         key = (it.get("url") or it.get("original_url") or "").strip()
-        if not key:
-            key = f"pph::{(it.get('title') or '')[:160]}"
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(it)
-
-    if DEBUG_LOG:
-        log.info(f"[PPH] Total {len(uniq)} jobs collected for {len(kw_list)} keywords")
-
+        if not key: key = f"pph::{(it.get('title') or '')[:160]}"
+        if key in seen: continue
+        seen.add(key); uniq.append(it)
+    if DEBUG_LOG: log.info(f"[PPH] Total {len(uniq)} jobs collected for {len(kw_list)} keywords")
     return uniq
