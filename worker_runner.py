@@ -15,7 +15,7 @@ def _log(msg: str) -> None:
     print(msg, flush=True)
 
 def _fmt_exc() -> str:
-    return "".join(traceback.format_exc())
+    return """""".join(traceback.format_exc())
 
 # -------------------------------
 # Dynamic safe caller
@@ -107,7 +107,7 @@ FRESH_WINDOW_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 
 # Ανά πλατφόρμα intervals (override του γενικού)
 FREELANCER_INTERVAL_SECONDS = int(os.getenv("FREELANCER_INTERVAL_SECONDS", str(WORKER_INTERVAL)))
-PPH_INTERVAL_SECONDS         = int(os.getenv("PPH_INTERVAL_SECONDS", "600"))  # 10' default
+PPH_INTERVAL_SECONDS         = int(os.getenv("PPH_INTERVAL_SECONDS", "120"))  # 2' default όπως ζητήθηκε
 
 ENABLE_FREELANCER = os.getenv("ENABLE_FREELANCER", "1") == "1"
 ENABLE_PPH        = os.getenv("ENABLE_PPH", "1") == "1"
@@ -139,7 +139,7 @@ def _load_keywords() -> List[str]:
 def _tick_once():
     keywords = _load_keywords()
     fresh_since = _hours_ago(FRESH_WINDOW_HOURS)
-    limit = int(os.getenv("FETCH_LIMIT", "30"))
+    limit = int(os.getenv("FETCH_LIMIT", "200"))  # default μεγαλύτερο για PPH
 
     fetched_total = {}
 
@@ -170,23 +170,26 @@ def main():
 
         # FREELANCER slot
         if mod_freelancer and now >= next_run["freelancer"]:
-            _tick_once()  # μέσα κάνει και pph αν είναι ώρα – θέλουμε ξεκάθαρο log; εναλλακτικά τρέχουμε ανά πλατφόρμα
+            # Τρέχουμε μόνο freelancer εδώ για καθαρό interval
+            keywords = _load_keywords()
+            fresh_since = _hours_ago(FRESH_WINDOW_HOURS)
+            limit = int(os.getenv("FETCH_LIMIT", "200"))
+            items = _safe_get(mod_freelancer, keywords, fresh_since, limit, log_prefix="freelancer: ")
+            _log(f"INFO:worker:freelancer fetched={len(items)}")
             next_run["freelancer"] = now + FREELANCER_INTERVAL_SECONDS
             ran_any = True
 
-        # PPH slot (αν θέλουμε να εγγυηθούμε ξεχωριστό ρυθμό)
+        # PPH slot (ξεχωριστά)
         if mod_pph and now >= next_run["pph"]:
-            # τρέχουμε μόνο PPH αυτή τη φορά για να κρατήσουμε το interval καθαρό
             keywords = _load_keywords()
             fresh_since = _hours_ago(FRESH_WINDOW_HOURS)
-            limit = int(os.getenv("FETCH_LIMIT", "30"))
+            limit = int(os.getenv("FETCH_LIMIT", "200"))
             items = _safe_get(mod_pph, keywords, fresh_since, limit, log_prefix="pph: ")
             _log(f"INFO:worker:peopleperhour fetched={len(items)}")
             next_run["pph"] = now + PPH_INTERVAL_SECONDS
             ran_any = True
 
         if not ran_any:
-            # περιμένουμε ως το επόμενο slot
             sleep_for = min(
                 max(0.5, next_run["freelancer"] - now) if mod_freelancer else 9999,
                 max(0.5, next_run["pph"] - now)        if mod_pph        else 9999,
