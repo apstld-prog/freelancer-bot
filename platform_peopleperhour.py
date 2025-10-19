@@ -1,7 +1,7 @@
 import re
 import httpx
-from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 
 def get_items(keywords=None, fresh_since=None, limit=50, logger=None):
     base_url = "https://www.peopleperhour.com/freelance-jobs?search="
@@ -16,23 +16,20 @@ def get_items(keywords=None, fresh_since=None, limit=50, logger=None):
         url = f"{base_url}{kw}"
         try:
             if logger:
-                logger.info(f"[PPH] fetching: {url}")
+                logger.info(f"[PPH] fetching {url}")
             r = httpx.get(url, timeout=15)
             if r.status_code != 200:
-                if logger:
-                    logger.warning(f"[PPH] HTTP {r.status_code} for {url}")
                 continue
 
             soup = BeautifulSoup(r.text, "html.parser")
-            jobs = soup.select("section.job")
-            for job in jobs:
-                title_tag = job.select_one("h3 a")
-                desc_tag = job.select_one(".job-description, .description")
-                budget_tag = job.select_one(".job-budget, .job__price")
+            job_blocks = soup.select("a.job__title-link")
 
-                title = title_tag.get_text(strip=True) if title_tag else "(No title)"
-                url_job = "https://www.peopleperhour.com" + title_tag["href"] if title_tag and title_tag.has_attr("href") else url
+            for link in job_blocks:
+                title = link.get_text(strip=True)
+                job_url = "https://www.peopleperhour.com" + link["href"]
+                desc_tag = link.find_parent("div", class_="job__container")
                 desc = desc_tag.get_text(strip=True) if desc_tag else ""
+                budget_tag = soup.select_one(".job__price, .job__budget")
                 budget_text = budget_tag.get_text(strip=True) if budget_tag else ""
                 currency, amount = None, None
                 m = re.search(r"([£$€])\s?(\d+[\d,.]*)", budget_text)
@@ -43,8 +40,8 @@ def get_items(keywords=None, fresh_since=None, limit=50, logger=None):
                     "platform": "peopleperhour",
                     "title": title,
                     "description": desc,
-                    "affiliate_url": url_job,
-                    "original_url": url_job,
+                    "affiliate_url": job_url,
+                    "original_url": job_url,
                     "budget_amount": amount,
                     "budget_currency": currency,
                     "budget_usd": None,
