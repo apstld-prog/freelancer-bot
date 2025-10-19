@@ -1,97 +1,133 @@
 
-# platform_peopleperhour.py — HTML parser without bs4, regex/heuristics
-from typing import List, Dict, Optional, Tuple
-import os, re, html, urllib.parse, logging
-from datetime import datetime, timezone, timedelta
+# platform_peopleperhour.py
+from __future__ import annotations
+
+import re
+import os
+import json
+import datetime as dt
+from typing import List, Dict, Any, Optional
+
 import httpx
 
-log = logging.getLogger("pph")
+USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "15"))
+PPH_BASE = "https://www.peopleperhour.com"
 
-FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
-USER_AGENT = os.getenv("HTTP_USER_AGENT", "Mozilla/5.0 JobBot/1.6")
+def _log(logger, msg: str):
+    if logger:
+        try: logger.debug(msg)
+        except Exception: pass
 
-BASE_LIST = os.getenv("PPH_BASE_URL", "https://www.peopleperhour.com/freelance-jobs?search={kw}")
-PER_KEYWORD_LIMIT = int(os.getenv("PPH_PER_KEYWORD_LIMIT", "10"))
+def _client():
+    return httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT, follow_redirects=True)
 
-_re_job = re.compile(r'href="(?P<href>/freelance-jobs/[^"]*?-(?P<id>\d+))"[^>]*>(?P<title>.*?)</a>', re.I|re.S)
-_re_price = re.compile(r'(?:(?:Budget|Fixed|From)\s*:?\s*)?([£$€])\s?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)', re.I)
-_re_strip = re.compile(r"<[^>]+>")
-_re_space = re.compile(r"\s+")
+def _http_get(url: str, logger=None) -> Optional[str]:
+    try:
+        with _client() as c:
+            r = c.get(url)
+        _log(logger, f"PPH GET {url} -> {r.status_code} {r.headers.get('Content-Type')}")
+        if r.status_code == 200:
+            return r.text
+    except Exception as e:
+        _log(logger, f"PPH GET error: {e}")
+    return None
 
-def _fetch(url: str, timeout: float = 15.0) -> str:
-    headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
-    with httpx.Client(timeout=timeout, headers=headers, follow_redirects=True) as c:
-        r = c.get(url)
-        r.raise_for_status()
-        return r.text
+_job_href_re = re.compile(r'href="(/job/\d+[^"]*)"')
+_meta_og_re = re.compile(r'<meta\s+property="og:(title|description)"\s+content="([^"]*)"', re.I)
+_budget_json_re = re.compile(r'"budget"\s*:\s*\{[^}]*"amount"\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*,\s*"currency"\s*:\s*"([A-Z]{3})"', re.I)
+_budget_text_re = re.compile(r'(?:(USD|GBP|EUR|CAD|AUD|INR|AED|SAR|TRY|PLN|CHF|SEK|NOK|DKK|RON|BGN|HUF|CZK|ZAR|BRL|ARS|MXN|JPY|CNY|HKD|SGD|NZD|RUB|\£|\€|\$)\s?)([0-9][0-9\.,]*)')
+_datetime_iso_re = re.compile(r'"createdAt"\s*:\s*"([^"]+)"')
 
-def _abs(url: str) -> str:
-    if url.startswith("http"):
-        return url
-    return urllib.parse.urljoin("https://www.peopleperhour.com", url)
+def _extract_jobs_from_search_html(html: str, logger=None) -> list[dict]:
+    hrefs = _job_href_re.findall(html or "")
+    hrefs = list(dict.fromkeys(hrefs))
+    items = []
+    for href in hrefs[:100]:
+        url = PPH_BASE + href.split('"',1)[0]
+        items.append({"url": url})
+    _log(logger, f"PPH: found {len(items)} job links on search page")
+    return items
 
-def _clean(txt: str) -> str:
-    txt = html.unescape(_re_strip.sub(" ", txt))
-    return _re_space.sub(" ", txt).strip()
+def _parse_job_detail(html: str) -> dict:
+    title = None
+    desc = None
+    created_iso = None
+    for k, v in _meta_og_re.findall(html or ""):
+        if k.lower() == "title": title = v.strip()
+        elif k.lower() == "description": desc = v.strip()
+    m = _budget_json_re.search(html or "")
+    currency = None
+    amount = None
+    if m:
+        amount = float(m.group(1))
+        currency = m.group(2)
+    else:
+        mt = _budget_text_re.search(html or "")
+        if mt:
+            cur = mt.group(1)
+            if cur in ("£",): currency = "GBP"
+            elif cur in ("€",): currency = "EUR"
+            elif cur in ("$",): currency = "USD"
+            else: currency = cur
+            num = mt.group(2).replace(",", "")
+            try: amount = float(num)
+            except: amount = None
+    dm = _datetime_iso_re.search(html or "")
+    if dm: created_iso = dm.group(1)
+    return {"title": title, "description": desc, "budget": amount, "currency": currency, "created_iso": created_iso}
 
-def _parse_listing(body: str) -> List[Dict]:
-    jobs = []
-    for m in _re_job.finditer(body):
-        href = _abs(m.group("href"))
-        title = _clean(m.group("title"))
-        # Grab a small snippet around the link for budget hints
-        start = max(0, m.start()-400)
-        chunk = body[start:m.end()+400]
-        bud = _re_price.search(chunk)
-        currency = amount = None
-        if bud:
-            currency = {"£":"GBP","$":"USD","€":"EUR"}.get(bud.group(1), bud.group(1))
-            amount = bud.group(2).replace(",", "").replace(".", "")
-            try:
-                amount = int(amount)
-            except Exception:
-                amount = None
-        jobs.append({
-            "title": title,
-            "description": None,
-            "budget_min": amount,
-            "budget_max": None,
-            "budget_currency": currency,
-            "url": href,
-            "posted_at": datetime.now(timezone.utc).isoformat(),
-        })
-    return jobs
+def _parse_iso_or_now(s: Optional[str]) -> dt.datetime:
+    if not s: return dt.datetime.utcnow()
+    try:
+        return dt.datetime.fromisoformat(s.replace("Z","+00:00")).astimezone(dt.timezone.utc).replace(tzinfo=None)
+    except Exception:
+        return dt.datetime.utcnow()
 
-def get_items(keywords: List[str], fresh_since: datetime, limit: int, logger=None) -> List[Dict]:
-    logger = logger or log
-    out: List[Dict] = []
-    for kw in keywords:
-        if len(out) >= limit:
-            break
-        url = BASE_LIST.format(kw=urllib.parse.quote_plus(kw))
-        try:
-            body = _fetch(url)
-            logger.debug("PPH HTML GET %s", url)
-        except Exception as e:
-            logger.debug("PPH GET failed %s: %s", url, e)
-            continue
-        jobs = _parse_listing(body)
-        # De-dup and cut per keyword
-        seen = set(x.get("url") for x in out)
-        for j in jobs:
-            if j["url"] in seen:
-                continue
-            seen.add(j["url"])
-            out.append(j)
-            if sum(1 for x in out if kw.lower() in (x["title"] or "").lower()) >= PER_KEYWORD_LIMIT:
-                break
-        if len(out) >= limit:
-            break
-    # Unique by URL
-    uniq = []
+def _kw_ok(text: str, keywords: list[str]) -> bool:
+    if not keywords: return True
+    T = (text or "").lower()
+    return any(kw.lower() in T for kw in keywords)
+
+def _fetch_search_pages(keywords: list[str], logger=None) -> list[dict]:
+    items = []
     seen = set()
-    for j in out:
-        u = j.get("url")
-        if u and u not in seen:
-            seen.add(u); uniq.append(j)
-    return uniq[:limit]
+    for kw in keywords or []:
+        q = httpx.QueryParams({"search": kw})
+        url = f"{PPH_BASE}/freelance-jobs?{q}"
+        html = _http_get(url, logger)
+        if not html: continue
+        for it in _extract_jobs_from_search_html(html, logger):
+            if it["url"] in seen: continue
+            seen.add(it["url"])
+            items.append(it)
+    return items
+
+def get_items(*, keywords: list[str], fresh_since: dt.datetime, limit: int = 30, logger=None) -> List[Dict[str, Any]]:
+    logger and logger.debug("PPH:get_items start")
+    candidates = _fetch_search_pages(keywords, logger)
+    out: List[Dict[str, Any]] = []
+    for it in candidates:
+        if len(out) >= max(1, int(limit)): break
+        html = _http_get(it["url"], logger)
+        if not html: continue
+        details = _parse_job_detail(html)
+        title = details.get("title") or ""
+        desc = details.get("description") or ""
+        if not _kw_ok(title + " " + desc, keywords): continue
+        m = re.search(r'/job/(\d+)', it["url"])
+        job_id = m.group(1) if m else str(abs(hash(it["url"])))
+        created = _parse_iso_or_now(details.get("created_iso"))
+        if created < fresh_since: continue
+        out.append({
+            "id": f"pph-{job_id}",
+            "title": title or "(no title)",
+            "url": it["url"],
+            "description": desc or "",
+            "budget": details.get("budget"),
+            "currency": details.get("currency"),
+            "source": "peopleperhour",
+            "created_at": created,
+        })
+    logger and logger.info(f"peopleperhour fetched={len(out)}")
+    return out
