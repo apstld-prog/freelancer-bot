@@ -1,9 +1,9 @@
-# platform_peopleperhour.py — PeoplePerHour robust collector
+# platform_peopleperhour.py — PeoplePerHour robust collector (RSS + Sitemap fallback)
 # Strategy:
 # 1) Try RSS search:   https://www.peopleperhour.com/freelance-jobs?rss=1&search={kw}&page={n}
-# 2) If empty, fallback to GENERIC RSS (no search) and do client-side keyword match:
-#    https://www.peopleperhour.com/freelance-jobs?rss=1&page={n}
-# For every RSS item, fetch the job HTML and extract title/desc/budget/date.
+# 2) If empty, fallback to GENERIC RSS: https://www.peopleperhour.com/freelance-jobs?rss=1&page={n}
+# 3) If still empty, fallback to SITEMAPS (latest job URLs from XML sitemaps), then client-side keyword match.
+# For every URL, fetch the job HTML and extract title/desc/budget/date.
 # Filter to last 48h, respect intervals, show matched_keyword & FX rates.
 # No UI changes.
 
@@ -24,25 +24,22 @@ USER_AGENT = os.getenv(
         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 FreelancerBot/1.0"
     ),
 )
-# Keep your env default but we’ll also compute a generic RSS base for fallback.
 PPH_BASE_URL = os.getenv("PPH_BASE_URL", "https://www.peopleperhour.com/freelance-jobs?rss=1&search={kw}")
 PPH_MAX_PAGES = int(os.getenv("PPH_MAX_PAGES", "10"))
 PPH_REQUEST_TIMEOUT = float(os.getenv("PPH_REQUEST_TIMEOUT", "15"))
 PPH_INTERVAL_SECONDS = int(os.getenv("PPH_INTERVAL_SECONDS", "120"))
-PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "1") == "1"   # per your env this is ON
+PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "1") == "1"
 PPH_PER_KEYWORD_LIMIT = int(os.getenv("PPH_MAX_ITEMS_PER_TICK", "200"))
+PPH_SITEMAP_LIMIT = int(os.getenv("PPH_SITEMAP_LIMIT", "40"))
 FX_RATES = json.loads(os.getenv("FX_RATES", '{"USD":1.0,"EUR":1.08,"GBP":1.26}'))
 DEBUG_LOG = os.getenv("PER_KEYWORD_DEBUG", "0") == "1" or os.getenv("LOG_LEVEL", "").upper() == "DEBUG"
 
-# Build generic RSS base (no search) for fallback
-# If your PPH_BASE_URL already contains rss=1, we swap 'search={kw}' -> '' and ensure &page param.
+# Build generic RSS base
 def _generic_rss_base() -> str:
     base = PPH_BASE_URL
     if "rss=1" not in base:
         base = "https://www.peopleperhour.com/freelance-jobs?rss=1"
-    # drop any search=… part
     base = re.sub(r"[&?]search=\{?kw\}?","", base)
-    # clean trailing ? or &
     base = re.sub(r"[?&]$", "", base)
     return base
 
@@ -131,7 +128,6 @@ def _parse_rss_items(body: str) -> List[Dict]:
 
 def _rss_search(keyword: str, page: int) -> List[Dict]:
     base = PPH_BASE_URL.replace("{kw}", urllib.parse.quote_plus(keyword))
-    # ensure page param
     url = base if "{page}" in base else f"{base}{'&' if '?' in base else '?'}page={page}"
     body = _fetch(url)
     items = _parse_rss_items(body)
@@ -150,6 +146,54 @@ def _rss_generic(page: int) -> List[Dict]:
     if DEBUG_LOG:
         log.info(f"[PPH] RSS(generic) p{page}: {len(items)} items")
     return items
+
+# ---------------- Sitemap fallback ----------------
+# We read https://www.peopleperhour.com/sitemap.xml, find job-related sitemaps, then fetch latest URLs.
+_SITEMAP_INDEX_RE = re.compile(r"<loc>(.*?)</loc>", re.I)
+_URLSET_ITEM_RE = re.compile(r"<url\b.*?>.*?</url>", re.S | re.I)
+_URL_LOC_RE = re.compile(r"<loc>(.*?)</loc>", re.I)
+_URL_LASTMOD_RE = re.compile(r"<lastmod>(.*?)</lastmod>", re.I)
+
+def _parse_iso_dt(s: str) -> Optional[datetime]:
+    if not s: return None
+    try:
+        if s.endswith("Z"): s = s.replace("Z", "+00:00")
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _sitemap_job_urls(limit_sitemaps: int = 40) -> List[Dict]:
+    """Return list of dicts: {'url':..., 'lastmod': datetime} from recent job sitemaps."""
+    try:
+        idx = _fetch("https://www.peopleperhour.com/sitemap.xml", timeout=PPH_REQUEST_TIMEOUT)
+    except Exception as e:
+        log.warning(f"[PPH] sitemap index fetch failed: {e}")
+        return []
+    locs = _SITEMAP_INDEX_RE.findall(idx)
+    # Filter to job/project sitemaps
+    job_maps = [u for u in locs if "sitemap-jobs" in u or "jobs" in u or "project" in u or "freelance" in u]
+    # Keep most recent N
+    job_maps = job_maps[-limit_sitemaps:] if job_maps else []
+    results = []
+    for sm_url in reversed(job_maps):  # recent first if ordered
+        try:
+            xml = _fetch(sm_url, timeout=PPH_REQUEST_TIMEOUT)
+        except Exception as e:
+            log.debug(f"[PPH] sitemap fetch failed {sm_url}: {e}")
+            continue
+        for blk in _URLSET_ITEM_RE.findall(xml) or []:
+            loc_m = _URL_LOC_RE.search(blk)
+            if not loc_m: 
+                continue
+            loc = loc_m.group(1).strip()
+            if "/job/" not in loc:
+                continue
+            lm_m = _URL_LASTMOD_RE.search(blk)
+            lm = _parse_iso_dt(lm_m.group(1).strip()) if lm_m else None
+            results.append({"url": loc, "lastmod": lm})
+        if DEBUG_LOG:
+            log.info(f"[PPH] sitemap {sm_url} -> +{len(results)} URLs accumulated")
+    return results
 
 # ---------------- HTML details (job page) ----------------
 def _parse_json_ld(html_text: str) -> Dict:
@@ -238,7 +282,7 @@ def _fetch_job_details(url: str) -> Dict:
             except Exception:
                 pass
     if not dt:
-        dt = datetime.now(timezone.utc)  # freshness enforced at RSS level
+        dt = datetime.now(timezone.utc)  # freshness enforced by RSS/sitemap
 
     item = {
         "title": title or "Untitled",
@@ -272,7 +316,7 @@ def get_items(keywords: List[str]) -> List[Dict]:
     all_items: List[Dict] = []
 
     for kw in kw_list:
-        # 1) Try RSS search pages
+        # 1) RSS search pages
         search_items: List[Dict] = []
         for page in range(1, PPH_MAX_PAGES + 1):
             try:
@@ -281,7 +325,6 @@ def get_items(keywords: List[str]) -> List[Dict]:
                 log.warning(f"[PPH] RSS(search) fetch error kw={kw} p={page}: {e}")
                 items = []
             if not items:
-                # stop early if the very first page is empty
                 if page == 1 and DEBUG_LOG:
                     log.debug(f"[PPH] RSS: no items on page {page} for '{kw}'")
                 break
@@ -289,8 +332,8 @@ def get_items(keywords: List[str]) -> List[Dict]:
             if len(search_items) >= PPH_PER_KEYWORD_LIMIT:
                 break
 
-        # 2) If search RSS gave nothing, fall back to GENERIC RSS (filter by keyword locally)
         using_generic = False
+        # 2) Generic RSS fallback
         if not search_items:
             using_generic = True
             generic_items: List[Dict] = []
@@ -305,7 +348,6 @@ def get_items(keywords: List[str]) -> List[Dict]:
                 generic_items.extend(items)
                 if len(generic_items) >= PPH_PER_KEYWORD_LIMIT:
                     break
-            # keep only items where kw in title/desc
             lowered_kw = kw.lower()
             search_items = [
                 it for it in generic_items
@@ -314,13 +356,26 @@ def get_items(keywords: List[str]) -> List[Dict]:
             if DEBUG_LOG:
                 log.info(f"[PPH] Fallback generic RSS matched {len(search_items)} for kw={kw}")
 
-        # 3) Age filter
+        # 3) Sitemap fallback (if still nothing)
+        using_sitemap = False
+        if not search_items:
+            using_sitemap = True
+            urls = _sitemap_job_urls(limit_sitemaps=PPH_SITEMAP_LIMIT)
+            if DEBUG_LOG:
+                log.info(f"[PPH] sitemap URLs harvested: {len(urls)}")
+            # filter by lastmod within 48h
+            urls = [u for u in urls if not u.get("lastmod") or u["lastmod"] >= cutoff]
+            # keyword filtering will be done after fetching details
+            # map to simple list
+            search_items = [{"rss_link": u["url"], "rss_date": u.get("lastmod") or datetime.now(timezone.utc)} for u in urls]
+
+        # 4) Age filter
         search_items = [it for it in search_items if it["rss_date"] >= cutoff]
         if DEBUG_LOG:
             log.info(f"[PPH] After {FRESH_HOURS}h filter: {len(search_items)} items (kw={kw})"
-                     + (" [generic]" if using_generic else ""))
+                     + (" [generic]" if using_generic else "") + (" [sitemap]" if using_sitemap else ""))
 
-        # 4) Enrich: fetch each job page for details
+        # 5) Enrich + keyword match
         count_before = len(all_items)
         for r in search_items:
             link = r.get("rss_link") or ""
@@ -330,7 +385,6 @@ def get_items(keywords: List[str]) -> List[Dict]:
             if not job:
                 continue
 
-            # Matched keyword
             mk = _match_keyword(job.get("title",""), job.get("description",""), [kw])
             if not mk and not PPH_SEND_ALL:
                 continue
@@ -345,7 +399,7 @@ def get_items(keywords: List[str]) -> List[Dict]:
 
         if DEBUG_LOG:
             log.info(f"[PPH] kw={kw} +{len(all_items)-count_before} items (total {len(all_items)})"
-                     + (" [generic]" if using_generic else ""))
+                     + (" [generic]" if using_generic else "") + (" [sitemap]" if using_sitemap else ""))
 
     # De-dup
     seen, uniq = set(), []
