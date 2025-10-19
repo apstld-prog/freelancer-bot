@@ -1,13 +1,5 @@
-# platform_peopleperhour.py — PeoplePerHour robust collector (RSS + SPA-search fallback)
-# Strategy (tiered):
-# 1) Try RSS search:   https://www.peopleperhour.com/freelance-jobs?rss=1&search={kw}&page={n}
-# 2) If empty, fallback to GENERIC RSS: https://www.peopleperhour.com/freelance-jobs?rss=1&page={n}
-# 3) If still empty, fallback to SPA SEARCH PAGE HTML for embedded job URLs:
-#    https://www.peopleperhour.com/freelance-jobs?q={kw}&page={n}
-#    Extract /job/<id> URLs from the whole HTML/JS (anchors OR embedded JSON), then enrich each job.
-# For every URL, fetch the job HTML and extract title/desc/budget/date.
-# Filter to last 48h, respect intervals, show matched_keyword & FX rates.
-# No UI changes.
+# platform_peopleperhour.py — PeoplePerHour robust collector (RSS + SPA-search fallback, v4)
+# Adds support for job URLs like: /freelance-jobs/<cat>/<subcat>/<slug>-<id> in SPA fallback.
 
 from typing import List, Dict, Optional, Tuple
 import os, re, html, urllib.parse, logging, json
@@ -149,7 +141,11 @@ def _rss_generic(page: int) -> List[Dict]:
     return items
 
 # ---------------- SPA search-page fallback ----------------
-_RE_JOB_URL = re.compile(r'/(?:job|projects)/\d+(?:-[a-z0-9\-_%]+)?', re.I)
+# Capture both legacy /job/<id>-slug and modern /freelance-jobs/.../<slug>-<id>
+_RE_JOB_URL = re.compile(
+    r'/(?:job/\d+(?:-[a-z0-9\-%_]+)?|freelance-jobs/[a-z0-9\-/]+-[0-9]{5,})',
+    re.I
+)
 
 def _spa_search_urls(keyword: str, page: int) -> List[str]:
     url = f"https://www.peopleperhour.com/freelance-jobs?q={urllib.parse.quote_plus(keyword)}&page={page}"
@@ -158,20 +154,20 @@ def _spa_search_urls(keyword: str, page: int) -> List[str]:
     except Exception as e:
         log.debug(f"[PPH] SPA search fetch failed p{page} kw={keyword}: {e}")
         return []
-    # Find job-like URLs anywhere in HTML/JS
     urls = []
     seen = set()
     for m in _RE_JOB_URL.finditer(body):
         path = m.group(0)
-        # only accept /job/<id>... (exclude other paths)
-        if not path.startswith("/job/"):
-            continue
         full = "https://www.peopleperhour.com" + path
+        # Basic sanity: ensure numeric id at the end
+        if "/freelance-jobs/" in path:
+            if not re.search(r"-\d{5,}$", path):  # id with 5+ digits
+                continue
         if full in seen:
             continue
         seen.add(full)
         urls.append(full)
-        if len(urls) >= 200:
+        if len(urls) >= 300:
             break
     if DEBUG_LOG:
         log.info(f"[PPH] SPA search p{page} kw={keyword}: extracted {len(urls)} job URLs")
@@ -264,7 +260,7 @@ def _fetch_job_details(url: str) -> Dict:
             except Exception:
                 pass
     if not dt:
-        dt = datetime.now(timezone.utc)  # if unknown, we'll still enforce freshness via filters
+        dt = datetime.now(timezone.utc)
 
     item = {
         "title": title or "Untitled",
@@ -285,7 +281,6 @@ def _fetch_job_details(url: str) -> Dict:
 
 # ---------------- Public API ----------------
 def get_items(keywords: List[str]) -> List[Dict]:
-    # Respect toggles
     if not (os.getenv("ENABLE_PPH", "1") in ("1", "true", "True") and
             os.getenv("P_PEOPLEPERHOUR", "1") in ("1", "true", "True")):
         return []
@@ -298,8 +293,8 @@ def get_items(keywords: List[str]) -> List[Dict]:
     all_items: List[Dict] = []
 
     for kw in kw_list:
-        # 1) RSS search
         search_items: List[Dict] = []
+        # 1) RSS search
         for page in range(1, PPH_MAX_PAGES + 1):
             try:
                 items = _rss_search(kw, page)
@@ -340,7 +335,7 @@ def get_items(keywords: List[str]) -> List[Dict]:
 
         using_spa = False
         if not search_items:
-            # 3) SPA search-page fallback: extract /job/<id> links from HTML/JS
+            # 3) SPA search-page fallback
             using_spa = True
             urls = []
             for page in range(1, PPH_MAX_PAGES + 1):
@@ -352,12 +347,11 @@ def get_items(keywords: List[str]) -> List[Dict]:
                         pass
                 if len(urls) >= PPH_PER_KEYWORD_LIMIT:
                     break
-            # map to rss-like entries with "date" unknown (filtered later via job page)
             search_items = [{"rss_link": u, "rss_date": datetime.now(timezone.utc)} for u in urls]
             if DEBUG_LOG:
                 log.info(f"[PPH] SPA search gathered {len(urls)} URLs for kw={kw}")
 
-        # 4) Enrich + filter by age + keyword
+        # Enrich + filter by age + keyword
         count_before = len(all_items)
         for r in search_items:
             link = r.get("rss_link") or ""
@@ -366,23 +360,18 @@ def get_items(keywords: List[str]) -> List[Dict]:
             job = _fetch_job_details(link)
             if not job:
                 continue
-
-            # Freshness: accept only if job date >= cutoff (if date missing, treat as now)
             try:
                 jdt = datetime.strptime(job["date"], "%a, %d %b %Y %H:%M:%S %z")
             except Exception:
                 jdt = datetime.now(timezone.utc)
             if jdt < cutoff:
                 continue
-
             mk = _match_keyword(job.get("title",""), job.get("description",""), [kw])
             if not mk and not PPH_SEND_ALL:
                 continue
             job["matched_keyword"] = mk or kw
-
             if "budget_display" not in job and job.get("budget_min") and job.get("currency"):
                 job["budget_display"] = _convert_currency(job["budget_min"], job["currency"])
-
             all_items.append(job)
             if len(all_items) - count_before >= PPH_PER_KEYWORD_LIMIT:
                 break
