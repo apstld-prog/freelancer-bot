@@ -1,59 +1,81 @@
 import os
 import time
+import importlib
 import logging
 from datetime import datetime, timedelta
-
-import platform_freelancer
-import platform_peopleperhour
+from httpx import Client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("worker")
 
-def run_worker():
-    keywords_env = os.getenv("KEYWORDS", "logo,lighting,led,design")
-    keywords = [k.strip() for k in keywords_env.split(",") if k.strip()]
-    lookback_hours = int(os.getenv("PPH_LOOKBACK_HOURS", "48"))
+SEND_ENDPOINT = os.getenv("SEND_ENDPOINT", "http://localhost:10000/api/send_job")
+WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "120"))  # default 2 λεπτά
+LOOKBACK_HOURS = int(os.getenv("LOOKBACK_HOURS", "48"))
+FRESH_SINCE = datetime.utcnow() - timedelta(hours=LOOKBACK_HOURS)
 
-    log.info("Worker started | keywords=%s | lookback=%dh", keywords, lookback_hours)
+platforms = {
+    "freelancer": "platform_freelancer",
+    "peopleperhour": "platform_peopleperhour",
+}
 
-    since_time = datetime.utcnow() - timedelta(hours=lookback_hours)
-    total_results = {"freelancer": 0, "pph": 0}
+client = Client(timeout=15.0)
 
-    for kw in keywords:
-        # FREELANCER
-        try:
-            jobs_f = platform_freelancer.fetch(keywords=kw, fresh_since=since_time)
-            total_results["freelancer"] += len(jobs_f)
-            if jobs_f:
-                log.info(f"[Freelancer] keyword='{kw}' → {len(jobs_f)} results")
-                for j in jobs_f:
-                    log.info(f"   └─ {j.get('title')} | {j.get('budget_currency')} {j.get('budget_amount')}")
-            else:
-                log.warning(f"[Freelancer] keyword='{kw}' → no results")
-        except Exception as e:
-            log.error(f"[Freelancer] fetch failed for '{kw}': {e}")
 
-        # PEOPLEPERHOUR
-        try:
-            jobs_p = platform_peopleperhour.get_items(keywords=kw, fresh_since=since_time)
-            total_results["pph"] += len(jobs_p)
-            if jobs_p:
-                log.info(f"[PPH] keyword='{kw}' → {len(jobs_p)} results")
-                for j in jobs_p:
-                    log.info(f"   └─ {j.get('title')} | {j.get('budget_currency')} {j.get('budget_amount')}")
-            else:
-                log.warning(f"[PPH] keyword='{kw}' → no results")
-        except Exception as e:
-            log.error(f"[PPH] fetch failed for '{kw}': {e}")
+def send_to_bot(source: str, job: dict):
+    try:
+        resp = client.post(SEND_ENDPOINT, json={**job, "source": source})
+        if resp.status_code != 200:
+            log.warning(f"[SEND_FAIL] {source}: {resp.text}")
+    except Exception as e:
+        log.error(f"[SEND_ERR] {source}: {e}")
 
-    log.info(f"Worker summary: freelancer={total_results['freelancer']}, peopleperhour={total_results['pph']}")
 
-    if total_results["freelancer"] == 0 and total_results["pph"] == 0:
-        log.warning("⚠ No jobs found from any source. Check parsing or API.")
+def process_platform(name: str, modname: str):
+    try:
+        mod = importlib.import_module(modname)
+        log.debug(f"using {modname}.get_items()")
+        items = mod.get_items(limit=50, fresh_since=FRESH_SINCE, logger=log)
+
+        if not items:
+            log.warning(f"[{name.upper()}] No results fetched.")
+            return 0
+
+        # Debug preview (first 3)
+        for i, job in enumerate(items[:3]):
+            title = job.get("title")
+            desc = job.get("description", "")[:100].replace("\n", " ")
+            budget = job.get("budget_usd") or job.get("budget_amount")
+            log.info(f"[{name.upper()} PREVIEW] {i+1}. {title} | {budget} USD | {desc}")
+
+        for job in items:
+            send_to_bot(name, job)
+
+        log.info(f"[{name.upper()}] ✅ sent {len(items)} jobs to bot")
+        return len(items)
+    except Exception as e:
+        log.exception(f"[{name.upper()}] fetch/send error: {e}")
+        return 0
+
+
+def main():
+    log.info("======================================================")
+    log.info("🚀 Worker started — fetching jobs every %s sec", WORKER_INTERVAL)
+    log.info("======================================================")
+
+    while True:
+        total = {}
+        for name, modname in platforms.items():
+            count = process_platform(name, modname)
+            total[name] = count
+
+        log.info(f"Worker summary: " + ", ".join([f"{k}={v}" for k, v in total.items()]))
+        time.sleep(WORKER_INTERVAL)
+
 
 if __name__ == "__main__":
-    interval = int(os.getenv("WORKER_INTERVAL", "120"))
-    log.info(f"Starting main worker loop (interval={interval}s)...")
-    while True:
-        run_worker()
-        time.sleep(interval)
+    try:
+        main()
+    except KeyboardInterrupt:
+        log.warning("Worker interrupted by user.")
+    except Exception as e:
+        log.exception(f"Fatal worker error: {e}")
