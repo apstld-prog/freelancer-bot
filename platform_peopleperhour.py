@@ -126,6 +126,7 @@ def _fetch_html_search(keyword: str, timeout: float=15.0):
             href = a.get("href") or ""
             if not href:
                 continue
+            # skip pure category links lacking numeric id
             if "/freelance-jobs/" in href and re.search(r"-\d{5,}", href) is None:
                 continue
             link = href if href.startswith("http") else (PPH_HOST + href)
@@ -151,7 +152,8 @@ def _fetch_html_search(keyword: str, timeout: float=15.0):
         return []
 
 
-def get_items():
+def get_items(*_args, **_kwargs):
+    # Accept any positional/keyword args to be compatible with worker signature.
     if not (_env_bool("ENABLE_PPH", True) or _env_bool("P_PEOPLEPERHOUR", False)):
         _log("PPH disabled via env")
         return []
