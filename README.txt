@@ -1,4 +1,1 @@
-PeoplePerHour fix bundle
-
-- platform_peopleperhour.py : HTML-based scraper (no BeautifulSoup needed).
-- Tip: For even better parsing, add `beautifulsoup4` to your requirements.
+Replace bot.py, platform_peopleperhour.py, worker_runner.py. Restart Service. Ensure ENABLE_PPH=1, P_PEOPLEPERHOUR=1, PPH_RSS_URLS set.
