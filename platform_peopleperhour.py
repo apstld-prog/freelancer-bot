@@ -1,8 +1,12 @@
-# platform_peopleperhour.py — PeoplePerHour robust collector (RSS + SPA-search fallback, v4)
-# Adds support for job URLs like: /freelance-jobs/<cat>/<subcat>/<slug>-<id> in SPA fallback.
+# platform_peopleperhour.py — PeoplePerHour collector (RSS + SPA fallback) with 429 handling
+# - Tiered sources: RSS search -> Generic RSS -> SPA search-page
+# - Robust HTTP client: persistent session, retries, exponential backoff, Retry-After support
+# - Pacing between pages to avoid CloudFront 429
+# - 48h filter, matched_keyword, FX rates, interval 120s
+# - No UI changes
 
 from typing import List, Dict, Optional, Tuple
-import os, re, html, urllib.parse, logging, json
+import os, re, html, urllib.parse, logging, json, time, random
 from datetime import datetime, timezone, timedelta
 import httpx
 
@@ -10,33 +14,69 @@ log = logging.getLogger("pph")
 
 # ---------------- ENV ----------------
 FRESH_HOURS = int(os.getenv("PPH_FRESH_HOURS", os.getenv("FRESH_WINDOW_HOURS", "48")))
-USER_AGENT = os.getenv(
-    "PPH_USER_AGENT",
-    os.getenv(
-        "HTTP_USER_AGENT",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 FreelancerBot/1.0"
-    ),
-)
 PPH_BASE_URL = os.getenv("PPH_BASE_URL", "https://www.peopleperhour.com/freelance-jobs?rss=1&search={kw}")
 PPH_MAX_PAGES = int(os.getenv("PPH_MAX_PAGES", "10"))
 PPH_REQUEST_TIMEOUT = float(os.getenv("PPH_REQUEST_TIMEOUT", "15"))
 PPH_INTERVAL_SECONDS = int(os.getenv("PPH_INTERVAL_SECONDS", "120"))
 PPH_SEND_ALL = os.getenv("PPH_SEND_ALL", "1") == "1"
 PPH_PER_KEYWORD_LIMIT = int(os.getenv("PPH_MAX_ITEMS_PER_TICK", "200"))
-PPH_SLEEP_BETWEEN_PAGES = float(os.getenv("PPH_SLEEP_BETWEEN_PAGES", "0"))
+PPH_SLEEP_BETWEEN_PAGES = float(os.getenv("PPH_SLEEP_BETWEEN_PAGES", "0.6"))
+HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
+HTTP_BACKOFF = float(os.getenv("HTTP_BACKOFF", "1.6"))
 FX_RATES = json.loads(os.getenv("FX_RATES", '{"USD":1.0,"EUR":1.08,"GBP":1.26}'))
 DEBUG_LOG = os.getenv("PER_KEYWORD_DEBUG", "0") == "1" or os.getenv("LOG_LEVEL", "").upper() == "DEBUG"
 
-def _generic_rss_base() -> str:
-    base = PPH_BASE_URL
-    if "rss=1" not in base:
-        base = "https://www.peopleperhour.com/freelance-jobs?rss=1"
-    base = re.sub(r"[&?]search=\{?kw\}?","", base)
-    base = re.sub(r"[?&]$", "", base)
-    return base
+# ---------------- HTTP session with backoff ----------------
+_UAS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
+]
 
-GENERIC_RSS_BASE = _generic_rss_base()
+def _client():
+    headers = {
+        "User-Agent": random.choice(_UAS),
+        "Accept": "text/html,application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://www.peopleperhour.com/",
+    }
+    return httpx.Client(headers=headers, timeout=PPH_REQUEST_TIMEOUT, follow_redirects=True, http2=False)
+
+def _http_get(url: str) -> Optional[httpx.Response]:
+    with _client() as c:
+        delay = 0.05 + random.random() * 0.1
+        time.sleep(delay)
+        last_exc = None
+        for attempt in range(1, HTTP_RETRIES + 1):
+            try:
+                r = c.get(url)
+                # 429/503 handling
+                if r.status_code in (429, 503):
+                    ra = r.headers.get("Retry-After")
+                    wait = float(ra) if (ra and ra.isdigit()) else (HTTP_BACKOFF ** attempt) + random.random()
+                    if DEBUG_LOG:
+                        log.warning(f"[PPH] {r.status_code} on {url} — retry {attempt}/{HTTP_RETRIES} after {wait:.2f}s")
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+                return r
+            except Exception as e:
+                last_exc = e
+                wait = (HTTP_BACKOFF ** attempt) + random.random() * 0.5
+                if DEBUG_LOG:
+                    log.debug(f"[PPH] GET failed ({type(e).__name__}) attempt {attempt}/{HTTP_RETRIES} — backoff {wait:.2f}s")
+                time.sleep(wait)
+        if DEBUG_LOG:
+            log.warning(f"[PPH] GET gave up: {url} ({last_exc})")
+        return None
+
+def _fetch(url: str) -> str:
+    r = _http_get(url)
+    if not r:
+        raise httpx.HTTPError(f"GET failed after retries: {url}")
+    return r.text
 
 # ---------------- Currency helpers ----------------
 _CURRENCY_MAP = {"£":"GBP","€":"EUR","$":"USD","C$":"CAD","A$":"AUD","₹":"INR","NZ$":"NZD","CHF":"CHF"}
@@ -88,16 +128,6 @@ def _parse_rss_datetime(s: str) -> Optional[datetime]:
             continue
     return None
 
-def _fetch(url: str, timeout: float = None) -> str:
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Referer": "https://www.peopleperhour.com/",
-    }
-    r = httpx.get(url, headers=headers, timeout=timeout or PPH_REQUEST_TIMEOUT, follow_redirects=True)
-    r.raise_for_status()
-    return r.text
-
 # ---------------- RSS parsing ----------------
 _RE_ITEM = re.compile(r"<item\b.*?>.*?</item>", re.S | re.I)
 _RE_TITLE = re.compile(r"<title\b[^>]*>(.*?)</title>", re.S | re.I)
@@ -125,11 +155,18 @@ def _rss_search(keyword: str, page: int) -> List[Dict]:
     body = _fetch(url)
     items = _parse_rss_items(body)
     if DEBUG_LOG:
-        if items:
-            log.info(f"[PPH] RSS(search) p{page} kw={keyword}: {len(items)} items")
-        else:
-            log.debug(f"[PPH] RSS(search) EMPTY p{page} kw={keyword}")
+        log.log(logging.INFO if items else logging.DEBUG, f"[PPH] RSS(search) p{page} kw={keyword}: {len(items)} items")
     return items
+
+def _generic_rss_base() -> str:
+    base = PPH_BASE_URL
+    if "rss=1" not in base:
+        base = "https://www.peopleperhour.com/freelance-jobs?rss=1"
+    base = re.sub(r"[&?]search=\{?kw\}?","", base)
+    base = re.sub(r"[?&]$", "", base)
+    return base
+
+GENERIC_RSS_BASE = _generic_rss_base()
 
 def _rss_generic(page: int) -> List[Dict]:
     base = GENERIC_RSS_BASE
@@ -149,20 +186,14 @@ _RE_JOB_URL = re.compile(
 
 def _spa_search_urls(keyword: str, page: int) -> List[str]:
     url = f"https://www.peopleperhour.com/freelance-jobs?q={urllib.parse.quote_plus(keyword)}&page={page}"
-    try:
-        body = _fetch(url)
-    except Exception as e:
-        log.debug(f"[PPH] SPA search fetch failed p{page} kw={keyword}: {e}")
-        return []
+    body = _fetch(url)
     urls = []
     seen = set()
     for m in _RE_JOB_URL.finditer(body):
         path = m.group(0)
         full = "https://www.peopleperhour.com" + path
-        # Basic sanity: ensure numeric id at the end
-        if "/freelance-jobs/" in path:
-            if not re.search(r"-\d{5,}$", path):  # id with 5+ digits
-                continue
+        if "/freelance-jobs/" in path and not re.search(r"-\d{5,}$", path):
+            continue
         if full in seen:
             continue
         seen.add(full)
@@ -203,11 +234,7 @@ def _extract_budget(text: str) -> Tuple[Optional[float], Optional[float], Option
     return (None, None, None)
 
 def _fetch_job_details(url: str) -> Dict:
-    try:
-        body = _fetch(url)
-    except Exception as e:
-        log.debug("PPH job fetch failed %s: %s", url, e)
-        return {}
+    body = _fetch(url)
 
     # Title
     title = None
@@ -308,6 +335,7 @@ def get_items(keywords: List[str]) -> List[Dict]:
             search_items.extend(items)
             if len(search_items) >= PPH_PER_KEYWORD_LIMIT:
                 break
+            time.sleep(PPH_SLEEP_BETWEEN_PAGES)
 
         using_generic = False
         if not search_items:
@@ -325,6 +353,7 @@ def get_items(keywords: List[str]) -> List[Dict]:
                 generic_items.extend(items)
                 if len(generic_items) >= PPH_PER_KEYWORD_LIMIT:
                     break
+                time.sleep(PPH_SLEEP_BETWEEN_PAGES)
             lowered_kw = kw.lower()
             search_items = [
                 it for it in generic_items
@@ -339,14 +368,13 @@ def get_items(keywords: List[str]) -> List[Dict]:
             using_spa = True
             urls = []
             for page in range(1, PPH_MAX_PAGES + 1):
-                urls.extend(_spa_search_urls(kw, page))
-                if PPH_SLEEP_BETWEEN_PAGES:
-                    try:
-                        import time; time.sleep(PPH_SLEEP_BETWEEN_PAGES)
-                    except Exception:
-                        pass
+                try:
+                    urls.extend(_spa_search_urls(kw, page))
+                except Exception as e:
+                    log.debug(f"[PPH] SPA search page error p{page} kw={kw}: {e}")
                 if len(urls) >= PPH_PER_KEYWORD_LIMIT:
                     break
+                time.sleep(PPH_SLEEP_BETWEEN_PAGES + random.random()*0.4)
             search_items = [{"rss_link": u, "rss_date": datetime.now(timezone.utc)} for u in urls]
             if DEBUG_LOG:
                 log.info(f"[PPH] SPA search gathered {len(urls)} URLs for kw={kw}")
@@ -357,8 +385,10 @@ def get_items(keywords: List[str]) -> List[Dict]:
             link = r.get("rss_link") or ""
             if not link:
                 continue
-            job = _fetch_job_details(link)
-            if not job:
+            try:
+                job = _fetch_job_details(link)
+            except Exception as e:
+                log.debug(f"[PPH] job fetch error {link}: {e}")
                 continue
             try:
                 jdt = datetime.strptime(job["date"], "%a, %d %b %Y %H:%M:%S %z")
