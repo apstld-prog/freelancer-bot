@@ -181,7 +181,7 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- BUILD APPLICATION ---
 def build_application():
-    app = ApplicationBuilder().token(os.environ.get("TELEGRAM_TOKEN")).build()
+    app = ApplicationBuilder().token(os.environ.get("BOT_TOKEN")).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
