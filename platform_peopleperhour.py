@@ -1,19 +1,20 @@
 import os
 import time
 import datetime
-import math
-import random
 import httpx
 from bs4 import BeautifulSoup
 
 FX_RATES = {"USD": 1.0, "EUR": 1.08, "GBP": 1.26}
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
 }
 
 
 def convert_to_usd(amount, currency):
-    """Convert given amount to USD based on FX_RATES."""
+    """Convert amount to USD using FX_RATES."""
     if not amount or not currency:
         return amount
     currency = currency.upper()
@@ -33,7 +34,7 @@ def budget_display(amount_min, amount_max, currency):
         base = f"{sym}{amount_min}+"
     else:
         base = f"{sym}{amount_max}"
-    # USD/EUR conversion display
+
     try:
         usd_min = convert_to_usd(amount_min, ccy)
         usd_max = convert_to_usd(amount_max, ccy)
@@ -50,8 +51,8 @@ def budget_display(amount_min, amount_max, currency):
         return base
 
 
-def fetch_jobs(keywords, pages=5, delay=1.2):
-    """Fetch jobs from PPH search pages."""
+def fetch_jobs(keywords, pages=5, delay=1.5):
+    """Fetch jobs from PeoplePerHour, robust to HTML structure changes."""
     results = []
     for kw in keywords:
         for p in range(1, pages + 1):
@@ -59,23 +60,44 @@ def fetch_jobs(keywords, pages=5, delay=1.2):
             try:
                 r = httpx.get(url, headers=HEADERS, timeout=20.0)
                 if r.status_code != 200:
+                    print(f"[PPH] kw={kw} p={p} HTTP {r.status_code}")
                     time.sleep(delay)
                     continue
                 soup = BeautifulSoup(r.text, "html.parser")
-                cards = soup.find_all("a", href=True)
-                job_links = [a["href"] for a in cards if "/freelance-jobs/" in a["href"]]
+
+                job_links = set()
+
+                # --- Standard pattern ---
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    if "/freelance-jobs/" in href and not href.endswith("/freelance-jobs"):
+                        if not href.startswith("http"):
+                            href = "https://www.peopleperhour.com" + href
+                        job_links.add(href)
+
+                # --- Backup patterns ---
+                if not job_links:
+                    for tag in soup.find_all(["article", "div", "li"], attrs={"data-job-id": True}):
+                        a = tag.find("a", href=True)
+                        if a and "/freelance-jobs/" in a["href"]:
+                            href = a["href"]
+                            if not href.startswith("http"):
+                                href = "https://www.peopleperhour.com" + href
+                            job_links.add(href)
+
                 for link in job_links:
-                    if not link.startswith("http"):
-                        link = "https://www.peopleperhour.com" + link
                     results.append({"keyword": kw, "url": link})
+
+                print(f"[PPH] kw={kw} p={p} -> {len(job_links)} job links")
                 time.sleep(delay)
-            except Exception:
+            except Exception as e:
+                print(f"[PPH] Error on kw={kw} p={p}: {e}")
                 continue
     return results
 
 
 def parse_job_page(url):
-    """Extract job info from job page."""
+    """Extract title, description, and budget from job page."""
     try:
         r = httpx.get(url, headers=HEADERS, timeout=20.0)
         if r.status_code != 200:
@@ -95,7 +117,11 @@ def parse_job_page(url):
                     currency = "USD"
                 elif "€" in text:
                     currency = "EUR"
-                nums = [float(x.replace(",", "")) for x in text.replace("–", "-").replace("to", "-").split("-") if x.strip().replace(".", "").isdigit()]
+                nums = [
+                    float(x.replace(",", ""))
+                    for x in text.replace("–", "-").replace("to", "-").split("-")
+                    if x.strip().replace(".", "").isdigit()
+                ]
                 if len(nums) == 1:
                     amount_min = nums[0]
                 elif len(nums) >= 2:
@@ -136,8 +162,8 @@ def collect_pph_jobs(keywords):
     return found
 
 
-# ✅ Compatibility wrapper for Render worker_runner
 def get_items(keywords=None):
+    """Compatibility wrapper for worker_runner.py"""
     if not keywords:
         keywords = ["logo", "lighting", "luminaire"]
     return collect_pph_jobs(keywords)
