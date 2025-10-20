@@ -14,6 +14,7 @@ CURRENCY_MAP = {
     "$": 1.0,   # USD
 }
 
+
 def convert_to_usd(amount_str: str):
     """Μετατροπή ποσού σε USD αν εντοπιστεί νόμισμα."""
     for symbol, rate in CURRENCY_MAP.items():
@@ -61,13 +62,16 @@ def get_items(keywords):
                 budget = budget_el.strip() if budget_el else "N/A"
                 budget = convert_to_usd(budget)
 
-                # Fuzzy match: ελέγχει αν κάποια λέξη του keyword υπάρχει σε τίτλο ή περιγραφή
+                # Fuzzy keyword match (τίτλος + περιγραφή)
                 text_to_search = (title + " " + desc).lower()
                 kw_clean = kw.lower().strip()
                 require_match = os.getenv("PPH_REQUIRE_KEYWORD_MATCH", "0") == "1"
 
-                if require_match and not any(word in text_to_search for word in kw_clean.split()):
-                    continue
+                if require_match:
+                    # Αν απαιτείται match, ψάχνουμε πιο χαλαρά
+                    match_found = any(word in text_to_search for word in kw_clean.split())
+                    if not match_found:
+                        continue
 
                 all_items.append({
                     "title": html.unescape(title),
