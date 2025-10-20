@@ -52,47 +52,55 @@ def budget_display(amount_min, amount_max, currency):
 
 
 def fetch_jobs(keywords, pages=5, delay=1.5):
-    """Fetch jobs from PeoplePerHour, robust to HTML structure changes."""
+    """Fetch jobs from PeoplePerHour, robust to HTML structure changes, with backoff."""
     results = []
     for kw in keywords:
         for p in range(1, pages + 1):
             url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}&page={p}"
-            try:
-                r = httpx.get(url, headers=HEADERS, timeout=20.0)
-                if r.status_code != 200:
-                    print(f"[PPH] kw={kw} p={p} HTTP {r.status_code}")
-                    time.sleep(delay)
-                    continue
-                soup = BeautifulSoup(r.text, "html.parser")
+            for attempt in range(3):  # retry up to 3 times
+                try:
+                    r = httpx.get(url, headers=HEADERS, timeout=20.0)
+                    if r.status_code == 429:
+                        wait = 8 * (attempt + 1)
+                        print(f"[PPH] 429 Too Many Requests — waiting {wait}s (kw={kw} p={p})")
+                        time.sleep(wait)
+                        continue
+                    if r.status_code != 200:
+                        print(f"[PPH] kw={kw} p={p} HTTP {r.status_code}")
+                        time.sleep(delay)
+                        break
 
-                job_links = set()
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    job_links = set()
 
-                # --- Standard pattern ---
-                for a in soup.find_all("a", href=True):
-                    href = a["href"]
-                    if "/freelance-jobs/" in href and not href.endswith("/freelance-jobs"):
-                        if not href.startswith("http"):
-                            href = "https://www.peopleperhour.com" + href
-                        job_links.add(href)
-
-                # --- Backup patterns ---
-                if not job_links:
-                    for tag in soup.find_all(["article", "div", "li"], attrs={"data-job-id": True}):
-                        a = tag.find("a", href=True)
-                        if a and "/freelance-jobs/" in a["href"]:
-                            href = a["href"]
+                    # --- Standard pattern ---
+                    for a in soup.find_all("a", href=True):
+                        href = a["href"]
+                        if "/freelance-jobs/" in href and not href.endswith("/freelance-jobs"):
                             if not href.startswith("http"):
                                 href = "https://www.peopleperhour.com" + href
                             job_links.add(href)
 
-                for link in job_links:
-                    results.append({"keyword": kw, "url": link})
+                    # --- Backup patterns ---
+                    if not job_links:
+                        for tag in soup.find_all(["article", "div", "li"], attrs={"data-job-id": True}):
+                            a = tag.find("a", href=True)
+                            if a and "/freelance-jobs/" in a["href"]:
+                                href = a["href"]
+                                if not href.startswith("http"):
+                                    href = "https://www.peopleperhour.com" + href
+                                job_links.add(href)
 
-                print(f"[PPH] kw={kw} p={p} -> {len(job_links)} job links")
-                time.sleep(delay)
-            except Exception as e:
-                print(f"[PPH] Error on kw={kw} p={p}: {e}")
-                continue
+                    for link in job_links:
+                        results.append({"keyword": kw, "url": link})
+
+                    print(f"[PPH] kw={kw} p={p} -> {len(job_links)} job links")
+                    time.sleep(delay)
+                    break
+                except Exception as e:
+                    print(f"[PPH] Error on kw={kw} p={p}: {e}")
+                    time.sleep(5)
+                    continue
     return results
 
 
