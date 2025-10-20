@@ -1,5 +1,8 @@
-
 import os
+from dotenv import load_dotenv
+
+# ✅ Φόρτωση περιβάλλοντος
+load_dotenv()
 
 # --- Core env ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
