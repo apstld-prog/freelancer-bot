@@ -1,21 +1,33 @@
 import os
 import time
+import random
 import datetime
 import httpx
 from bs4 import BeautifulSoup
 
+# --- Currency conversion rates ---
 FX_RATES = {"USD": 1.0, "EUR": 1.08, "GBP": 1.26}
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+
+# --- User agents to rotate to avoid 403s ---
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+]
+
+
+def make_headers():
+    """Return randomized headers per request"""
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/",
+    }
 
 
 def convert_to_usd(amount, currency):
-    """Convert amount to USD using FX_RATES."""
     if not amount or not currency:
         return amount
     currency = currency.upper()
@@ -24,7 +36,7 @@ def convert_to_usd(amount, currency):
 
 
 def budget_display(amount_min, amount_max, currency):
-    """Return display string like £250 (~$315 USD / €290 EUR)."""
+    """Display string like £250 (~$315 USD / €290 EUR)."""
     if not currency:
         return f"${amount_min}-{amount_max}"
     ccy = currency.upper()
@@ -53,14 +65,14 @@ def budget_display(amount_min, amount_max, currency):
 
 
 def fetch_jobs(keywords, pages=5, delay=1.5):
-    """Fetch jobs from PeoplePerHour, robust to HTML structure changes, with backoff."""
+    """Fetch jobs from PeoplePerHour, with retry & 403 protection."""
     results = []
     for kw in keywords:
         for p in range(1, pages + 1):
             url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}&page={p}"
-            for attempt in range(3):  # retry up to 3 times
+            for attempt in range(3):
                 try:
-                    r = httpx.get(url, headers=HEADERS, timeout=20.0)
+                    r = httpx.get(url, headers=make_headers(), timeout=20.0)
 
                     if r.status_code == 429:
                         wait = 8 * (attempt + 1)
@@ -69,8 +81,8 @@ def fetch_jobs(keywords, pages=5, delay=1.5):
                         continue
 
                     if r.status_code in (403, 404):
-                        print(f"[PPH] kw={kw} p={p} -> blocked (HTTP {r.status_code}), skipping...")
-                        time.sleep(10)
+                        print(f"[PPH] kw={kw} p={p} -> blocked (HTTP {r.status_code}), pausing 30s...")
+                        time.sleep(30)
                         break
 
                     if r.status_code != 200:
@@ -81,7 +93,6 @@ def fetch_jobs(keywords, pages=5, delay=1.5):
                     soup = BeautifulSoup(r.text, "html.parser")
                     job_links = set()
 
-                    # --- Standard pattern ---
                     for a in soup.find_all("a", href=True):
                         href = a["href"]
                         if "/freelance-jobs/" in href and not href.endswith("/freelance-jobs"):
@@ -89,7 +100,6 @@ def fetch_jobs(keywords, pages=5, delay=1.5):
                                 href = "https://www.peopleperhour.com" + href
                             job_links.add(href)
 
-                    # --- Backup patterns ---
                     if not job_links:
                         for tag in soup.find_all(["article", "div", "li"], attrs={"data-job-id": True}):
                             a = tag.find("a", href=True)
@@ -109,13 +119,18 @@ def fetch_jobs(keywords, pages=5, delay=1.5):
                     print(f"[PPH] Error on kw={kw} p={p}: {e}")
                     time.sleep(5)
                     continue
+
+        # --- small pause between keywords ---
+        print(f"[PPH] Finished keyword {kw}, waiting 15s...")
+        time.sleep(15)
+
     return results
 
 
 def parse_job_page(url):
     """Extract title, description, and budget from job page."""
     try:
-        r = httpx.get(url, headers=HEADERS, timeout=20.0)
+        r = httpx.get(url, headers=make_headers(), timeout=20.0)
         if r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, "html.parser")
@@ -176,7 +191,6 @@ def collect_pph_jobs(keywords):
         if keyword_match(job_data, keywords):
             found.append(job_data)
 
-    # --- Μικρή παύση για να μην τρέχει συνεχώς ---
     print("[PPH] Cycle complete. Waiting 60s before next run...")
     time.sleep(60)
 
