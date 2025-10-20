@@ -40,21 +40,22 @@ def get_items(keywords):
             html_content = data.get("html") or ""
             soup = BeautifulSoup(html_content, "html.parser")
 
-            jobs = soup.select("section, div.job, li.job") or soup.find_all("a", href=re.compile("/freelance-jobs/"))
-            print(f"[PPH] Εντοπίστηκαν {len(jobs)} αγγελίες αρχικά")
+            # Πιο ακριβής επιλογή για job links
+            job_links = soup.find_all("a", href=re.compile(r"^/freelance-jobs/"))
+            print(f"[PPH] Εντοπίστηκαν {len(job_links)} αγγελίες αρχικά")
 
-            for job in jobs:
-                title_el = job.find("h2") or job.find("h3") or job.find("a")
-                title = title_el.get_text(strip=True) if title_el else "Untitled"
-
-                link = title_el["href"] if title_el and title_el.has_attr("href") else ""
-                if link and not link.startswith("http"):
+            for a in job_links:
+                title = a.get_text(strip=True)
+                link = a["href"]
+                if not link.startswith("http"):
                     link = f"https://www.peopleperhour.com{link}"
 
-                desc_el = job.find("p") or job.find("div", class_=re.compile("description|summary"))
+                # Αναζήτηση περιγραφής ή budget κοντά στο link
+                parent = a.find_parent(["div", "section", "li"])
+                desc_el = parent.find("p") if parent else None
                 desc = desc_el.get_text(" ", strip=True) if desc_el else ""
 
-                budget_el = job.find(text=re.compile(r"[$€£]\s*\d"))
+                budget_el = parent.find(text=re.compile(r"[$€£]\s*\d")) if parent else None
                 budget = budget_el.strip() if budget_el else "N/A"
                 budget = convert_to_usd(budget)
 
