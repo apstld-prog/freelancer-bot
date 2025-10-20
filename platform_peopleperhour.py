@@ -10,6 +10,7 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
     ),
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 
@@ -60,11 +61,18 @@ def fetch_jobs(keywords, pages=5, delay=1.5):
             for attempt in range(3):  # retry up to 3 times
                 try:
                     r = httpx.get(url, headers=HEADERS, timeout=20.0)
+
                     if r.status_code == 429:
                         wait = 8 * (attempt + 1)
                         print(f"[PPH] 429 Too Many Requests — waiting {wait}s (kw={kw} p={p})")
                         time.sleep(wait)
                         continue
+
+                    if r.status_code in (403, 404):
+                        print(f"[PPH] kw={kw} p={p} -> blocked (HTTP {r.status_code}), skipping...")
+                        time.sleep(10)
+                        break
+
                     if r.status_code != 200:
                         print(f"[PPH] kw={kw} p={p} HTTP {r.status_code}")
                         time.sleep(delay)
