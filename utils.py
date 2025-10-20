@@ -42,3 +42,23 @@ def save_users(users: dict):
 def get_user(users: dict, telegram_id: int) -> dict:
     """Επιστρέφει τα δεδομένα ενός χρήστη, αν υπάρχει."""
     return users.get(str(telegram_id), {})
+
+# -----------------------------
+# ΝΕΑ ΠΡΟΣΘΗΚΗ: format_jobs
+# -----------------------------
+
+def format_jobs(jobs: list) -> str:
+    """
+    Επιστρέφει τις αγγελίες σε μορφή κειμένου για το Telegram.
+    """
+    if not jobs:
+        return "⚠️ Δεν βρέθηκαν αγγελίες."
+
+    formatted = []
+    for job in jobs[:10]:  # στέλνουμε τις πρώτες 10 για να μην “φορτώνει” το chat
+        title = job.get("title", "Χωρίς τίτλο")
+        budget = job.get("budget", "—")
+        link = job.get("link", "")
+        formatted.append(f"🔹 <b>{title}</b>\n💰 {budget}\n🔗 {link}")
+
+    return "\n\n".join(formatted)
