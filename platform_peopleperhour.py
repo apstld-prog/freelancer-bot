@@ -11,6 +11,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
 }
 
+
 def convert_to_usd(amount, currency):
     """Convert given amount to USD based on FX_RATES."""
     if not amount or not currency:
@@ -18,6 +19,7 @@ def convert_to_usd(amount, currency):
     currency = currency.upper()
     rate = FX_RATES.get(currency, 1.0)
     return round(amount / rate, 2)
+
 
 def budget_display(amount_min, amount_max, currency):
     """Return display string like £250 (~$315 USD / €290 EUR)."""
@@ -47,6 +49,7 @@ def budget_display(amount_min, amount_max, currency):
     except Exception:
         return base
 
+
 def fetch_jobs(keywords, pages=5, delay=1.2):
     """Fetch jobs from PPH search pages."""
     results = []
@@ -69,6 +72,7 @@ def fetch_jobs(keywords, pages=5, delay=1.2):
             except Exception:
                 continue
     return results
+
 
 def parse_job_page(url):
     """Extract job info from job page."""
@@ -108,6 +112,7 @@ def parse_job_page(url):
     except Exception:
         return None
 
+
 def keyword_match(job, keywords):
     """Return True if any keyword appears in title or description."""
     haystack = (job.get("title", "") + " " + job.get("description", "")).lower()
@@ -116,6 +121,7 @@ def keyword_match(job, keywords):
             job["matched_keyword"] = kw
             return True
     return False
+
 
 def collect_pph_jobs(keywords):
     """Main collector."""
@@ -128,6 +134,13 @@ def collect_pph_jobs(keywords):
         if keyword_match(job_data, keywords):
             found.append(job_data)
     return found
+
+
+# ✅ Compatibility wrapper for Render worker_runner
+def get_items():
+    keywords = ["logo", "lighting", "luminaire"]
+    return collect_pph_jobs(keywords)
+
 
 if __name__ == "__main__":
     keywords = ["logo", "lighting", "luminaire"]
