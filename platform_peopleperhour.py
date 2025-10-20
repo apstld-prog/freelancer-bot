@@ -2,6 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import html
+import os
 from urllib.parse import quote
 
 PROXY_URL = "https://pph-proxy-service.onrender.com"
@@ -24,6 +25,7 @@ def convert_to_usd(amount_str: str):
             except Exception:
                 return amount_str
     return amount_str
+
 
 def get_items(keywords):
     """Ανάγνωση αγγελιών από το proxy PPH"""
@@ -59,8 +61,12 @@ def get_items(keywords):
                 budget = budget_el.strip() if budget_el else "N/A"
                 budget = convert_to_usd(budget)
 
-                # Match λέξης-κλειδί σε τίτλο + περιγραφή
-                if kw.lower() not in (title + " " + desc).lower():
+                # Fuzzy match: ελέγχει αν κάποια λέξη του keyword υπάρχει σε τίτλο ή περιγραφή
+                text_to_search = (title + " " + desc).lower()
+                kw_clean = kw.lower().strip()
+                require_match = os.getenv("PPH_REQUIRE_KEYWORD_MATCH", "0") == "1"
+
+                if require_match and not any(word in text_to_search for word in kw_clean.split()):
                     continue
 
                 all_items.append({
