@@ -43,7 +43,6 @@ def get_items(keywords):
             html_content = data.get("html") or ""
             soup = BeautifulSoup(html_content, "html.parser")
 
-            # Πιο ακριβής επιλογή για job links
             job_links = soup.find_all("a", href=re.compile(r"^/freelance-jobs/"))
             print(f"[PPH] Εντοπίστηκαν {len(job_links)} αγγελίες αρχικά")
 
@@ -53,7 +52,6 @@ def get_items(keywords):
                 if not link.startswith("http"):
                     link = f"https://www.peopleperhour.com{link}"
 
-                # Αναζήτηση περιγραφής ή budget κοντά στο link
                 parent = a.find_parent(["div", "section", "li"])
                 desc_el = parent.find("p") if parent else None
                 desc = desc_el.get_text(" ", strip=True) if desc_el else ""
@@ -62,15 +60,14 @@ def get_items(keywords):
                 budget = budget_el.strip() if budget_el else "N/A"
                 budget = convert_to_usd(budget)
 
-                # Fuzzy keyword match (τίτλος + περιγραφή)
-                text_to_search = (title + " " + desc).lower()
+                # Βελτιωμένο keyword matching (case-insensitive, fuzzy)
+                text_to_search = f"{title} {desc}".lower()
                 kw_clean = kw.lower().strip()
                 require_match = os.getenv("PPH_REQUIRE_KEYWORD_MATCH", "0") == "1"
 
                 if require_match:
-                    # Αν απαιτείται match, ψάχνουμε πιο χαλαρά
-                    match_found = any(word in text_to_search for word in kw_clean.split())
-                    if not match_found:
+                    words = re.findall(r"\w+", kw_clean)
+                    if not any(w in text_to_search for w in words):
                         continue
 
                 all_items.append({
