@@ -137,8 +137,9 @@ def collect_pph_jobs(keywords):
 
 
 # ✅ Compatibility wrapper for Render worker_runner
-def get_items():
-    keywords = ["logo", "lighting", "luminaire"]
+def get_items(keywords=None):
+    if not keywords:
+        keywords = ["logo", "lighting", "luminaire"]
     return collect_pph_jobs(keywords)
 
 
