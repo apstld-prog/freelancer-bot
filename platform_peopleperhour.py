@@ -167,6 +167,11 @@ def collect_pph_jobs(keywords):
             continue
         if keyword_match(job_data, keywords):
             found.append(job_data)
+
+    # --- Μικρή παύση για να μην τρέχει συνεχώς ---
+    print("[PPH] Cycle complete. Waiting 60s before next run...")
+    time.sleep(60)
+
     return found
 
 
