@@ -23,7 +23,7 @@ def main():
     if not url:
         raise SystemExit("❌ DATABASE_URL not found. Make sure it's set in Render environment.")
     print("Connecting to database...")
-    conn = psycopg2.connect(url)
+    conn = psycopg2.connect(url.replace("postgresql+psycopg2://", "postgresql://"))
     with conn, conn.cursor() as cur:
         cur.execute(sql)
     conn.close()
