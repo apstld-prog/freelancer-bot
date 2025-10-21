@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# worker_runner.py — FINAL (PPH enabled, fallback API_KEY=1211)
+# worker_runner.py — FINAL FIX (PPH JSON auto-parse)
 import os, logging, asyncio, hashlib, requests
 from typing import Dict, List, Optional, Set
 from html import escape as _esc
@@ -171,8 +171,22 @@ def _fetch_pph_items(keywords: List[str]) -> List[Dict]:
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        log.info("PPH merged: %d items", len(data))
-        return data
+
+        normalized = []
+        for item in data:
+            if isinstance(item, str):
+                normalized.append({
+                    "title": item,
+                    "description": "",
+                    "source": "PeoplePerHour",
+                    "url": item,
+                    "original_url": item
+                })
+            elif isinstance(item, dict):
+                item["source"] = item.get("source", "PeoplePerHour")
+                normalized.append(item)
+        log.info("PPH merged: %d items", len(normalized))
+        return normalized
     except Exception as e:
         log.warning("PPH fetch failed: %s", e)
         return []
