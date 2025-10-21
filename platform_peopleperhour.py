@@ -1,157 +1,128 @@
-# platform_peopleperhour.py — final version
-# Unified format identical to Freelancer jobs
-# Proxy first → fallback to direct scraping if empty or failed
-
-import os, time, logging, re, httpx
+import os, re, json, time, logging, random
+import httpx
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
-from datetime import datetime, timezone
-from typing import List, Dict, Optional
 
-log = logging.getLogger("pph")
+log = logging.getLogger("peopleperhour")
 
+API_BASE = "https://pph-proxy-service.onrender.com/api/pph"
 API_KEY = os.getenv("API_KEY", "1211")
-PPH_PROXY_URL = "https://pph-proxy-service.onrender.com/api/pph"
-BASE_URL = "https://www.peopleperhour.com/freelance-jobs"
-REQUEST_INTERVAL = 120  # seconds between safe requests
-_last_request = 0.0
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+)
 
-def _wait_safe():
-    global _last_request
-    elapsed = time.time() - _last_request
-    if elapsed < REQUEST_INTERVAL:
-        time.sleep(REQUEST_INTERVAL - elapsed)
-    _last_request = time.time()
+HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json, text/html"}
 
-def _clean(t: Optional[str]) -> str:
-    if not t:
-        return ""
-    return re.sub(r"\s+", " ", t).strip()
-
-def _extract_budget(text: str):
-    if not text:
-        return None, None, None
-    text = text.strip()
-    m = re.search(r"([£€$])\s?([\d,]+)(?:\s*-\s*([£€$])?\s?([\d,]+))?", text)
-    if not m:
-        return None, None, None
-    s1, v1, s2, v2 = m.groups()
-    cur = s2 or s1
+# Convert textual "x hours ago" to datetime UTC
+def _parse_relative_time(txt: str) -> datetime | None:
     try:
-        v1 = float(v1.replace(",", ""))
-        v2 = float(v2.replace(",", "")) if v2 else v1
+        txt = txt.strip().lower()
+        if "minute" in txt:
+            n = int(re.findall(r"(\d+)", txt)[0])
+            return datetime.now(timezone.utc) - timedelta(minutes=n)
+        if "hour" in txt:
+            n = int(re.findall(r"(\d+)", txt)[0])
+            return datetime.now(timezone.utc) - timedelta(hours=n)
+        if "day" in txt:
+            n = int(re.findall(r"(\d+)", txt)[0])
+            return datetime.now(timezone.utc) - timedelta(days=n)
     except Exception:
-        return None, None, None
-    symbol_map = {"£": "GBP", "$": "USD", "€": "EUR"}
-    cur_code = symbol_map.get(cur, "GBP")
-    return v1, v2, cur_code
+        return None
+    return None
 
-def _humanize_ago(ts: float) -> str:
-    now = time.time()
-    diff = max(0, now - ts)
-    if diff < 60:
-        return "just now"
-    m = int(diff // 60)
-    if m < 60:
-        return f"{m} min ago"
-    h = m // 60
-    if h < 24:
-        return f"{h} h ago"
-    d = h // 24
-    if d < 7:
-        return f"{d} d ago"
-    return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
 
-def _parse_pph_page(html: str, keyword: str) -> List[Dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    jobs = []
-    cards = soup.select("section.job, div.job, li.job")
-    if not cards:
-        cards = soup.select("div.listing-card, article, div.search-result")
-    for c in cards:
-        title_el = c.select_one("a, h2, h3")
-        if not title_el:
-            continue
-        title = _clean(title_el.get_text())
-        desc_el = c.select_one("p, div.description, div.job__desc")
-        desc = _clean(desc_el.get_text()) if desc_el else ""
-        url = title_el.get("href", "")
-        if url and not url.startswith("http"):
-            url = "https://www.peopleperhour.com" + url
+def fetch_peopleperhour(keyword: str) -> list[dict]:
+    """Fetch jobs from proxy or fallback scrape."""
+    jobs: list[dict] = []
+    keyword_q = keyword.strip().replace(" ", "+")
+    url = f"{API_BASE}?key={API_KEY}&q={keyword_q}"
 
-        budget_el = c.get_text()
-        bmin, bmax, bcur = _extract_budget(budget_el)
+    try:
+        with httpx.Client(timeout=20, headers=HEADERS) as client:
+            r = client.get(url)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list):
+                    for j in data:
+                        title = j.get("title") or ""
+                        desc = j.get("description") or ""
+                        bmin = j.get("budget_min")
+                        bmax = j.get("budget_max")
+                        cur = j.get("budget_currency") or "GBP"
+                        orig = j.get("original_url")
+                        ts = j.get("time_submitted")
+                        if ts:
+                            try:
+                                ts_dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+                            except Exception:
+                                ts_dt = datetime.now(timezone.utc)
+                        else:
+                            ts_dt = datetime.now(timezone.utc)
 
-        job = {
-            "title": title,
-            "description": desc,
-            "budget_min": bmin,
-            "budget_max": bmax,
-            "budget_currency": bcur,
-            "original_url": url,
-            "source": "PeoplePerHour",
-            "time_submitted": int(time.time()),
-            "posted_ago": _humanize_ago(time.time()),
-            "matched_keyword": keyword,
-        }
-        jobs.append(job)
+                        jobs.append({
+                            "title": title.strip(),
+                            "description": desc.strip(),
+                            "budget_amount": f"{bmin}-{bmax}" if bmin and bmax else str(bmin or ""),
+                            "budget_currency": cur,
+                            "original_url": orig,
+                            "source": "PeoplePerHour",
+                            "time_submitted": ts_dt,
+                        })
+                    if jobs:
+                        log.info(f"PPH proxy returned {len(jobs)} jobs for '{keyword}'")
+                        return jobs
+    except Exception as e:
+        log.warning(f"PPH proxy failed: {e}")
+
+    # Fallback scraping
+    log.warning("PPH fallback scraping for '%s'", keyword)
+    try:
+        html_url = f"https://www.peopleperhour.com/freelance-jobs?q={keyword_q}"
+        with httpx.Client(timeout=25, headers=HEADERS) as client:
+            r = client.get(html_url)
+        if r.status_code != 200:
+            log.warning("PPH fallback HTTP %d", r.status_code)
+            return jobs
+
+        soup = BeautifulSoup(r.text, "html.parser")
+        cards = soup.select("section.project-tile")
+        for card in cards:
+            try:
+                title_el = card.select_one("h5 a")
+                title = title_el.text.strip() if title_el else "(No title)"
+                href = "https://www.peopleperhour.com" + title_el["href"] if title_el else ""
+                desc_el = card.select_one(".description")
+                desc = desc_el.text.strip() if desc_el else ""
+                budget_el = card.select_one(".budget")
+                budget_txt = budget_el.text.strip() if budget_el else ""
+                match = re.search(r"(\d+)[^\d]+(\d+)?\s*([A-Z]{3})", budget_txt)
+                if match:
+                    bmin = match.group(1)
+                    bmax = match.group(2) or bmin
+                    cur = match.group(3)
+                else:
+                    bmin, bmax, cur = "", "", "GBP"
+
+                time_el = card.select_one(".time")
+                ttxt = time_el.text.strip() if time_el else ""
+                ts_dt = _parse_relative_time(ttxt) or datetime.now(timezone.utc)
+
+                jobs.append({
+                    "title": title,
+                    "description": desc,
+                    "budget_amount": f"{bmin}-{bmax}" if bmin else "",
+                    "budget_currency": cur,
+                    "original_url": href,
+                    "source": "PeoplePerHour",
+                    "time_submitted": ts_dt,
+                })
+            except Exception as e:
+                log.debug("PPH parse card error: %s", e)
+
+        log.info(f"PPH scraped {len(jobs)} jobs for '{keyword}'")
+        time.sleep(random.uniform(1, 2))
+    except Exception as e:
+        log.error(f"PPH scraping failed: {e}")
+
     return jobs
-
-def _fetch_via_proxy(keyword: str) -> List[Dict]:
-    try:
-        _wait_safe()
-        url = f"{PPH_PROXY_URL}?key={API_KEY}&q={keyword}"
-        r = httpx.get(url, timeout=30.0)
-        if r.status_code != 200:
-            log.warning("PPH proxy non-200: %s", r.status_code)
-            return []
-        data = r.json()
-        if isinstance(data, dict) and "jobs" in data:
-            data = data["jobs"]
-        if not isinstance(data, list):
-            return []
-        jobs = []
-        for j in data:
-            job = {
-                "title": _clean(j.get("title")),
-                "description": _clean(j.get("description")),
-                "budget_min": j.get("budget_min"),
-                "budget_max": j.get("budget_max"),
-                "budget_currency": j.get("budget_currency") or "GBP",
-                "original_url": j.get("original_url"),
-                "source": "PeoplePerHour",
-                "time_submitted": int(j.get("time_submitted") or time.time()),
-                "posted_ago": _humanize_ago(int(j.get("time_submitted") or time.time())),
-                "matched_keyword": keyword,
-            }
-            jobs.append(job)
-        return jobs
-    except Exception as e:
-        log.warning("PPH proxy fetch failed: %s", e)
-        return []
-
-def _fetch_via_scrape(keyword: str) -> List[Dict]:
-    try:
-        _wait_safe()
-        params = {"q": keyword}
-        r = httpx.get(BASE_URL, params=params, timeout=30.0)
-        if r.status_code != 200:
-            log.warning("PPH scrape non-200: %s", r.status_code)
-            return []
-        return _parse_pph_page(r.text, keyword)
-    except Exception as e:
-        log.warning("PPH scrape failed: %s", e)
-        return []
-
-def get_items(keywords: List[str]) -> List[Dict]:
-    """Main entrypoint: returns list of PeoplePerHour jobs matching keywords"""
-    all_jobs: List[Dict] = []
-    for kw in keywords:
-        kw = _clean(kw)
-        if not kw:
-            continue
-        jobs = _fetch_via_proxy(kw)
-        if not jobs:
-            log.info("PPH proxy empty, fallback to scrape for '%s'", kw)
-            jobs = _fetch_via_scrape(kw)
-        all_jobs.extend(jobs)
-    return all_jobs
