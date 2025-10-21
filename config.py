@@ -1,8 +1,8 @@
-
 import os
 
 # --- Core env ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+TELEGRAM_BOT_TOKEN = BOT_TOKEN  # ✅ for worker compatibility
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///freelancer.db")
@@ -44,8 +44,8 @@ PLATFORMS = {
 
 # Feeds and endpoints
 SKYWALKER_RSS = os.getenv("SKYWALKER_RSS", "https://www.skywalker.gr/jobs/feed")
-CAREERJET_RSS = os.getenv("CAREERJET_RSS", "https://www.careerjet.gr/search/rss?l=Greece")  # placeholder
-KARIERA_RSS = os.getenv("KARIERA_RSS", "")  # placeholder
+CAREERJET_RSS = os.getenv("CAREERJET_RSS", "https://www.careerjet.gr/search/rss?l=Greece")
+KARIERA_RSS = os.getenv("KARIERA_RSS", "")
 
 # Platform stats window
 STATS_WINDOW_HOURS = int(os.getenv("STATS_WINDOW_HOURS", "24"))
