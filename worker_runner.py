@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# worker_runner.py — FINAL with PeoplePerHour support (API_KEY from env)
+# worker_runner.py — FINAL (PPH enabled, fallback API_KEY=1211)
 import os, logging, asyncio, hashlib, requests
 from typing import Dict, List, Optional, Set
 from html import escape as _esc
@@ -17,7 +17,7 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
-API_KEY = os.getenv("API_KEY", "").strip()
+API_KEY = (os.getenv("API_KEY", "").strip() or "1211")
 
 def _h(s: str) -> str:
     return _esc((s or '').strip(), quote=False)
@@ -165,8 +165,8 @@ def _job_key(it: Dict) -> str:
     return hashlib.sha1(base.encode("utf-8","ignore")).hexdigest()
 
 def _fetch_pph_items(keywords: List[str]) -> List[Dict]:
-    base_url = os.getenv("PPH_PROXY_URL", "https://pph-proxy-service.onrender.com/api/pph")
-    url = f"{base_url}?key={API_KEY}" if API_KEY else base_url
+    base_url = "https://pph-proxy-service.onrender.com/api/pph"
+    url = f"{base_url}?key={API_KEY}"
     try:
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
