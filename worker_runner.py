@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# worker_runner.py — final autonomous PPH scraper version (no proxy)
+# worker_runner.py — DEBUG version: PeoplePerHour autonomous + sample print
 import os, logging, asyncio, hashlib
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 from datetime import datetime, timezone, timedelta
 from html import escape as _esc
 
@@ -12,15 +12,18 @@ from db_keywords import list_keywords as _list_keywords
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
+# ----------------------------------------------------
+# CONFIG & LOGGING
+# ----------------------------------------------------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.DEBUG))
 log = logging.getLogger("worker")
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 
-def _h(s: str) -> str:
-    return _esc((s or '').strip(), quote=False)
-
+# ----------------------------------------------------
+# DB HELPERS
+# ----------------------------------------------------
 def _ensure_sent_schema():
     with _get_session() as s:
         s.execute(_sql_text("""
@@ -35,14 +38,13 @@ def _ensure_sent_schema():
         s.commit()
 
 def _already_sent(user_id: int, job_key: str) -> bool:
-    _ensure_sent_schema()
     with _get_session() as s:
         row = s.execute(_sql_text(
             "SELECT 1 FROM sent_job WHERE user_id=:u AND job_key=:k LIMIT 1"
         ), {"u": user_id, "k": job_key}).fetchone()
         return row is not None
 
-def _mark_sent(user_id: int, job_key: str) -> None:
+def _mark_sent(user_id: int, job_key: str):
     with _get_session() as s:
         s.execute(_sql_text(
             "INSERT INTO sent_job (user_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING"
@@ -68,13 +70,19 @@ def _fetch_user_keywords(tid: int) -> List[str]:
     except Exception:
         return []
 
+# ----------------------------------------------------
+# FORMAT HELPERS
+# ----------------------------------------------------
+def _h(s: str) -> str:
+    return _esc((s or '').strip(), quote=False)
+
 def _extract_dt(it: Dict) -> Optional[datetime]:
     for k in ("time_submitted","posted_at","created_at","timestamp","date","pub_date"):
         v = it.get(k)
         if not v: continue
         try:
             if isinstance(v, (int,float)):
-                sec = float(v); 
+                sec = float(v)
                 if sec > 1e12: sec /= 1000.0
                 return datetime.fromtimestamp(sec, tz=timezone.utc)
             s = str(v).strip().replace("Z","+00:00")
@@ -125,6 +133,9 @@ def _job_key(it: Dict) -> str:
     base = it.get("url") or it.get("original_url") or it.get("title") or ""
     return hashlib.sha1(base.encode("utf-8","ignore")).hexdigest()
 
+# ----------------------------------------------------
+# SEND & LOOP
+# ----------------------------------------------------
 async def _send(bot: Bot, tid: int, items: List[Dict], batch: int):
     sent = 0
     for it in items:
@@ -140,6 +151,9 @@ async def _send(bot: Bot, tid: int, items: List[Dict], batch: int):
         except Exception as e:
             log.warning("send fail %s: %s", tid, e)
 
+# ----------------------------------------------------
+# MAIN
+# ----------------------------------------------------
 async def amain():
     token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
     if not token: raise RuntimeError("TELEGRAM_BOT_TOKEN required")
@@ -147,12 +161,19 @@ async def amain():
     batch = int(os.getenv("BATCH_PER_TICK", "5"))
     bot = Bot(token)
     users = _fetch_all_users()
+
     while True:
         try:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
             for tid in users:
                 kws = _fetch_user_keywords(tid)
                 items = _worker.run_pipeline(kws)
+                # 🔍 DEBUG: print sample of PPH items
+                pph_items = [x for x in items if str(x.get("source")).lower().startswith("peopleperhour")]
+                if pph_items:
+                    log.info("DEBUG PPH sample: %s", [x.get("title") for x in pph_items[:5]])
+                    log.info("PPH total fetched: %d", len(pph_items))
+
                 fresh = []
                 for it in items:
                     mk = it.get("matched_keyword")
@@ -166,6 +187,7 @@ async def amain():
                     dt = _extract_dt(it) or datetime.now(timezone.utc)
                     if dt < cutoff: continue
                     fresh.append(it)
+
                 fresh.sort(key=lambda x: _extract_dt(x) or cutoff, reverse=True)
                 if fresh:
                     await _send(bot, tid, fresh, batch)
