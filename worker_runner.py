@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# worker_runner.py — FINAL FIX (PPH JSON auto-parse)
+# worker_runner.py — FINAL LIVE EDITION (PeoplePerHour fully enabled)
 import os, logging, asyncio, hashlib, requests
 from typing import Dict, List, Optional, Set
 from html import escape as _esc
@@ -180,10 +180,13 @@ def _fetch_pph_items(keywords: List[str]) -> List[Dict]:
                     "description": "",
                     "source": "PeoplePerHour",
                     "url": item,
-                    "original_url": item
+                    "original_url": item,
+                    "created_at": datetime.now(timezone.utc).isoformat()
                 })
             elif isinstance(item, dict):
                 item["source"] = item.get("source", "PeoplePerHour")
+                if not item.get("created_at"):
+                    item["created_at"] = datetime.now(timezone.utc).isoformat()
                 normalized.append(item)
         log.info("PPH merged: %d items", len(normalized))
         return normalized
@@ -197,7 +200,6 @@ def _gather_items(keywords: List[str]) -> List[Dict]:
     except Exception as e:
         log.warning("worker.run_pipeline failed: %s", e)
         items = []
-
     try:
         pph_items = _fetch_pph_items(keywords)
         if pph_items:
