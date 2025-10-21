@@ -1,150 +1,268 @@
-# worker_runner.py — FINAL VERSION (Oct 2025)
-# ✅ Includes:
-#  - freelancer + skywalker + peopleperhour fetch
-#  - humanized posted_ago
-#  - currency detection
-#  - per-user deduplication via DB (sent_job)
-#  - safe pacing & error handling
+#!/usr/bin/env python3
+# worker_runner.py — FINAL BUILD: unified pipeline (Freelancer + PPH + GR sources)
+import os, asyncio, logging, hashlib
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional, Set
+from html import escape as _esc
 
-import asyncio, logging, time
-from datetime import datetime, timezone
-from sqlalchemy import text
+import worker as _worker
+from sqlalchemy import text as _sql_text
+from db import get_session as _get_session
+from db_keywords import list_keywords as _list_keywords
 
-from db import get_session
-from db_keywords import list_keywords
-from worker import run_pipeline
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder
-from config import TELEGRAM_BOT_TOKEN, WORKER_INTERVAL
 
+logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper()))
 log = logging.getLogger("worker")
-logging.basicConfig(level=logging.INFO)
 
-# ---------- ensure table for sent dedup ----------
-def ensure_sent_schema():
-    with get_session() as s:
-        s.execute(text("""
+# window
+FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
+INTERVAL = int(os.getenv("WORKER_INTERVAL", "120"))
+PER_USER_BATCH = int(os.getenv("BATCH_PER_TICK", "5"))
+ENABLE_PPH = os.getenv("ENABLE_PPH", "1") == "1"
+
+# ---------- helpers ----------
+def _esc_html(x: str) -> str:
+    return _esc((x or "").strip(), quote=False)
+
+def _ensure_sent_table():
+    with _get_session() as s:
+        s.execute(_sql_text("""
             CREATE TABLE IF NOT EXISTS sent_job (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 job_key TEXT NOT NULL,
-                sent_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                sent_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC'),
+                UNIQUE (user_id, job_key)
             );
         """))
-        s.execute(text("CREATE INDEX IF NOT EXISTS idx_sent_job_user_job ON sent_job(user_id, job_key);"))
         s.commit()
-    log.info("✅ ensured sent_job schema")
 
-ensure_sent_schema()
+def _was_sent(uid: int, key: str) -> bool:
+    _ensure_sent_table()
+    with _get_session() as s:
+        row = s.execute(_sql_text("SELECT 1 FROM sent_job WHERE user_id=:u AND job_key=:k LIMIT 1"),
+                        {"u": uid, "k": key}).fetchone()
+        return bool(row)
 
-# ---------- helpers ----------
-def make_job_card(job):
-    """Prepare Telegram message text and keyboard identical to Freelancer format."""
-    title = job.get("title", "(no title)")
-    desc = (job.get("description") or "").strip()
-    kw = job.get("matched_keyword", "")
-    src = job.get("source", "Unknown")
-    ago = job.get("posted_ago") or ""
+def _mark_sent(uid: int, key: str):
+    with _get_session() as s:
+        s.execute(_sql_text("INSERT INTO sent_job (user_id,job_key) VALUES (:u,:k) ON CONFLICT DO NOTHING"),
+                  {"u": uid, "k": key})
+        s.commit()
 
-    bmin, bmax = job.get("budget_min"), job.get("budget_max")
-    cur = job.get("budget_currency") or "USD"
-    usd_min, usd_max = job.get("budget_min_usd"), job.get("budget_max_usd")
-    budget_line = ""
-    if bmin and bmax:
-        if usd_min and usd_max and cur != "USD":
-            budget_line = f"<b>Budget:</b> {bmin}–{bmax} {cur} (~${usd_min:.0f}–${usd_max:.0f} USD)"
-        else:
-            budget_line = f"<b>Budget:</b> {bmin}–{bmax} {cur}"
-    elif bmin:
-        budget_line = f"<b>Budget:</b> {bmin} {cur}"
+def _fetch_users() -> List[int]:
+    with _get_session() as s:
+        rows = s.execute(_sql_text(
+            'SELECT DISTINCT telegram_id FROM "user" WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true'
+        )).fetchall()
+    return [int(r[0]) for r in rows if r[0]]
 
-    lines = [f"<b>{title}</b>"]
-    if budget_line:
-        lines.append(budget_line)
-    if ago:
-        lines.append(f"<b>Posted:</b> {ago}")
-    lines.append(f"<b>Source:</b> {src}")
-    if kw:
-        lines.append(f"<b>Match:</b> {kw}")
+def _keywords_for(uid: int) -> List[str]:
+    try:
+        with _get_session() as s:
+            row = s.execute(_sql_text('SELECT id FROM "user" WHERE telegram_id=:tid'), {"tid": uid}).fetchone()
+            if not row:
+                return []
+            kid = int(row[0])
+        return [k.strip() for k in _list_keywords(kid) if k and k.strip()]
+    except Exception:
+        return []
+
+def _job_key(it: Dict) -> str:
+    base = (it.get("url") or it.get("original_url") or it.get("affiliate_url") or "").strip()
+    if not base:
+        base = f"{it.get('source','')}::{(it.get('title') or '')}"
+    return hashlib.sha1(base.encode("utf-8", "ignore")).hexdigest()
+
+def _to_dt(v) -> Optional[datetime]:
+    if not v:
+        return None
+    try:
+        if isinstance(v, (int, float)):
+            if v > 1e12: v /= 1000.0
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+        s = str(v).replace("Z", "+00:00")
+        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z",
+                    "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(s, fmt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                else:
+                    dt = dt.astimezone(timezone.utc)
+                return dt
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+def _extract_dt(it: Dict) -> Optional[datetime]:
+    for k in ("time_submitted", "posted_at", "created_at", "timestamp", "date"):
+        dt = _to_dt(it.get(k))
+        if dt:
+            return dt
+    return None
+
+def _ago(dt: datetime) -> str:
+    delta = datetime.now(timezone.utc) - dt
+    s = int(delta.total_seconds())
+    if s < 60:
+        return "just now"
+    m = s // 60
+    if m < 60:
+        return f"{m} minute{'s' if m!=1 else ''} ago"
+    h = m // 60
+    if h < 24:
+        return f"{h} hour{'s' if h!=1 else ''} ago"
+    d = h // 24
+    return f"{d} day{'s' if d!=1 else ''} ago"
+
+def _compose(it: Dict) -> str:
+    title = (it.get("title") or "Untitled").strip()
+    desc = (it.get("description") or "").strip()
+    if len(desc) > 700:
+        desc = desc[:700] + "…"
+    src = (it.get("source") or "Freelancer").strip()
+
+    cur = it.get("budget_currency") or it.get("currency") or "USD"
+    bmin, bmax = it.get("budget_min"), it.get("budget_max")
+    usdmin, usdmax = it.get("budget_min_usd"), it.get("budget_max_usd")
+
+    def fmt(x): 
+        try:
+            f = float(x); s = f"{f:.1f}"; return s.rstrip("0").rstrip(".")
+        except: 
+            return str(x)
+
+    line = f"<b>{_esc_html(title)}</b>"
+    btxt = ""
+    if bmin and bmax: btxt = f"{fmt(bmin)}–{fmt(bmax)} {cur}"
+    elif bmin: btxt = f"from {fmt(bmin)} {cur}"
+    elif bmax: btxt = f"up to {fmt(bmax)} {cur}"
+    if btxt: line += f"\n<b>Budget:</b> {_esc_html(btxt)}"
+    if usdmin or usdmax:
+        if usdmin and usdmax: line += f" (~${fmt(usdmin)}–${fmt(usdmax)} USD)"
+        elif usdmin: line += f" (~${fmt(usdmin)} USD)"
+        elif usdmax: line += f" (~${fmt(usdmax)} USD)"
+
+    line += f"\n<b>Source:</b> {_esc_html(src)}"
+    dt = _extract_dt(it)
+    if dt: line += f"\n<b>Posted:</b> {_esc_html(_ago(dt))}"
+    if it.get("matched_keyword"):
+        line += f"\n<b>Match:</b> {_esc_html(it['matched_keyword'])}"
     if desc:
-        lines.append(desc)
+        line += f"\n{_esc_html(desc)}"
+    return line
 
-    msg = "\n".join(lines)
-
-    url = job.get("original_url") or job.get("affiliate_url") or ""
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Proposal", url=url),
+def _links(it: Dict):
+    url = it.get("original_url") or it.get("url") or ""
+    aff = it.get("affiliate_url") or url
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Proposal", url=aff),
          InlineKeyboardButton("🔗 Original", url=url)],
         [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
          InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
     ])
-    return msg, kb
 
-async def send_job_to_user(bot, user_id, job):
-    """Send job if not sent before."""
-    job_key = str(job.get("id") or job.get("original_url") or job.get("title") or "")[:512]
-
-    # skip if already sent
-    with get_session() as s:
-        exists = s.execute(
-            text("SELECT 1 FROM sent_job WHERE user_id=:u AND job_key=:j LIMIT 1"),
-            {"u": user_id, "j": job_key}
-        ).scalar()
-    if exists:
-        return False  # already sent
-
-    msg, kb = make_job_card(job)
+def _merge_items(kws: List[str]) -> List[Dict]:
+    items = []
     try:
-        await bot.send_message(chat_id=user_id, text=msg,
-                               parse_mode=ParseMode.HTML,
-                               disable_web_page_preview=True,
-                               reply_markup=kb)
-        # mark as sent
-        with get_session() as s:
-            s.execute(text("INSERT INTO sent_job (user_id, job_key) VALUES (:u, :j)"),
-                      {"u": user_id, "j": job_key})
-            s.commit()
-        return True
+        items.extend(_worker.run_pipeline(kws))
     except Exception as e:
-        log.warning("send_job_to_user failed for %s: %s", user_id, e)
-        return False
+        log.warning("Freelancer pipeline error: %s", e)
 
-# ---------- main loop ----------
-async def worker_loop(app):
-    bot = app.bot
+    if ENABLE_PPH:
+        try:
+            import platform_peopleperhour as pph
+            extra = pph.get_items(kws)
+            log.info("PPH merged: %d items", len(extra))
+            items.extend(extra)
+        except Exception as e:
+            log.warning("PPH error: %s", e)
+    return items
+
+def interleave(items: List[Dict]) -> List[Dict]:
+    from collections import deque
+    groups = {}
+    for it in items:
+        src = (it.get("source") or "freelancer").lower()
+        groups.setdefault(src, []).append(it)
+    dq = {k: deque(v) for k, v in groups.items()}
+    out = []
+    while True:
+        moved = False
+        for src in dq:
+            if dq[src]:
+                out.append(dq[src].popleft())
+                moved = True
+        if not moved:
+            break
+    return out
+
+async def send_items(bot: Bot, uid: int, items: List[Dict]):
+    sent = 0
+    for it in items:
+        if sent >= PER_USER_BATCH:
+            break
+        key = _job_key(it)
+        if _was_sent(uid, key):
+            continue
+        try:
+            await bot.send_message(
+                chat_id=uid,
+                text=_compose(it),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_links(it),
+                disable_web_page_preview=True,
+            )
+            _mark_sent(uid, key)
+            sent += 1
+            await asyncio.sleep(0.4)
+        except Exception as e:
+            log.warning("send to %s failed: %s", uid, e)
+
+# ---------- main ----------
+async def amain():
+    token = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("BOT_TOKEN missing")
+
+    bot = Bot(token=token)
+    users = _fetch_users()
+    log.info("Fetched %d users", len(users))
+
     while True:
         try:
-            with get_session() as s:
-                users = s.execute(text('SELECT id, telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
-
-            for uid, tid in users:
-                try:
-                    kws = list_keywords(uid)
-                    if not kws:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
+            for uid in users:
+                kws = _keywords_for(uid)
+                items = _merge_items(kws)
+                fresh = []
+                for it in items:
+                    mk = it.get("matched_keyword")
+                    if not mk:
+                        text = f"{(it.get('title') or '').lower()} {(it.get('description') or '').lower()}"
+                        for kw in kws:
+                            if kw.lower() in text:
+                                mk = kw
+                                break
+                    if not mk:
                         continue
-                    jobs = run_pipeline(kws)
-                    sent_count = 0
-                    for job in jobs:
-                        ok = await send_job_to_user(bot, tid, job)
-                        if ok:
-                            sent_count += 1
-                    log.debug(f"tick user={tid} filtered={len(jobs)} sent={sent_count}")
-                    await asyncio.sleep(1.5)
-                except Exception as ue:
-                    log.warning("user-loop error for %s: %s", tid, ue)
-                    continue
+                    it["matched_keyword"] = mk
+                    dt = _extract_dt(it)
+                    if not dt or dt < cutoff:
+                        continue
+                    fresh.append(it)
+                fresh.sort(key=lambda x: _extract_dt(x) or cutoff, reverse=True)
+                mixed = interleave(fresh)
+                if mixed:
+                    await send_items(bot, uid, mixed)
         except Exception as e:
-            log.warning("[runner compat] pipeline error: %s", e)
-        await asyncio.sleep(WORKER_INTERVAL)
-
-# ---------- bootstrap ----------
-async def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    await worker_loop(app)
+            log.error("Main loop error: %s", e)
+        await asyncio.sleep(INTERVAL)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        log.info("stopped manually")
+    asyncio.run(amain())
