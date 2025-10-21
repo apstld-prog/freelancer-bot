@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# worker_runner.py — FINAL LIVE EDITION (PeoplePerHour fully enabled)
+# worker_runner.py — PPH active + keyword filtering + debug logging
 import os, logging, asyncio, hashlib, requests
 from typing import Dict, List, Optional, Set
 from html import escape as _esc
@@ -53,14 +53,18 @@ def _mark_sent(user_id: int, job_key: str) -> None:
 def _fetch_all_users() -> List[int]:
     ids: Set[int] = set()
     with _get_session() as s:
-        rows = s.execute(_sql_text('SELECT DISTINCT telegram_id FROM "user" WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true')).fetchall()
+        rows = s.execute(_sql_text(
+            'SELECT DISTINCT telegram_id FROM "user" WHERE telegram_id IS NOT NULL '
+            'AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true'
+        )).fetchall()
         ids.update(int(r[0]) for r in rows if r[0] is not None)
     return sorted(list(ids))
 
 def _fetch_user_keywords(telegram_id: int) -> List[str]:
     try:
         with _get_session() as s:
-            row = s.execute(_sql_text('SELECT id FROM "user" WHERE telegram_id=:tid'), {"tid": telegram_id}).fetchone()
+            row = s.execute(_sql_text('SELECT id FROM "user" WHERE telegram_id=:tid'),
+                            {"tid": telegram_id}).fetchone()
             if not row: return []
             uid = int(row[0])
         kws = _list_keywords(uid) or []
@@ -71,66 +75,82 @@ def _fetch_user_keywords(telegram_id: int) -> List[str]:
 def _to_dt(val) -> Optional[datetime]:
     if val is None: return None
     try:
-        if isinstance(val,(int,float)):
-            sec=float(val)
-            if sec>1e12: sec/=1000.0
-            return datetime.fromtimestamp(sec,tz=timezone.utc)
-        s=str(val).strip()
+        if isinstance(val, (int, float)):
+            sec = float(val)
+            if sec > 1e12: sec /= 1000.0
+            return datetime.fromtimestamp(sec, tz=timezone.utc)
+        s = str(val).strip()
         if s.isdigit():
-            sec=int(s)
-            if sec>1e12: sec/=1000.0
-            return datetime.fromtimestamp(sec,tz=timezone.utc)
-        s2=s.replace("Z","+00:00")
-        for fmt in ("%Y-%m-%dT%H:%M:%S%z","%Y-%m-%d %H:%M:%S%z","%Y-%m-%dT%H:%M:%S.%f%z",
-                    "%Y-%m-%d %H:%M:%S","%Y-%m-%dT%H:%M:%S","%a, %d %b %Y %H:%M:%S %z"):
+            sec = int(s)
+            if sec > 1e12: sec /= 1000.0
+            return datetime.fromtimestamp(sec, tz=timezone.utc)
+        s2 = s.replace("Z", "+00:00")
+        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%z",
+                    "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S", "%a, %d %b %Y %H:%M:%S %z"):
             try:
-                dt=datetime.strptime(s2,fmt)
+                dt = datetime.strptime(s2, fmt)
                 if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
                 else: dt = dt.astimezone(timezone.utc)
                 return dt
-            except Exception: pass
-    except Exception: return None
+            except Exception:
+                pass
+    except Exception:
+        return None
     return None
 
 def _extract_dt(it: Dict) -> Optional[datetime]:
     for k in ("time_submitted","posted_at","created_at","timestamp","date","pub_date","published"):
-        dt=_to_dt(it.get(k))
+        dt = _to_dt(it.get(k))
         if dt: return dt
     return None
 
 def _time_ago(dt: datetime) -> str:
-    now = datetime.now(timezone.utc); delta = now - dt
+    now = datetime.now(timezone.utc)
+    delta = now - dt
     s = int(delta.total_seconds())
     if s < 60: return "just now"
     m = s // 60
-    if m < 60: return f"{m} minute{'s' if m!=1 else ''} ago"
+    if m < 60: return f"{m} minute{'s' if m != 1 else ''} ago"
     h = m // 60
-    if h < 24: return f"{h} hour{'s' if h!=1 else ''} ago"
+    if h < 24: return f"{h} hour{'s' if h != 1 else ''} ago"
     d = h // 24
-    return f"{d} day{'s' if d!=1 else ''} ago"
+    return f"{d} day{'s' if d != 1 else ''} ago"
 
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
     if len(desc) > 700: desc = desc[:700] + "…"
     src = (it.get("source") or "Freelancer").strip() or "Freelancer"
-    display_ccy = it.get("currency_display") or it.get("budget_currency") or it.get("original_currency") or it.get("currency_code_detected") or it.get("currency") or "USD"
+    display_ccy = it.get("currency_display") or it.get("budget_currency") \
+        or it.get("original_currency") or it.get("currency_code_detected") \
+        or it.get("currency") or "USD"
     budget_min = it.get("budget_min"); budget_max = it.get("budget_max")
     usd_min = it.get("budget_min_usd"); usd_max = it.get("budget_max_usd")
 
     def _fmt(v):
-        try: f=float(v); s=f"{f:.1f}"; return s.rstrip("0").rstrip(".")
-        except Exception: return str(v)
+        try:
+            f = float(v)
+            s = f"{f:.1f}"
+            return s.rstrip("0").rstrip(".")
+        except Exception:
+            return str(v)
 
     orig = ""
-    if budget_min is not None and budget_max is not None: orig = f"{_fmt(budget_min)}–{_fmt(budget_max)} {display_ccy}"
-    elif budget_min is not None: orig = f"from {_fmt(budget_min)} {display_ccy}"
-    elif budget_max is not None: orig = f"up to {_fmt(budget_max)} {display_ccy}"
+    if budget_min is not None and budget_max is not None:
+        orig = f"{_fmt(budget_min)}–{_fmt(budget_max)} {display_ccy}"
+    elif budget_min is not None:
+        orig = f"from {_fmt(budget_min)} {display_ccy}"
+    elif budget_max is not None:
+        orig = f"up to {_fmt(budget_max)} {display_ccy}"
 
     usd_hint = ""
-    if usd_min is not None and usd_max is not None: usd_hint = f" (~${_fmt(usd_min)}–${_fmt(usd_max)} USD)"
-    elif usd_min is not None: usd_hint = f" (~${_fmt(usd_min)} USD)"
-    elif usd_max is not None: usd_hint = f" (~${_fmt(usd_max)} USD)"
+    if usd_min is not None and usd_max is not None:
+        usd_hint = f" (~${_fmt(usd_min)}–${_fmt(usd_max)} USD)"
+    elif usd_min is not None:
+        usd_hint = f" (~${_fmt(usd_min)} USD)"
+    elif usd_max is not None:
+        usd_hint = f" (~${_fmt(usd_max)} USD)"
 
     lines = [f"<b>{_h(title)}</b>"]
     if orig or usd_hint: lines.append(f"<b>Budget:</b> {_h((orig + usd_hint).strip())}")
@@ -161,7 +181,8 @@ def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
 
 def _job_key(it: Dict) -> str:
     base = (it.get("url") or it.get("original_url") or "").strip()
-    if not base: base = f"{it.get('source','')}::{(it.get('title') or '')[:160]}"
+    if not base:
+        base = f"{it.get('source','')}::{(it.get('title') or '')[:160]}"
     return hashlib.sha1(base.encode("utf-8","ignore")).hexdigest()
 
 def _fetch_pph_items(keywords: List[str]) -> List[Dict]:
@@ -171,24 +192,15 @@ def _fetch_pph_items(keywords: List[str]) -> List[Dict]:
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-
         normalized = []
         for item in data:
-            if isinstance(item, str):
-                normalized.append({
-                    "title": item,
-                    "description": "",
-                    "source": "PeoplePerHour",
-                    "url": item,
-                    "original_url": item,
-                    "created_at": datetime.now(timezone.utc).isoformat()
-                })
-            elif isinstance(item, dict):
+            if isinstance(item, dict):
                 item["source"] = item.get("source", "PeoplePerHour")
                 if not item.get("created_at"):
                     item["created_at"] = datetime.now(timezone.utc).isoformat()
                 normalized.append(item)
         log.info("PPH merged: %d items", len(normalized))
+        log.info("DEBUG PPH items sample: %s", normalized[:2])  # <-- Debug line
         return normalized
     except Exception as e:
         log.warning("PPH fetch failed: %s", e)
@@ -266,10 +278,12 @@ async def amain():
                         hay = f"{(it.get('title') or '').lower()}\n{(it.get('description') or '').lower()}"
                         for kw in kws:
                             if (kw or '').strip().lower() in hay:
-                                mk = kw; break
+                                mk = kw
+                                break
                     if kws and not mk:
                         continue
-                    if mk: it["matched_keyword"] = mk
+                    if mk:
+                        it["matched_keyword"] = mk
                     dt = _extract_dt(it)
                     if not dt or dt < cutoff:
                         continue
