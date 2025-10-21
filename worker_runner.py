@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# worker_runner.py — stable hybrid edition (Freelancer + PeoplePerHour proxy)
-import os, logging, asyncio, hashlib, time
+# worker_runner.py — FINAL stable hybrid (Freelancer + PeoplePerHour via proxy)
+import os, logging, asyncio, hashlib, time, requests
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Set
 from html import escape as _esc
@@ -12,17 +12,15 @@ from db_keywords import list_keywords as _list_keywords
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
 
+# ---------- CONFIG ----------
 log = logging.getLogger("worker_runner")
 logging.basicConfig(level=logging.INFO)
-
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 PPL_PROXY = "https://pph-proxy-service.onrender.com/api/pph"
 
-
-# --------- Helpers ----------
+# ---------- HELPERS ----------
 def _h(s: str) -> str:
     return _esc((s or "").strip(), quote=False)
-
 
 def _ensure_sent_schema():
     with _get_session() as s:
@@ -37,14 +35,12 @@ def _ensure_sent_schema():
         """))
         s.commit()
 
-
 def _already_sent(user_id: int, job_key: str) -> bool:
     with _get_session() as s:
         row = s.execute(_sql_text(
             "SELECT 1 FROM sent_job WHERE user_id=:u AND job_key=:k LIMIT 1"
         ), {"u": user_id, "k": job_key}).fetchone()
         return row is not None
-
 
 def _mark_sent(user_id: int, job_key: str) -> None:
     with _get_session() as s:
@@ -53,30 +49,28 @@ def _mark_sent(user_id: int, job_key: str) -> None:
         ), {"u": user_id, "k": job_key})
         s.commit()
 
-
 def _fetch_all_users() -> List[int]:
     ids: Set[int] = set()
     with _get_session() as s:
         rows = s.execute(_sql_text(
-            'SELECT DISTINCT telegram_id FROM "user" WHERE telegram_id IS NOT NULL '
-            'AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true'
-        )).fetchall()
+            'SELECT DISTINCT telegram_id FROM "user" '
+            'WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false '
+            'AND COALESCE(is_active,true)=true')).fetchall()
         ids.update(int(r[0]) for r in rows if r[0] is not None)
     return sorted(list(ids))
-
 
 def _fetch_user_keywords(telegram_id: int) -> List[str]:
     try:
         with _get_session() as s:
             row = s.execute(_sql_text('SELECT id FROM "user" WHERE telegram_id=:tid'),
                             {"tid": telegram_id}).fetchone()
-            if not row: return []
+            if not row:
+                return []
             uid = int(row[0])
         kws = _list_keywords(uid) or []
         return [k.strip() for k in kws if k and k.strip()]
     except Exception:
         return []
-
 
 def _to_dt(val) -> Optional[datetime]:
     if val is None:
@@ -110,31 +104,24 @@ def _to_dt(val) -> Optional[datetime]:
         return None
     return None
 
-
 def _extract_dt(it: Dict) -> Optional[datetime]:
-    for k in ("time_submitted", "created_at", "timestamp",
-              "date", "pub_date", "published", "posted_at"):
+    for k in ("time_submitted","created_at","timestamp","date","pub_date","published","posted_at"):
         dt = _to_dt(it.get(k))
         if dt:
             return dt
     return None
 
-
 def _time_ago(dt: datetime) -> str:
     now = datetime.now(timezone.utc)
-    delta = now - dt
-    s = int(delta.total_seconds())
-    if s < 60:
-        return "just now"
+    diff = now - dt
+    s = int(diff.total_seconds())
+    if s < 60: return "just now"
     m = s // 60
-    if m < 60:
-        return f"{m} minute{'s' if m != 1 else ''} ago"
+    if m < 60: return f"{m} minute{'s' if m != 1 else ''} ago"
     h = m // 60
-    if h < 24:
-        return f"{h} hour{'s' if h != 1 else ''} ago"
+    if h < 24: return f"{h} hour{'s' if h != 1 else ''} ago"
     d = h // 24
     return f"{d} day{'s' if d != 1 else ''} ago"
-
 
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "Untitled").strip()
@@ -182,15 +169,13 @@ def _compose_message(it: Dict) -> str:
     if dt:
         lines.append(f"<b>Posted:</b> {_h(_time_ago(dt))}")
 
-    mk = it.get("matched_keyword") or ""
+    mk = it.get("matched_keyword")
     if mk:
         lines.append(f"<b>Match:</b> {_h(mk)}")
 
     if desc:
         lines.append(_h(desc))
-
     return "\n".join(lines)
-
 
 def _build_keyboard(links: Dict[str, Optional[str]]):
     row1 = [
@@ -203,44 +188,41 @@ def _build_keyboard(links: Dict[str, Optional[str]]):
     ]
     return InlineKeyboardMarkup([row1, row2])
 
-
 def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
     original = it.get("original_url") or it.get("url") or ""
     proposal = it.get("proposal_url") or original
     return {"original": original, "proposal": proposal}
 
-
 def _job_key(it: Dict) -> str:
     base = (it.get("url") or it.get("original_url") or "").strip()
     if not base:
-        base = f"{it.get('source', '')}::{(it.get('title') or '')[:150]}"
-    return hashlib.sha1(base.encode("utf-8", "ignore")).hexdigest()
+        base = f"{it.get('source','')}::{(it.get('title') or '')[:150]}"
+    return hashlib.sha1(base.encode("utf-8","ignore")).hexdigest()
 
-
-# --------- Fetch + Filter ----------
+# ---------- FETCH COMBINED ----------
 def _fetch_combined_items(keywords: List[str]) -> List[Dict]:
     items: List[Dict] = []
     try:
         items = _worker.run_pipeline(keywords)
     except Exception as e:
-        log.warning("worker pipeline failed: %s", e)
+        log.warning("worker.run_pipeline failed: %s", e)
 
+    # PeoplePerHour proxy fetch
     try:
-        import requests
-        r = requests.get(PPL_PROXY, timeout=20)
+        r = requests.get(PPL_PROXY, timeout=15)
         if r.status_code == 200:
             data = r.json()
             if isinstance(data, list):
                 for d in data:
                     d["source"] = "PeoplePerHour"
                 items.extend(data)
-                log.info("Merged %d PeoplePerHour items", len(data))
+                log.info("PPH merged: %d items", len(data))
     except Exception as e:
         log.warning("PPH fetch failed: %s", e)
 
     return items
 
-
+# ---------- SEND ----------
 async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
     sent = 0
     for it in items:
@@ -259,36 +241,35 @@ async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch:
             )
             _mark_sent(chat_id, key)
             sent += 1
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.4)
         except Exception as e:
             log.warning("Send failed to %s: %s", chat_id, e)
 
-
+# ---------- MAIN ----------
 async def amain():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
+        raise RuntimeError("TELEGRAM_BOT_TOKEN env var required")
 
     interval = int(os.getenv("WORKER_INTERVAL", "120"))
     per_user_batch = int(os.getenv("BATCH_PER_TICK", "5"))
     bot = Bot(token=token)
     users = _fetch_all_users()
-    log.info("Starting worker loop for %d users", len(users))
+    log.info("Worker started for %d users", len(users))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
 
     while True:
         try:
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
             for tid in users:
                 kws = _fetch_user_keywords(tid)
                 items = _fetch_combined_items(kws)
                 filtered: List[Dict] = []
-
                 for it in items:
                     mk = it.get("matched_keyword")
                     if not mk:
                         hay = f"{(it.get('title') or '').lower()}\n{(it.get('description') or '').lower()}"
                         for kw in kws:
-                            if kw.lower() in hay:
+                            if (kw or "").lower() in hay:
                                 mk = kw
                                 break
                     if kws and not mk:
@@ -304,9 +285,8 @@ async def amain():
                 if filtered:
                     await _send_items(bot, tid, filtered, per_user_batch)
         except Exception as e:
-            log.error("Worker loop error: %s", e)
+            log.error("Worker error: %s", e)
         await asyncio.sleep(interval)
-
 
 if __name__ == "__main__":
     asyncio.run(amain())
