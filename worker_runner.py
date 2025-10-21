@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# worker_runner.py — PPH active + keyword filtering + debug logging
-import os, logging, asyncio, hashlib, requests
+# worker_runner.py — final autonomous PPH scraper version (no proxy)
+import os, logging, asyncio, hashlib
 from typing import Dict, List, Optional, Set
-from html import escape as _esc
 from datetime import datetime, timezone, timedelta
+from html import escape as _esc
 
 import worker as _worker
 from sqlalchemy import text as _sql_text
@@ -17,7 +17,6 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
-API_KEY = (os.getenv("API_KEY", "").strip() or "1211")
 
 def _h(s: str) -> str:
     return _esc((s or '').strip(), quote=False)
@@ -51,250 +50,127 @@ def _mark_sent(user_id: int, job_key: str) -> None:
         s.commit()
 
 def _fetch_all_users() -> List[int]:
-    ids: Set[int] = set()
     with _get_session() as s:
         rows = s.execute(_sql_text(
             'SELECT DISTINCT telegram_id FROM "user" WHERE telegram_id IS NOT NULL '
             'AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true'
         )).fetchall()
-        ids.update(int(r[0]) for r in rows if r[0] is not None)
-    return sorted(list(ids))
+        return [int(r[0]) for r in rows if r[0]]
 
-def _fetch_user_keywords(telegram_id: int) -> List[str]:
+def _fetch_user_keywords(tid: int) -> List[str]:
     try:
         with _get_session() as s:
             row = s.execute(_sql_text('SELECT id FROM "user" WHERE telegram_id=:tid'),
-                            {"tid": telegram_id}).fetchone()
+                            {"tid": tid}).fetchone()
             if not row: return []
-            uid = int(row[0])
-        kws = _list_keywords(uid) or []
-        return [k.strip() for k in kws if k and k.strip()]
+            kws = _list_keywords(int(row[0])) or []
+            return [k.strip() for k in kws if k and k.strip()]
     except Exception:
         return []
 
-def _to_dt(val) -> Optional[datetime]:
-    if val is None: return None
-    try:
-        if isinstance(val, (int, float)):
-            sec = float(val)
-            if sec > 1e12: sec /= 1000.0
-            return datetime.fromtimestamp(sec, tz=timezone.utc)
-        s = str(val).strip()
-        if s.isdigit():
-            sec = int(s)
-            if sec > 1e12: sec /= 1000.0
-            return datetime.fromtimestamp(sec, tz=timezone.utc)
-        s2 = s.replace("Z", "+00:00")
-        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%z",
-                    "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%d %H:%M:%S",
-                    "%Y-%m-%dT%H:%M:%S", "%a, %d %b %Y %H:%M:%S %z"):
-            try:
-                dt = datetime.strptime(s2, fmt)
-                if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
-                else: dt = dt.astimezone(timezone.utc)
-                return dt
-            except Exception:
-                pass
-    except Exception:
-        return None
-    return None
-
 def _extract_dt(it: Dict) -> Optional[datetime]:
-    for k in ("time_submitted","posted_at","created_at","timestamp","date","pub_date","published"):
-        dt = _to_dt(it.get(k))
-        if dt: return dt
+    for k in ("time_submitted","posted_at","created_at","timestamp","date","pub_date"):
+        v = it.get(k)
+        if not v: continue
+        try:
+            if isinstance(v, (int,float)):
+                sec = float(v); 
+                if sec > 1e12: sec /= 1000.0
+                return datetime.fromtimestamp(sec, tz=timezone.utc)
+            s = str(v).strip().replace("Z","+00:00")
+            return datetime.fromisoformat(s)
+        except Exception:
+            continue
     return None
 
 def _time_ago(dt: datetime) -> str:
     now = datetime.now(timezone.utc)
-    delta = now - dt
-    s = int(delta.total_seconds())
+    diff = now - dt
+    s = int(diff.total_seconds())
     if s < 60: return "just now"
-    m = s // 60
-    if m < 60: return f"{m} minute{'s' if m != 1 else ''} ago"
-    h = m // 60
-    if h < 24: return f"{h} hour{'s' if h != 1 else ''} ago"
-    d = h // 24
-    return f"{d} day{'s' if d != 1 else ''} ago"
+    m = s//60
+    if m < 60: return f"{m} min ago"
+    h = m//60
+    if h < 24: return f"{h} h ago"
+    d = h//24
+    return f"{d} d ago"
 
-def _compose_message(it: Dict) -> str:
-    title = (it.get("title") or "").strip() or "Untitled"
+def _compose(it: Dict) -> str:
+    title = (it.get("title") or "Untitled").strip()
     desc = (it.get("description") or "").strip()
-    if len(desc) > 700: desc = desc[:700] + "…"
-    src = (it.get("source") or "Freelancer").strip() or "Freelancer"
-    display_ccy = it.get("currency_display") or it.get("budget_currency") \
-        or it.get("original_currency") or it.get("currency_code_detected") \
-        or it.get("currency") or "USD"
-    budget_min = it.get("budget_min"); budget_max = it.get("budget_max")
-    usd_min = it.get("budget_min_usd"); usd_max = it.get("budget_max_usd")
-
-    def _fmt(v):
-        try:
-            f = float(v)
-            s = f"{f:.1f}"
-            return s.rstrip("0").rstrip(".")
-        except Exception:
-            return str(v)
-
-    orig = ""
-    if budget_min is not None and budget_max is not None:
-        orig = f"{_fmt(budget_min)}–{_fmt(budget_max)} {display_ccy}"
-    elif budget_min is not None:
-        orig = f"from {_fmt(budget_min)} {display_ccy}"
-    elif budget_max is not None:
-        orig = f"up to {_fmt(budget_max)} {display_ccy}"
-
-    usd_hint = ""
-    if usd_min is not None and usd_max is not None:
-        usd_hint = f" (~${_fmt(usd_min)}–${_fmt(usd_max)} USD)"
-    elif usd_min is not None:
-        usd_hint = f" (~${_fmt(usd_min)} USD)"
-    elif usd_max is not None:
-        usd_hint = f" (~${_fmt(usd_max)} USD)"
-
-    lines = [f"<b>{_h(title)}</b>"]
-    if orig or usd_hint: lines.append(f"<b>Budget:</b> {_h((orig + usd_hint).strip())}")
-    lines.append(f"<b>Source:</b> {_h(src)}")
+    if len(desc) > 700: desc = desc[:700]+"…"
+    src = (it.get("source") or "Freelancer").capitalize()
+    budget = it.get("budget_display") or ""
     dt = _extract_dt(it)
-    if dt: lines.append(f"<b>Posted:</b> {_h(_time_ago(dt))}")
-    mk = it.get("matched_keyword") or it.get("match") or it.get("keyword")
-    if mk: lines.append(f"<b>Match:</b> {_h(mk)}")
+    posted = _time_ago(dt) if dt else ""
+    kw = it.get("matched_keyword") or ""
+    lines = [f"<b>{_h(title)}</b>"]
+    if budget: lines.append(f"<b>Budget:</b> {_h(budget)}")
+    if src: lines.append(f"<b>Source:</b> {_h(src)}")
+    if posted: lines.append(f"<b>Posted:</b> {_h(posted)}")
+    if kw: lines.append(f"<b>Match:</b> {_h(kw)}")
     if desc: lines.append(_h(desc))
     return "\n".join(lines)
 
-def _build_keyboard(links: Dict[str, Optional[str]]):
-    row1 = [
-        InlineKeyboardButton("📄 Proposal", url=(links.get("proposal") or links.get("original") or "")),
-        InlineKeyboardButton("🔗 Original", url=(links.get("original") or "")),
-    ]
-    row2 = [
-        InlineKeyboardButton("⭐ Save", callback_data="job:save"),
-        InlineKeyboardButton("🗑️ Delete", callback_data="job:delete"),
-    ]
-    return InlineKeyboardMarkup([row1, row2])
-
-def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
-    original = it.get("original_url") or it.get("url") or ""
-    proposal = it.get("proposal_url") or original or ""
-    affiliate = it.get("affiliate_url") or ""
-    return {"original": original, "proposal": proposal, "affiliate": affiliate}
+def _kb(it: Dict):
+    o = it.get("original_url") or it.get("url") or ""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Proposal", url=o),
+         InlineKeyboardButton("🔗 Original", url=o)],
+        [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+         InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")]
+    ])
 
 def _job_key(it: Dict) -> str:
-    base = (it.get("url") or it.get("original_url") or "").strip()
-    if not base:
-        base = f"{it.get('source','')}::{(it.get('title') or '')[:160]}"
+    base = it.get("url") or it.get("original_url") or it.get("title") or ""
     return hashlib.sha1(base.encode("utf-8","ignore")).hexdigest()
 
-def _fetch_pph_items(keywords: List[str]) -> List[Dict]:
-    base_url = "https://pph-proxy-service.onrender.com/api/pph"
-    url = f"{base_url}?key={API_KEY}"
-    try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        normalized = []
-        for item in data:
-            if isinstance(item, dict):
-                item["source"] = item.get("source", "PeoplePerHour")
-                if not item.get("created_at"):
-                    item["created_at"] = datetime.now(timezone.utc).isoformat()
-                normalized.append(item)
-        log.info("PPH merged: %d items", len(normalized))
-        log.info("DEBUG PPH items sample: %s", normalized[:2])  # <-- Debug line
-        return normalized
-    except Exception as e:
-        log.warning("PPH fetch failed: %s", e)
-        return []
-
-def _gather_items(keywords: List[str]) -> List[Dict]:
-    try:
-        items = _worker.run_pipeline(keywords)
-    except Exception as e:
-        log.warning("worker.run_pipeline failed: %s", e)
-        items = []
-    try:
-        pph_items = _fetch_pph_items(keywords)
-        if pph_items:
-            items.extend(pph_items)
-    except Exception as e:
-        log.warning("PeoplePerHour merge failed: %s", e)
-    return items
-
-def interleave_by_source(items: List[Dict]) -> List[Dict]:
-    from collections import deque
-    buckets = {}
-    for it in items:
-        src = (it.get("source") or "freelancer").lower()
-        buckets.setdefault(src, []).append(it)
-    dqs = {src: deque(lst) for src, lst in buckets.items()}
-    order = list(dqs.keys())
-    out: List[Dict] = []
-    while True:
-        progressed = False
-        for src in order:
-            if dqs[src]:
-                out.append(dqs[src].popleft())
-                progressed = True
-        if not progressed:
-            break
-    return out
-
-async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
+async def _send(bot: Bot, tid: int, items: List[Dict], batch: int):
     sent = 0
     for it in items:
-        if sent >= per_user_batch: break
+        if sent >= batch: break
         key = _job_key(it)
-        if _already_sent(chat_id, key): continue
+        if _already_sent(tid, key): continue
         try:
-            await bot.send_message(chat_id=chat_id, text=_compose_message(it),
-                                   parse_mode=ParseMode.HTML,
-                                   reply_markup=_build_keyboard(_resolve_links(it)),
-                                   disable_web_page_preview=True)
-            _mark_sent(chat_id, key)
+            await bot.send_message(tid, _compose(it), parse_mode=ParseMode.HTML,
+                                   reply_markup=_kb(it), disable_web_page_preview=True)
+            _mark_sent(tid, key)
             sent += 1
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.4)
         except Exception as e:
-            log.warning("send_message failed for %s: %s", chat_id, e)
+            log.warning("send fail %s: %s", tid, e)
 
 async def amain():
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+    if not token: raise RuntimeError("TELEGRAM_BOT_TOKEN required")
     interval = int(os.getenv("WORKER_INTERVAL", "120"))
-    per_user_batch = int(os.getenv("BATCH_PER_TICK", "5"))
-    bot = Bot(token=token)
+    batch = int(os.getenv("BATCH_PER_TICK", "5"))
+    bot = Bot(token)
     users = _fetch_all_users()
-
     while True:
         try:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
             for tid in users:
                 kws = _fetch_user_keywords(tid)
-                items = _gather_items(kws)
-                filtered: List[Dict] = []
+                items = _worker.run_pipeline(kws)
+                fresh = []
                 for it in items:
                     mk = it.get("matched_keyword")
-                    if not mk:
-                        hay = f"{(it.get('title') or '').lower()}\n{(it.get('description') or '').lower()}"
-                        for kw in kws:
-                            if (kw or '').strip().lower() in hay:
-                                mk = kw
-                                break
                     if kws and not mk:
-                        continue
-                    if mk:
-                        it["matched_keyword"] = mk
-                    dt = _extract_dt(it)
-                    if not dt or dt < cutoff:
-                        continue
-                    filtered.append(it)
-                filtered.sort(key=lambda x: _extract_dt(x) or cutoff, reverse=True)
-                mixed = interleave_by_source(filtered)
-                log.debug("tick user=%s filtered=%d mixed=%d", tid, len(filtered), len(mixed))
-                if mixed:
-                    await _send_items(bot, tid, mixed, per_user_batch)
+                        hay = f"{(it.get('title') or '').lower()} {(it.get('description') or '').lower()}"
+                        for k in kws:
+                            if (k or '').strip().lower() in hay:
+                                mk = k; break
+                    if kws and not mk: continue
+                    if mk: it["matched_keyword"] = mk
+                    dt = _extract_dt(it) or datetime.now(timezone.utc)
+                    if dt < cutoff: continue
+                    fresh.append(it)
+                fresh.sort(key=lambda x: _extract_dt(x) or cutoff, reverse=True)
+                if fresh:
+                    await _send(bot, tid, fresh, batch)
         except Exception as e:
-            log.error("[runner compat] pipeline error: %s", e)
+            log.error("[runner] error: %s", e)
         await asyncio.sleep(interval)
 
 if __name__ == "__main__":
