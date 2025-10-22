@@ -86,7 +86,6 @@ def get_items(keywords):
 
                     hay = f"{title.lower()} {desc.lower()}"
                     if q.lower() not in hay:
-                        # skip jobs that don't really contain the keyword
                         continue
 
                     budget_min = _safe_float(j.get("budget", {}).get("minimum"))
@@ -115,3 +114,12 @@ def get_items(keywords):
 
     log.info("PPH total merged: %d", len(all_jobs))
     return all_jobs
+
+
+# --- ✅ Compatibility aliases for worker_runner ---
+def fetch_pph_graphql(keywords):
+    return get_items(keywords)
+
+def fetch_pph_html(keywords):
+    # fallback: reuse same fetcher for now
+    return get_items(keywords)
