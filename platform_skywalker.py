@@ -1,40 +1,59 @@
-#!/usr/bin/env python3
-# platform_skywalker.py — RSS fetcher for Skywalker.gr jobs
-import feedparser
-import logging
-from html import unescape
+import logging, time
+import httpx, feedparser
 
 log = logging.getLogger("skywalker")
 
-def fetch(feed_url: str):
-    """Fetch RSS feed from Skywalker.gr"""
-    items = []
+FEED_URL = "https://www.skywalker.gr/jobs/feed"
+
+def _fetch_feed_text(url: str) -> str:
     try:
-        feed = feedparser.parse(feed_url)
-        for e in feed.entries:
-            title = unescape(e.get("title", "").strip())
-            link = e.get("link", "").strip()
-            desc = unescape(e.get("summary", "").strip())
-            published = e.get("published_parsed")
-            ts = None
-            try:
-                import time
-                if published:
-                    ts = int(time.mktime(published))
-            except Exception:
-                ts = None
-            items.append({
-                "title": title,
-                "description": desc,
-                "original_url": link,
-                "source": "Skywalker",
-                "time_submitted": ts
-            })
-        log.info("Skywalker fetched %d jobs", len(items))
+        with httpx.Client(timeout=25) as c:
+            r = c.get(url, headers={"User-Agent":"Mozilla/5.0"})
+            r.raise_for_status()
+            # feedparser δέχεται string/bytes – ΟΧΙ list
+            return r.text
+    except Exception as e:
+        log.warning("Skywalker HTTP error: %s", e)
+        return ""
+
+def fetch_skywalker_jobs(keywords):
+    """Return list of jobs filtered by keywords with robust parsing."""
+    try:
+        url = FEED_URL[0] if isinstance(FEED_URL, list) else FEED_URL
+        text = _fetch_feed_text(url)
+        if not text:
+            return []
+        feed = feedparser.parse(text)
     except Exception as e:
         log.warning("Skywalker fetch error: %s", e)
-    return items
+        return []
 
+    kws = [k.strip().lower() for k in (keywords or []) if k and k.strip()]
+    out = []
+    now = int(time.time())
+    for e in feed.entries:
+        title = e.get("title", "") or ""
+        desc  = e.get("summary", "") or ""
+        link  = e.get("link", "") or ""
+        hay = f"{title}\n{desc}".lower()
 
-# --- ✅ Compatibility alias for worker_runner ---
-fetch_skywalker_jobs = fetch
+        matched = None
+        for k in kws:
+            if k in hay:
+                matched = k; break
+        if kws and not matched:
+            continue
+
+        out.append({
+            "title": title.strip() or "(untitled)",
+            "description": desc.strip(),
+            "original_url": link,
+            "budget_min": None,
+            "budget_max": None,
+            "budget_currency": None,
+            "source": "Skywalker",
+            "time_submitted": now,
+            "matched_keyword": matched,
+        })
+    log.info("Skywalker parsed %d entries", len(out))
+    return out
