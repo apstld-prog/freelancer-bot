@@ -1,40 +1,40 @@
+#!/usr/bin/env python3
+# platform_skywalker.py — RSS fetcher for Skywalker.gr jobs
+import feedparser
+import logging
+from html import unescape
 
-import re
-import html
-import xml.etree.ElementTree as ET
-import requests
-from typing import List, Dict
+log = logging.getLogger("skywalker")
 
-def parse_rss(xml_text: str) -> List[Dict]:
+def fetch(feed_url: str):
+    """Fetch RSS feed from Skywalker.gr"""
     items = []
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return items
-    channel = root.find('channel') or root
-    for it in channel.findall('item'):
-        title = (it.findtext('title') or '').strip()
-        link = (it.findtext('link') or '').strip()
-        desc = html.unescape((it.findtext('description') or '').strip())
-        clean_desc = re.sub('<[^<]+?>', '', desc)
-        item = {
-            "external_id": link or title,
-            "title": title,
-            "description": clean_desc,
-            "url": link,
-            "budget_min": None,
-            "budget_max": None,
-            "currency": "EUR",
-            "source": "skywalker",
-            "affiliate": False,
-        }
-        items.append(item)
+        feed = feedparser.parse(feed_url)
+        for e in feed.entries:
+            title = unescape(e.get("title", "").strip())
+            link = e.get("link", "").strip()
+            desc = unescape(e.get("summary", "").strip())
+            published = e.get("published_parsed")
+            ts = None
+            try:
+                import time
+                if published:
+                    ts = int(time.mktime(published))
+            except Exception:
+                ts = None
+            items.append({
+                "title": title,
+                "description": desc,
+                "original_url": link,
+                "source": "Skywalker",
+                "time_submitted": ts
+            })
+        log.info("Skywalker fetched %d jobs", len(items))
+    except Exception as e:
+        log.warning("Skywalker fetch error: %s", e)
     return items
 
-def fetch(feed_url: str, timeout: int = 10) -> List[Dict]:
-    try:
-        resp = requests.get(feed_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        return parse_rss(resp.text)
-    except Exception:
-        return []
+
+# --- ✅ Compatibility alias for worker_runner ---
+fetch_skywalker_jobs = fetch
