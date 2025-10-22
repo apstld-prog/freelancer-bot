@@ -6,12 +6,12 @@ from typing import Dict, List, Optional
 
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
-
 from sqlalchemy import text as _sql
+
 from db import get_session as _get_session
 from db_keywords import list_keywords as _list_keywords
 
-# --- import platform fetchers (leave unchanged names) ---
+# --- import platform fetchers ---
 from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
 from platform_skywalker import fetch_skywalker_jobs
@@ -20,7 +20,6 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
 
-# Intervals (env) — keep UI unchanged
 WORKER_INTERVAL      = int(os.getenv("WORKER_INTERVAL", "180"))
 FREELANCER_INTERVAL  = int(os.getenv("FREELANCER_INTERVAL", "60"))
 PPH_INTERVAL         = int(os.getenv("PPH_INTERVAL", "300"))
@@ -34,7 +33,7 @@ DEFAULT_URLS = {
     "generic":      "https://www.google.com/",
 }
 
-# -------------- DB helpers (de-dup per user) --------------
+# ---------------- DB helpers ----------------
 def _ensure_sent_schema():
     with _get_session() as s:
         s.execute(_sql("""
@@ -56,7 +55,7 @@ def _already_sent(user_id: int, job_key: str) -> bool:
         ), {"u": user_id, "k": job_key}).fetchone()
         return row is not None
 
-def _mark_sent(user_id: int, job_key: str) -> None:
+def _mark_sent(user_id: int, job_key: str):
     with _get_session() as s:
         s.execute(_sql(
             "INSERT INTO sent_job (user_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING"
@@ -64,14 +63,12 @@ def _mark_sent(user_id: int, job_key: str) -> None:
         s.commit()
 
 def _fetch_all_users() -> List[int]:
-    ids = []
     with _get_session() as s:
         rows = s.execute(_sql(
             'SELECT DISTINCT telegram_id FROM "user" '
             'WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true'
         )).fetchall()
-        ids = [int(r[0]) for r in rows if r[0] is not None]
-    return sorted(ids)
+        return [int(r[0]) for r in rows if r[0]]
 
 def _fetch_user_keywords(tid: int) -> List[str]:
     try:
@@ -80,35 +77,33 @@ def _fetch_user_keywords(tid: int) -> List[str]:
             if not row: return []
             uid = int(row[0])
         kws = _list_keywords(uid) or []
-        return [k.strip() for k in kws if k and k.strip()]
+        return [k.strip() for k in kws if k.strip()]
     except Exception:
         return []
 
-# -------------- utils --------------
+# ---------------- Utils ----------------
 def _job_key(it: Dict) -> str:
     base = (it.get("original_url") or it.get("url") or it.get("title") or "").strip()
     src  = (it.get("source") or "").strip()
-    key_data = f"{src}|{base}"
-    return hashlib.sha1(key_data.encode("utf-8","ignore")).hexdigest()
+    return hashlib.sha1(f"{src}|{base}".encode("utf-8","ignore")).hexdigest()
 
 def _to_dt(val) -> Optional[datetime]:
-    if val is None: return None
+    if not val: return None
     try:
         if isinstance(val, (int, float)):
-            sec = float(val)
-            if sec > 1e12: sec /= 1000.0
-            return datetime.fromtimestamp(sec, tz=timezone.utc)
+            if val > 1e12: val /= 1000
+            return datetime.fromtimestamp(val, tz=timezone.utc)
         s = str(val).strip()
         if s.isdigit():
             sec = int(s)
-            if sec > 1e12: sec /= 1000.0
+            if sec > 1e12: sec /= 1000
             return datetime.fromtimestamp(sec, tz=timezone.utc)
     except Exception:
         return None
     return None
 
 def _time_ago(dt: datetime) -> str:
-    now = datetime.now(timezone.utc); delta = now - dt
+    delta = datetime.now(timezone.utc) - dt
     s = int(max(0, delta.total_seconds()))
     if s < 60: return "just now"
     m = s // 60
@@ -118,46 +113,6 @@ def _time_ago(dt: datetime) -> str:
     d = h // 24
     return f"{d} day{'s' if d!=1 else ''} ago"
 
-def _compose_message(it: Dict) -> str:
-    title = (it.get("title") or "Untitled").strip()
-    desc  = (it.get("description") or "").strip()
-    src   = (it.get("source") or "Freelancer").strip()
-    kw    = (it.get("matched_keyword") or "").strip()
-
-    bmin, bmax = it.get("budget_min"), it.get("budget_max")
-    ccy = it.get("budget_currency") or it.get("currency") or it.get("currency_code_detected") or "USD"
-
-    def _fmt(v):
-        try:
-            f=float(v); s=f"{f:.1f}"
-            return s.rstrip("0").rstrip(".")
-        except Exception:
-            return str(v) if v is not None else ""
-
-    budget_line = ""
-    if bmin is not None and bmax is not None:
-        budget_line = f"{_fmt(bmin)}–{_fmt(bmax)} {ccy}"
-    elif bmin is not None:
-        budget_line = f"from {_fmt(bmin)} {ccy}"
-    elif bmax is not None:
-        budget_line = f"up to {_fmt(bmax)} {ccy}"
-
-    lines = [f"<b>{title}</b>"]
-    if budget_line:
-        lines.append(f"<b>Budget:</b> {budget_line}")
-    lines.append(f"<b>Source:</b> {src}")
-    if kw:
-        lines.append(f"<b>Match:</b> {kw}")
-
-    if desc:
-        if len(desc) > 700: desc = desc[:700] + "…"
-        lines.append(f"📝 {desc}")
-
-    dt = _to_dt(it.get("time_submitted"))
-    if dt:
-        lines.append(f"<i>{_time_ago(dt)}</i>")
-    return "\n".join(lines)
-
 def _safe_default_url(source: str) -> str:
     s = (source or "").lower()
     if "peopleperhour" in s: return DEFAULT_URLS["peopleperhour"]
@@ -166,7 +121,6 @@ def _safe_default_url(source: str) -> str:
     return DEFAULT_URLS["generic"]
 
 def _build_keyboard(it: Dict) -> InlineKeyboardMarkup:
-    # NEVER send an empty url button to Telegram
     src = it.get("source") or ""
     proposal = (it.get("proposal_url") or "").strip()
     original = (it.get("original_url") or "").strip()
@@ -175,32 +129,61 @@ def _build_keyboard(it: Dict) -> InlineKeyboardMarkup:
 
     url1 = proposal or affiliate or original or safe
     url2 = original or affiliate or proposal or safe
-    if not (url1.startswith("http")): url1 = safe
-    if not (url2.startswith("http")): url2 = safe
+    if not url1.startswith("http"): url1 = safe
+    if not url2.startswith("http"): url2 = safe
 
-    row1 = [
-        InlineKeyboardButton("📄 Proposal", url=url1),
-        InlineKeyboardButton("🔗 Original",  url=url2),
-    ]
-    row2 = [
-        InlineKeyboardButton("⭐ Save",   callback_data="job:save"),
-        InlineKeyboardButton("🗑️ Delete", callback_data="job:delete"),
-    ]
-    return InlineKeyboardMarkup([row1, row2])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📄 Proposal", url=url1),
+            InlineKeyboardButton("🔗 Original", url=url2)
+        ],
+        [
+            InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+            InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")
+        ]
+    ])
 
-# -------------- fetch orchestrator --------------
+def _compose_message(it: Dict) -> str:
+    title = (it.get("title") or "Untitled").strip()
+    desc = (it.get("description") or "").strip()
+    src = (it.get("source") or "Freelancer").strip()
+    kw = (it.get("matched_keyword") or "").strip()
+
+    bmin, bmax = it.get("budget_min"), it.get("budget_max")
+    ccy = it.get("budget_currency") or "USD"
+
+    budget_line = ""
+    if bmin and bmax:
+        budget_line = f"{bmin}–{bmax} {ccy}"
+    elif bmin:
+        budget_line = f"from {bmin} {ccy}"
+    elif bmax:
+        budget_line = f"up to {bmax} {ccy}"
+
+    lines = [f"<b>{title}</b>"]
+    if budget_line: lines.append(f"<b>Budget:</b> {budget_line}")
+    lines.append(f"<b>Source:</b> {src}")
+    if kw: lines.append(f"<b>Match:</b> {kw}")
+    if desc:
+        if len(desc) > 700: desc = desc[:700] + "…"
+        lines.append(f"📝 {desc}")
+    dt = _to_dt(it.get("time_submitted"))
+    if dt: lines.append(f"<i>{_time_ago(dt)}</i>")
+    return "\n".join(lines)
+
+# ---------------- Main Logic ----------------
 _last_run = {"freelancer":0, "pph":0, "greek":0}
 
 async def gather_items(keywords: List[str]) -> List[Dict]:
     now = time.time()
-    items: List[Dict] = []
+    items = []
 
     if now - _last_run["freelancer"] >= FREELANCER_INTERVAL:
         try:
             fj = fetch_freelancer_jobs(keywords)
-            for it in fj: it["source"] = it.get("source") or "Freelancer"
+            for it in fj: it["source"] = "Freelancer"
             items.extend(fj)
-            log.info("[Freelancer] fetched %d items", len(fj))
+            log.info("[Freelancer] fetched %d", len(fj))
         except Exception as e:
             log.warning("Freelancer fetch error: %s", e)
         _last_run["freelancer"] = now
@@ -208,9 +191,9 @@ async def gather_items(keywords: List[str]) -> List[Dict]:
     if now - _last_run["pph"] >= PPH_INTERVAL:
         try:
             pj = fetch_pph_jobs(keywords)
-            for it in pj: it["source"] = it.get("source") or "PeoplePerHour"
+            for it in pj: it["source"] = "PeoplePerHour"
             items.extend(pj)
-            log.info("[PPH] fetched %d items", len(pj))
+            log.info("[PPH] fetched %d", len(pj))
         except Exception as e:
             log.warning("PPH fetch error: %s", e)
         _last_run["pph"] = now
@@ -218,44 +201,43 @@ async def gather_items(keywords: List[str]) -> List[Dict]:
     if now - _last_run["greek"] >= GREEK_INTERVAL:
         try:
             sj = fetch_skywalker_jobs(keywords)
-            for it in sj: it["source"] = it.get("source") or "Skywalker"
+            for it in sj: it["source"] = "Skywalker"
             items.extend(sj)
-            log.info("[Skywalker] fetched %d items", len(sj))
+            log.info("[Skywalker] fetched %d", len(sj))
         except Exception as e:
             log.warning("Skywalker fetch error: %s", e)
         _last_run["greek"] = now
 
     return items
 
-# -------------- sender --------------
 async def send_items(bot: Bot, chat_id: int, jobs: List[Dict], per_user_batch: int):
     sent = 0
     for it in jobs:
-        if sent >= per_user_batch: break
+        if sent >= per_user_batch:
+            break
         key = _job_key(it)
-        if _already_sent(chat_id, key): 
+        if _already_sent(chat_id, key):
             continue
         try:
-            msg = _compose_message(it)
-            kb  = _build_keyboard(it)
-            await bot.send_message(chat_id=chat_id, text=msg,
-                                   parse_mode=ParseMode.HTML,
-                                   reply_markup=kb,
-                                   disable_web_page_preview=True)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=_compose_message(it),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_build_keyboard(it),
+                disable_web_page_preview=True
+            )
             _mark_sent(chat_id, key)
             sent += 1
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.4)
         except Exception as e:
             log.warning("send_message failed for %s: %s", chat_id, e)
     if sent:
-        srcs = { (it.get('source') or '').lower() for it in jobs[:sent] }
-        log.info("Sent %d jobs → %s (sources=%s)", sent, chat_id, ",".join(sorted(srcs)))
+        log.info("Sent %d jobs → %s", sent, chat_id)
 
-# -------------- main loop --------------
 async def amain():
-    token = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or ""
+    token = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise RuntimeError("BOT_TOKEN/TELEGRAM_BOT_TOKEN missing")
+        raise RuntimeError("BOT_TOKEN missing")
 
     bot = Bot(token=token)
     users = _fetch_all_users()
@@ -269,18 +251,18 @@ async def amain():
                 kws = _fetch_user_keywords(tid)
                 items = await gather_items(kws)
 
-                # filter by keywords and freshness
-                keep: List[Dict] = []
+                keep = []
                 for it in items:
                     mk = it.get("matched_keyword")
                     if not mk and kws:
-                        hay = f"{(it.get('title') or '').lower()}\n{(it.get('description') or '').lower()}"
+                        hay = f"{(it.get('title') or '').lower()} {(it.get('description') or '').lower()}"
                         for k in kws:
-                            if (k or '').strip().lower() in hay:
-                                mk = k; break
+                            if k.lower() in hay:
+                                mk = k
+                                break
                     if kws and not mk:
                         continue
-                    if mk: it["matched_keyword"] = mk
+                    it["matched_keyword"] = mk
                     dt = _to_dt(it.get("time_submitted"))
                     if not dt or dt < cutoff():
                         continue
