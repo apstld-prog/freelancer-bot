@@ -6,7 +6,10 @@ from utils import format_budget, format_relative_time, escape_html
 
 log = logging.getLogger("handlers_jobs")
 
-DEFAULT_URL = "https://www.peopleperhour.com/"
+# default fallback links to avoid Telegram errors
+DEFAULT_URL = "https://www.freelancer.com/"
+DEFAULT_PPH_URL = "https://www.peopleperhour.com/"
+DEFAULT_GREEK_URL = "https://www.skywalker.gr/"
 
 def job_to_message(job):
     """Format a job dictionary into Telegram message text and keyboard."""
@@ -21,30 +24,42 @@ def job_to_message(job):
 
     # Budget formatting
     budget_str = format_budget(budget_min, budget_max, ccy)
-
-    # Time formatting
     posted_str = format_relative_time(posted) if posted else ""
 
-    # Build text message (same structure as before)
+    # Build message text — same style as current
     text = (
         f"<b>{title}</b>\n"
         f"<b>Budget:</b> {budget_str}\n"
         f"<b>Source:</b> {source}\n"
-        f"<b>Match:</b> {keyword}\n"
-        f"📝 {desc}\n"
     )
+    if keyword:
+        text += f"<b>Match:</b> {keyword}\n"
+    if desc:
+        text += f"📝 {desc}\n"
     if posted_str:
         text += f"<i>{posted_str}</i>"
 
-    # --- Keyboard buttons ---
-    url = job.get("affiliate_url") or job.get("original_url") or DEFAULT_URL
-    if not url.startswith("http"):
-        url = DEFAULT_URL
+    # --- Safe URL resolution ---
+    proposal = (job.get("proposal_url") or "").strip()
+    original = (job.get("original_url") or "").strip()
+    affiliate = (job.get("affiliate_url") or "").strip()
 
+    # Pick a safe default based on source
+    if source.lower().startswith("peopleperhour"):
+        safe_default = DEFAULT_PPH_URL
+    elif source.lower().startswith("skywalker"):
+        safe_default = DEFAULT_GREEK_URL
+    else:
+        safe_default = DEFAULT_URL
+
+    safe_proposal = proposal or affiliate or original or safe_default
+    safe_original = original or affiliate or proposal or safe_default
+
+    # --- Keyboard buttons (fully safe) ---
     buttons = [
         [
-            InlineKeyboardButton("📄 Proposal", url=url),
-            InlineKeyboardButton("🔗 Original", url=url),
+            InlineKeyboardButton("📄 Proposal", url=safe_proposal),
+            InlineKeyboardButton("🔗 Original", url=safe_original),
         ],
         [
             InlineKeyboardButton("⭐ Save", callback_data=f"job:save:{job.get('id', '0')}"),
@@ -52,8 +67,11 @@ def job_to_message(job):
         ],
     ]
 
-    reply_markup = InlineKeyboardMarkup(buttons)
-    return text, reply_markup
+    # Debug info for empty URLs
+    if not proposal and not original and not affiliate:
+        log.warning(f"[handlers_jobs] Empty URLs for job id={job.get('id')} source={source}")
+
+    return text, InlineKeyboardMarkup(buttons)
 
 
 async def send_job(bot, chat_id, job):
