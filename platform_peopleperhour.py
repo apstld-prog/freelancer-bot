@@ -1,6 +1,5 @@
-import httpx, time
+import httpx, time, logging
 from bs4 import BeautifulSoup
-import logging
 
 log = logging.getLogger("platform_peopleperhour")
 
@@ -10,12 +9,9 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 def fetch_pph_jobs(keywords):
     """Fetch PeoplePerHour jobs via proxy + fallback HTML."""
     all_jobs = []
-    for kw in keywords:
-        kw = kw.strip()
-        if not kw:
-            continue
+    for kw in [k.strip() for k in keywords if k.strip()]:
         try:
-            # 1️⃣ Proxy API
+            # 1️⃣ Try proxy
             proxy_url = f"{PROXY_URL}?key=1211&q={kw}"
             r = httpx.get(proxy_url, timeout=25, headers=HEADERS)
             if r.status_code == 200:
@@ -35,17 +31,16 @@ def fetch_pph_jobs(keywords):
                         })
                     continue
 
-            # 2️⃣ Fallback HTML scraper
+            # 2️⃣ HTML fallback
             html_url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
             resp = httpx.get(html_url, timeout=25, headers=HEADERS)
             soup = BeautifulSoup(resp.text, "html.parser")
-            cards = soup.select("section[data-project-id]")
+            cards = soup.select("li[data-project-id]")
 
             for c in cards:
-                title_el = c.select_one("h5 a")
-                desc_el = c.select_one("p.description")
-                budget_el = c.select_one("strong.price")
-
+                title_el = c.select_one("h5 a, h3 a")
+                desc_el = c.select_one("p.truncated, p.description")
+                budget_el = c.select_one("span.value")
                 all_jobs.append({
                     "title": title_el.text.strip() if title_el else "(no title)",
                     "description": desc_el.text.strip() if desc_el else "",
@@ -57,7 +52,6 @@ def fetch_pph_jobs(keywords):
                     "time_submitted": int(time.time()),
                     "matched_keyword": kw,
                 })
-
             time.sleep(1.5)
         except Exception as e:
             log.warning(f"[PPH fetch error] {e}")
