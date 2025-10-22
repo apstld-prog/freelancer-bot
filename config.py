@@ -49,3 +49,6 @@ KARIERA_RSS = os.getenv("KARIERA_RSS", "")
 
 # Platform stats window
 STATS_WINDOW_HOURS = int(os.getenv("STATS_WINDOW_HOURS", "24"))
+
+# ✅ Worker timing (fix ImportError)
+WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "120"))
