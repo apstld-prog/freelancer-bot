@@ -17,11 +17,47 @@ def _make_url(p):
         return f"https://www.freelancer.com/projects/{seo}"
     return f"https://www.freelancer.com/projects/{p.get('id')}"
 
+def _detect_currency(p):
+    """Try to detect currency code from various Freelancer API fields."""
+    b = p.get("budget") or {}
+    cur_info = b.get("currency") if isinstance(b.get("currency"), dict) else None
+
+    # Priority 1: explicit code
+    if cur_info and "code" in cur_info and cur_info["code"]:
+        return cur_info["code"].upper()
+
+    # Priority 2: currency_id lookup table
+    cur_id = None
+    if isinstance(cur_info, dict) and cur_info.get("id"):
+        cur_id = cur_info["id"]
+    elif "currency_id" in b:
+        cur_id = b["currency_id"]
+
+    id_map = {
+        1: "USD",
+        3: "GBP",
+        4: "EUR",
+        5: "AUD",
+        6: "CAD",
+        9: "INR",
+        12: "PHP",
+    }
+    if cur_id and cur_id in id_map:
+        return id_map[cur_id]
+
+    # Priority 3: currency string fields
+    for key in ("currency", "currency_code"):
+        val = b.get(key)
+        if isinstance(val, str) and len(val) == 3:
+            return val.upper()
+
+    # Default fallback
+    return "USD"
+
 def _normalize(p, kw):
     """Normalize a single Freelancer project entry with safe currency handling."""
     b = p.get("budget") or {}
-    cur_info = b.get("currency") if isinstance(b.get("currency"), dict) else {}
-    cur = (cur_info.get("code") if isinstance(cur_info, dict) else None) or "USD"
+    cur = _detect_currency(p)
 
     return {
         "source": "Freelancer",
