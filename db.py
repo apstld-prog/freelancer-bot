@@ -18,8 +18,10 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
 
+
 def now_utc():
     return datetime.now(timezone.utc)
+
 
 # ------------------------- MODELS -------------------------
 
@@ -41,6 +43,7 @@ class User(Base):
 
     keywords = relationship("Keyword", back_populates="user", cascade="all, delete-orphan")
 
+
 class Keyword(Base):
     __tablename__ = "keyword"
     id = Column(Integer, primary_key=True)
@@ -54,6 +57,7 @@ class Keyword(Base):
     user = relationship("User", back_populates="keywords")
     __table_args__ = (UniqueConstraint("user_id", "value", name="uq_keyword_user_value"),)
 
+
 # ------------------------- SCHEMA / MIGRATIONS -------------------------
 
 def _safe_exec(session, sql: str):
@@ -65,6 +69,7 @@ def _safe_exec(session, sql: str):
         session.rollback()
         log.warning("migrate skip: %s", e)
         return False
+
 
 def ensure_schema():
     Base.metadata.create_all(bind=engine)
@@ -119,10 +124,12 @@ def ensure_schema():
         END $$;
         """)
 
+
 # ------------------------- HELPERS -------------------------
 
 def get_session():
     return SessionLocal()
+
 
 def get_or_create_user_by_tid(db, telegram_id: int) -> User:
     u = db.query(User).filter(User.telegram_id == telegram_id).one_or_none()
@@ -134,9 +141,11 @@ def get_or_create_user_by_tid(db, telegram_id: int) -> User:
     db.refresh(u)
     return u
 
+
 def list_user_keywords(db, user_id: int) -> list[str]:
     rows = db.query(Keyword).filter(Keyword.user_id == user_id).order_by(Keyword.id.asc()).all()
     return [r.value for r in rows]
+
 
 def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
     """Insert unique keywords (case-insensitive). Returns how many were inserted."""
@@ -170,3 +179,18 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
     if to_insert:
         db.commit()
     return len(to_insert)
+
+
+# ------------------------- LEGACY COMPATIBILITY -------------------------
+
+from contextlib import contextmanager
+import sqlalchemy
+
+@contextmanager
+def get_connection():
+    """Compatibility layer for old code expecting a direct DB connection."""
+    connection = engine.raw_connection()
+    try:
+        yield connection
+    finally:
+        connection.close()
