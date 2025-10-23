@@ -6,7 +6,6 @@ from sqlalchemy import (
     TIMESTAMP, ForeignKey, text, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-from contextlib import contextmanager
 
 log = logging.getLogger("db")
 
@@ -51,10 +50,6 @@ class Keyword(Base):
 # SCHEMA MANAGEMENT
 # ---------------------------------------------------------
 def ensure_schema():
-    """
-    Ensure database schema (used on startup).
-    Creates tables if not exist and adds legacy columns if missing.
-    """
     log.info("Ensuring DB schema...")
     Base.metadata.create_all(bind=engine)
     log.info("✅ Schema check complete.")
@@ -106,11 +101,6 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
 # ---------------------------------------------------------
 # LEGACY COMPATIBILITY (for worker_runner)
 # ---------------------------------------------------------
-@contextmanager
 def get_connection():
-    """Legacy compatibility for worker_runner"""
-    connection = engine.raw_connection()
-    try:
-        yield connection
-    finally:
-        connection.close()
+    """Return a raw DB connection for legacy worker_runner code."""
+    return engine.raw_connection()
