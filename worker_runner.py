@@ -1,127 +1,83 @@
 import asyncio
 import logging
-import os
 import time
-import httpx
-
+from datetime import datetime
+from db_keywords import list_keywords
+from utils_telegram import send_jobs_to_user
 from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
 from platform_skywalker import fetch_skywalker_jobs
 
-# -----------------------------------------------------
-# Logging setup
-# -----------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("worker")
 
-# -----------------------------------------------------
-# Environment variables
-# -----------------------------------------------------
-WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
-FREELANCER_INTERVAL = int(os.getenv("FREELANCER_INTERVAL", "60"))
-PPH_INTERVAL = int(os.getenv("PPH_INTERVAL", "300"))
-GREEK_INTERVAL = int(os.getenv("GREEK_INTERVAL", "300"))
+FREELANCER_INTERVAL = 60
+PPH_INTERVAL = 300
+SKYWALKER_INTERVAL = 300
 
-BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "5254014824"))
+last_run = {"freelancer": 0, "pph": 0, "skywalker": 0}
 
-# -----------------------------------------------------
-# Telegram direct send (no import from bot.py)
-# -----------------------------------------------------
-async def send_jobs_to_user(chat_id: int, jobs, platform: str):
-    """Send job messages directly via Telegram API."""
-    if not BOT_TOKEN:
-        logger.warning("[Worker] Missing TELEGRAM_TOKEN — cannot send messages")
-        return 0
 
-    sent_count = 0
-    async with httpx.AsyncClient() as client:
-        for job in jobs:
-            try:
-                title = job.get("title", "Untitled job")
-                url = job.get("affiliate_url") or job.get("original_url", "")
-                budget = job.get("budget_usd") or job.get("budget_amount") or ""
-                if budget:
-                    msg = f"💼 <b>{title}</b>\nBudget: ${budget}\n🔗 <a href=\"{url}\">View job</a>\n\nSource: {platform}"
-                else:
-                    msg = f"💼 <b>{title}</b>\n🔗 <a href=\"{url}\">View job</a>\n\nSource: {platform}"
-
-                await client.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                    data={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True},
-                    timeout=15,
-                )
-                sent_count += 1
-                await asyncio.sleep(1.5)
-            except Exception as e:
-                logger.warning(f"[Worker] send_jobs_to_user error: {e}")
-
-    return sent_count
-
-# -----------------------------------------------------
-# Safe fetch wrapper
-# -----------------------------------------------------
-async def safe_fetch(fetch_func, platform_name):
-    try:
-        start = time.time()
-        jobs = await fetch_func()
-        elapsed = round(time.time() - start, 2)
-        logger.info(f"[{platform_name}] fetched {len(jobs)} jobs in {elapsed}s")
-        return jobs
-    except Exception as e:
-        logger.warning(f"[{platform_name}] fetch error: {e}")
-        return []
-
-# -----------------------------------------------------
-# Main unified pipeline
-# -----------------------------------------------------
 async def run_pipeline():
-    logger.info("🚀 Starting unified worker (Freelancer + PPH + Greek feeds)")
-    last_run = {"freelancer": 0, "pph": 0, "skywalker": 0}
-    sent_total = 0
+    from db import get_connection
 
-    while True:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT user_id FROM keyword")
+    users = [r[0] for r in cur.fetchall()]
+    conn.close()
+
+    total_jobs = 0
+
+    for user_id in users:
+        keywords = list_keywords(user_id)
+        if not keywords:
+            continue
+
+        joined_keywords = ", ".join(k["keyword"] for k in keywords)
+        logger.info(f"[Worker] Fetching jobs for user {user_id}: {joined_keywords}")
+
         now = time.time()
 
-        # ---------- FREELANCER ----------
+        # FREELANCER
         if now - last_run["freelancer"] >= FREELANCER_INTERVAL:
-            freelancer_jobs = await safe_fetch(fetch_freelancer_jobs, "Freelancer")
-            if freelancer_jobs:
-                sent = await send_jobs_to_user(ADMIN_CHAT_ID, freelancer_jobs, "Freelancer")
-                logger.info(f"[Freelancer] sent {sent} jobs → {ADMIN_CHAT_ID}")
-                sent_total += sent
+            try:
+                freelancer_jobs = await fetch_freelancer_jobs(joined_keywords)
+                await send_jobs_to_user(user_id, freelancer_jobs, "freelancer")
+                total_jobs += len(freelancer_jobs)
+            except Exception as e:
+                logger.warning(f"[Freelancer] fetch error: {e}")
             last_run["freelancer"] = now
 
-        # ---------- PEOPLEPERHOUR ----------
+        # PPH
         if now - last_run["pph"] >= PPH_INTERVAL:
-            pph_jobs = await safe_fetch(fetch_pph_jobs, "PPH")
-            if pph_jobs:
-                sent = await send_jobs_to_user(ADMIN_CHAT_ID, pph_jobs, "PPH")
-                logger.info(f"[PPH] sent {sent} jobs → {ADMIN_CHAT_ID}")
-                sent_total += sent
+            try:
+                pph_jobs = await fetch_pph_jobs(joined_keywords)
+                await send_jobs_to_user(user_id, pph_jobs, "peopleperhour")
+                total_jobs += len(pph_jobs)
+            except Exception as e:
+                logger.warning(f"[PPH] fetch error: {e}")
             last_run["pph"] = now
 
-        # ---------- SKYWALKER ----------
-        if now - last_run["skywalker"] >= GREEK_INTERVAL:
-            sky_jobs = await safe_fetch(fetch_skywalker_jobs, "Skywalker")
-            if sky_jobs:
-                sent = await send_jobs_to_user(ADMIN_CHAT_ID, sky_jobs, "Skywalker")
-                logger.info(f"[Skywalker] sent {sent} jobs → {ADMIN_CHAT_ID}")
-                sent_total += sent
+        # SKYWALKER
+        if now - last_run["skywalker"] >= SKYWALKER_INTERVAL:
+            try:
+                sky_jobs = await fetch_skywalker_jobs(joined_keywords)
+                await send_jobs_to_user(user_id, sky_jobs, "skywalker")
+                total_jobs += len(sky_jobs)
+            except Exception as e:
+                logger.warning(f"[Skywalker] fetch error: {e}")
             last_run["skywalker"] = now
 
-        # ---------- Wait ----------
-        await asyncio.sleep(5)
-        logger.debug(f"[Worker] Loop tick, total sent so far = {sent_total}")
+    logger.info(f"[Worker] run_pipeline finished, total new jobs sent: {total_jobs}")
 
-# -----------------------------------------------------
-# Entrypoint
-# -----------------------------------------------------
+
+async def main_loop():
+    while True:
+        await run_pipeline()
+        await asyncio.sleep(30)
+
+
 if __name__ == "__main__":
-    logger.info("🚀 Starting worker process...")
-    try:
-        asyncio.run(run_pipeline())
-    except KeyboardInterrupt:
-        logger.info("Worker manually stopped.")
-    except Exception as e:
-        logger.error(f"Worker crashed: {e}")
+    logger.info("🚀 Starting unified worker (Freelancer + PPH + Skywalker)")
+    asyncio.run(main_loop())
