@@ -77,9 +77,11 @@ def add_keywords(user_id: int, kws: List[str]) -> int:
         val_nn, kw_nn = _detect_nullability(conn)
         has_created, has_updated = _detect_ts_cols(conn)
 
+        # Στήλες που θα βάλουμε
         cols = ["user_id"]
         vals = [":uid"]
 
+        # Αν υπάρχουν και οι δύο στήλες, γράφουμε και στις δύο με την ίδια τιμή.
         if has_kw:
             cols.append("keyword"); vals.append(":kw")
         if has_val:
@@ -93,38 +95,26 @@ def add_keywords(user_id: int, kws: List[str]) -> int:
         sql = f"INSERT INTO keyword ({', '.join(cols)}) VALUES ({', '.join(vals)}) ON CONFLICT DO NOTHING"
 
         for kw in kws:
-            kw_clean = kw.strip().lower()
-            res = s.execute(text(sql), {"uid": user_id, "kw": kw_clean})
+            res = s.execute(text(sql), {"uid": user_id, "kw": kw})
             if getattr(res, "rowcount", 0) == 1:
                 inserted += 1
         s.commit()
     return inserted
 
 def delete_keywords(user_id: int, kws: List[str]) -> int:
-    """Delete one or more keywords safely (UTF-8, exact match)."""
-    if not kws:
-        return 0
-    cleaned = [kw.strip().lower() for kw in kws if kw and kw.strip()]
-    if not cleaned:
-        return 0
-
+    if not kws: return 0
     with get_session() as s:
         conn = s.connection()
         has_kw, has_val = _detect_cols(conn)
-
         if has_kw and has_val:
-            cond = "(LOWER(keyword) = ANY(:kws) OR LOWER(value) = ANY(:kws))"
+            cond = "(keyword = ANY(:kws) OR value = ANY(:kws))"
         elif has_kw:
-            cond = "LOWER(keyword) = ANY(:kws)"
+            cond = "keyword = ANY(:kws)"
         else:
-            cond = "LOWER(value) = ANY(:kws)"
-
-        sql = text(f"DELETE FROM keyword WHERE user_id=:uid AND {cond}")
-        res = s.execute(sql, {"uid": user_id, "kws": cleaned})
+            cond = "value = ANY(:kws)"
+        res = s.execute(text(f"DELETE FROM keyword WHERE user_id=:uid AND {cond}"), {"uid": user_id, "kws": kws})
         s.commit()
-        deleted = int(getattr(res, "rowcount", 0))
-        print(f"[DB] Deleted {deleted} keyword(s) for {user_id}: {cleaned}")
-        return deleted
+        return int(getattr(res, "rowcount", 0))
 
 def clear_keywords(user_id: int) -> int:
     with get_session() as s:

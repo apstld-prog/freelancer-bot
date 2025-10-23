@@ -1,87 +1,60 @@
-import logging
-import httpx
-from datetime import datetime, timezone
+import httpx, time, logging
+from bs4 import BeautifulSoup
 
-logger = logging.getLogger("platform_peopleperhour")
+log = logging.getLogger("platform_peopleperhour")
 
-BASE_API = "https://www.peopleperhour.com/api/v1/projects"
+PROXY_URL = "https://pph-proxy-service.onrender.com/api/pph"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 def fetch_pph_jobs(keywords):
-    """
-    Fetch latest PeoplePerHour freelance jobs via official API.
-    Works without proxy. Returns normalized list of job dicts.
-    """
+    """Fetch PeoplePerHour jobs via proxy + fallback HTML."""
     all_jobs = []
-    session = httpx.Client(timeout=25.0, headers={
-        "User-Agent": "Mozilla/5.0 (compatible; PPHBot/1.0; +https://freelancer-alert-jobs-bot)"
-    })
-
-    for kw in keywords:
+    for kw in [k.strip() for k in keywords if k.strip()]:
         try:
-            url = f"{BASE_API}?search={kw}&limit=10&page=1"
-            logger.info(f"[PPH] Fetching API for keyword '{kw}' → {url}")
-            resp = session.get(url)
+            # 1️⃣ Try proxy
+            proxy_url = f"{PROXY_URL}?key=1211&q={kw}"
+            r = httpx.get(proxy_url, timeout=25, headers=HEADERS)
+            if r.status_code == 200:
+                js = r.json()
+                if isinstance(js, list) and js:
+                    for j in js:
+                        all_jobs.append({
+                            "title": j.get("title"),
+                            "description": j.get("description"),
+                            "budget_min": j.get("budget_min"),
+                            "budget_max": j.get("budget_max"),
+                            "budget_currency": j.get("budget_currency", "GBP"),
+                            "original_url": j.get("url"),
+                            "source": "PeoplePerHour",
+                            "time_submitted": j.get("time_submitted") or int(time.time()),
+                            "matched_keyword": kw,
+                        })
+                    continue
 
-            if resp.status_code != 200:
-                logger.warning(f"[PPH] Non-200 status ({resp.status_code}) for '{kw}'")
-                continue
+            # 2️⃣ HTML fallback
+            html_url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
+            resp = httpx.get(html_url, timeout=25, headers=HEADERS)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            cards = soup.select("li[data-project-id]")
 
-            data = resp.json()
-            if not isinstance(data, dict) or "projects" not in data:
-                logger.warning(f"[PPH] Unexpected JSON structure for '{kw}'")
-                continue
-
-            projects = data.get("projects", [])
-            logger.info(f"[PPH] Got {len(projects)} results for '{kw}'")
-
-            for p in projects:
-                job = {
-                    "platform": "peopleperhour",
-                    "title": p.get("title") or "(no title)",
-                    "description": (p.get("description") or "").strip()[:4000],
-                    "budget_amount": p.get("budget", {}).get("amount"),
-                    "budget_currency": p.get("budget", {}).get("currency"),
-                    "budget_usd": convert_to_usd(
-                        p.get("budget", {}).get("amount"),
-                        p.get("budget", {}).get("currency")
-                    ),
-                    "original_url": f"https://www.peopleperhour.com/freelance-jobs/{p.get('seo_url')}",
-                    "affiliate_url": f"https://www.peopleperhour.com/freelance-jobs/{p.get('seo_url')}",
-                    "created_at": parse_datetime(p.get("date_created")),
-                    "keyword": kw,
-                }
-                all_jobs.append(job)
-
+            for c in cards:
+                title_el = c.select_one("h5 a, h3 a")
+                desc_el = c.select_one("p.truncated, p.description")
+                budget_el = c.select_one("span.value")
+                all_jobs.append({
+                    "title": title_el.text.strip() if title_el else "(no title)",
+                    "description": desc_el.text.strip() if desc_el else "",
+                    "budget_min": None,
+                    "budget_max": None,
+                    "budget_currency": "GBP",
+                    "original_url": f"https://www.peopleperhour.com{title_el['href']}" if title_el else "",
+                    "source": "PeoplePerHour",
+                    "time_submitted": int(time.time()),
+                    "matched_keyword": kw,
+                })
+            time.sleep(1.5)
         except Exception as e:
-            logger.exception(f"[PPH] Error fetching '{kw}': {e}")
+            log.warning(f"[PPH fetch error] {e}")
 
-    logger.info(f"[PPH] Total merged: {len(all_jobs)}")
+    log.info(f"PPH total merged: {len(all_jobs)}")
     return all_jobs
-
-
-def parse_datetime(dt_str):
-    if not dt_str:
-        return datetime.now(timezone.utc)
-    try:
-        return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-    except Exception:
-        return datetime.now(timezone.utc)
-
-
-def convert_to_usd(amount, currency):
-    """Simple currency normalization for display."""
-    if amount is None or not currency:
-        return None
-    rates = {
-        "USD": 1,
-        "EUR": 1.08,
-        "GBP": 1.26,
-        "INR": 0.012,
-        "AUD": 0.66,
-        "CAD": 0.73,
-    }
-    try:
-        rate = rates.get(currency.upper(), 1)
-        return round(float(amount) * rate, 2)
-    except Exception:
-        return None
