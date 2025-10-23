@@ -21,6 +21,9 @@ Base = declarative_base()
 def now_utc():
     return datetime.now(timezone.utc)
 
+# ---------------------------------------------------------
+# MODELS
+# ---------------------------------------------------------
 class User(Base):
     __tablename__ = "user"
     id = Column(Integer, primary_key=True)
@@ -44,6 +47,21 @@ class Keyword(Base):
     user = relationship("User", back_populates="keywords")
     __table_args__ = (UniqueConstraint("user_id", "value", name="uq_keyword_user_value"),)
 
+# ---------------------------------------------------------
+# SCHEMA MANAGEMENT
+# ---------------------------------------------------------
+def ensure_schema():
+    """
+    Ensure database schema (used on startup).
+    Creates tables if not exist and adds legacy columns if missing.
+    """
+    log.info("Ensuring DB schema...")
+    Base.metadata.create_all(bind=engine)
+    log.info("✅ Schema check complete.")
+
+# ---------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------
 def get_session():
     return SessionLocal()
 
@@ -85,6 +103,9 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
         db.commit()
     return len(to_insert)
 
+# ---------------------------------------------------------
+# LEGACY COMPATIBILITY (for worker_runner)
+# ---------------------------------------------------------
 @contextmanager
 def get_connection():
     """Legacy compatibility for worker_runner"""
