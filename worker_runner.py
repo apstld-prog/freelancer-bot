@@ -30,7 +30,6 @@ async def run_pipeline():
     total_jobs = 0
 
     for user_id in users:
-        # ✅ Skip invalid user_ids
         if not isinstance(user_id, int) or user_id < 1000000000:
             logger.warning(f"[Worker] Skipping invalid user_id {user_id}")
             continue
@@ -59,7 +58,7 @@ async def run_pipeline():
         # PPH
         if now - last_run["pph"] >= PPH_INTERVAL:
             try:
-                pph_jobs = await fetch_pph_jobs(joined_keywords)
+                pph_jobs = fetch_pph_jobs(keywords_list)  # ✅ FIX: pass list, no await
                 if pph_jobs:
                     await send_jobs_to_user(user_id, pph_jobs, "peopleperhour")
                     total_jobs += len(pph_jobs)
@@ -70,7 +69,7 @@ async def run_pipeline():
         # SKYWALKER
         if now - last_run["skywalker"] >= SKYWALKER_INTERVAL:
             try:
-                sky_jobs = await fetch_skywalker_jobs(joined_keywords)
+                sky_jobs = fetch_skywalker_jobs(keywords_list)  # ✅ FIX: remove await
                 if sky_jobs:
                     await send_jobs_to_user(user_id, sky_jobs, "skywalker")
                     total_jobs += len(sky_jobs)
