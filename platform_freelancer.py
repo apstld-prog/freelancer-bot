@@ -16,14 +16,17 @@ def _make_url(p):
     return f"https://www.freelancer.com/projects/{p.get('id')}"
 
 def _normalize(p, kw):
+    """Normalize a single Freelancer project entry with safe currency handling."""
     b = p.get("budget") or {}
-    cur = (b.get("currency") or {}).get("code", "USD")
+    cur_info = b.get("currency") if isinstance(b.get("currency"), dict) else {}
+    cur = (cur_info.get("code") if isinstance(cur_info, dict) else None) or "USD"
+
     return {
         "source": "Freelancer",
-        "title": p.get("title", ""),
-        "description": p.get("preview_description", ""),
-        "budget_min": _safe_num(b.get("minimum")),
-        "budget_max": _safe_num(b.get("maximum")),
+        "title": p.get("title", "") or "(untitled)",
+        "description": p.get("preview_description", "") or "",
+        "budget_min": _safe_num(b.get("minimum")) if isinstance(b, dict) else None,
+        "budget_max": _safe_num(b.get("maximum")) if isinstance(b, dict) else None,
         "budget_currency": cur,
         "original_url": _make_url(p),
         "time_submitted": int(p.get("time_submitted", time.time())),
@@ -31,7 +34,7 @@ def _normalize(p, kw):
     }
 
 def fetch_freelancer_jobs(keywords):
-    """Fetch Freelancer jobs one keyword at a time."""
+    """Fetch Freelancer jobs one keyword at a time with fault tolerance."""
     all_jobs = []
     for kw in [k.strip() for k in keywords if k.strip()]:
         params = {
@@ -49,9 +52,13 @@ def fetch_freelancer_jobs(keywords):
                 if r.status_code != 200:
                     continue
                 data = r.json()
-                for p in (data.get("result") or {}).get("projects", []):
-                    job = _normalize(p, kw)
-                    all_jobs.append(job)
+                projects = (data.get("result") or {}).get("projects", [])
+                for p in projects:
+                    try:
+                        job = _normalize(p, kw)
+                        all_jobs.append(job)
+                    except Exception as inner:
+                        print("[Freelancer normalize error]", inner)
         except Exception as e:
             print("[Freelancer fetch error]", e)
         time.sleep(1)
