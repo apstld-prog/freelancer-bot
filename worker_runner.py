@@ -30,13 +30,16 @@ async def run_pipeline():
     total_jobs = 0
 
     for user_id in users:
+        # ✅ Skip invalid user_ids
+        if not isinstance(user_id, int) or user_id < 1000000000:
+            logger.warning(f"[Worker] Skipping invalid user_id {user_id}")
+            continue
+
         keywords = list_keywords(user_id)
         if not keywords:
             continue
 
-        # ✅ FIX: υποστήριξη και για dict και για string
         keywords_list = [k["keyword"] if isinstance(k, dict) else k for k in keywords]
-
         joined_keywords = ", ".join(keywords_list)
         logger.info(f"[Worker] Fetching jobs for user {user_id}: {joined_keywords}")
 
@@ -46,8 +49,9 @@ async def run_pipeline():
         if now - last_run["freelancer"] >= FREELANCER_INTERVAL:
             try:
                 freelancer_jobs = await asyncio.to_thread(fetch_freelancer_jobs, keywords_list)
-                await send_jobs_to_user(user_id, freelancer_jobs, "freelancer")
-                total_jobs += len(freelancer_jobs)
+                if freelancer_jobs:
+                    await send_jobs_to_user(user_id, freelancer_jobs, "freelancer")
+                    total_jobs += len(freelancer_jobs)
             except Exception as e:
                 logger.warning(f"[Freelancer] fetch error: {e}")
             last_run["freelancer"] = now
@@ -56,8 +60,9 @@ async def run_pipeline():
         if now - last_run["pph"] >= PPH_INTERVAL:
             try:
                 pph_jobs = await fetch_pph_jobs(joined_keywords)
-                await send_jobs_to_user(user_id, pph_jobs, "peopleperhour")
-                total_jobs += len(pph_jobs)
+                if pph_jobs:
+                    await send_jobs_to_user(user_id, pph_jobs, "peopleperhour")
+                    total_jobs += len(pph_jobs)
             except Exception as e:
                 logger.warning(f"[PPH] fetch error: {e}")
             last_run["pph"] = now
@@ -66,8 +71,9 @@ async def run_pipeline():
         if now - last_run["skywalker"] >= SKYWALKER_INTERVAL:
             try:
                 sky_jobs = await fetch_skywalker_jobs(joined_keywords)
-                await send_jobs_to_user(user_id, sky_jobs, "skywalker")
-                total_jobs += len(sky_jobs)
+                if sky_jobs:
+                    await send_jobs_to_user(user_id, sky_jobs, "skywalker")
+                    total_jobs += len(sky_jobs)
             except Exception as e:
                 logger.warning(f"[Skywalker] fetch error: {e}")
             last_run["skywalker"] = now
