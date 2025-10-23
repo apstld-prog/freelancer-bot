@@ -9,7 +9,7 @@ import httpx
 from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
 from platform_skywalker import fetch_skywalker_jobs
-from utils_telegram import send_jobs_to_user
+from bot import send_jobs_to_user  # ✅ FIX: εισαγωγή από bot.py
 
 # -----------------------------------------------------
 # Logging setup
@@ -36,7 +36,7 @@ last_run = {
 }
 
 # -----------------------------------------------------
-# Fetch wrappers with safe error handling
+# Safe fetch wrapper
 # -----------------------------------------------------
 async def safe_fetch(fetch_func, platform_name, *args, **kwargs):
     try:
@@ -87,7 +87,7 @@ async def run_pipeline():
             last_run["skywalker"] = now
 
         # ---------- Wait ----------
-        await asyncio.sleep(5)  # short loop cycle (checks every 5s)
+        await asyncio.sleep(5)
         logger.debug(f"[Worker] Loop tick, total sent so far = {sent_total}")
 
 # -----------------------------------------------------
