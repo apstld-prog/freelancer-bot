@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-# Unified worker runner (Freelancer + PPH + Greek feeds)
 import os, asyncio, hashlib, logging, time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
@@ -10,28 +9,27 @@ from sqlalchemy import text as _sql
 
 from db import get_session as _get_session
 from db_keywords import list_keywords as _list_keywords
-from currency_usd import usd_line  # ✅ Added for currency conversion
+from currency_usd import usd_line
 
-# --- import platform fetchers ---
+# --- platform imports ---
 from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
 from platform_skywalker import fetch_skywalker_jobs
 
+# --- setup logging ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("worker")
 
-WORKER_INTERVAL      = int(os.getenv("WORKER_INTERVAL", "180"))
-FREELANCER_INTERVAL  = int(os.getenv("FREELANCER_INTERVAL", "60"))
-PPH_INTERVAL         = int(os.getenv("PPH_INTERVAL", "300"))
-GREEK_INTERVAL       = int(os.getenv("GREEK_INTERVAL", "300"))
-FRESH_HOURS          = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
+WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
+FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 
 DEFAULT_URLS = {
-    "freelancer":   "https://www.freelancer.com/",
-    "peopleperhour":"https://www.peopleperhour.com/",
-    "skywalker":    "https://www.skywalker.gr/jobs/",
-    "generic":      "https://www.google.com/",
+    "freelancer": "https://www.freelancer.com/",
+    "peopleperhour": "https://www.peopleperhour.com/",
+    "skywalker": "https://www.skywalker.gr/jobs/",
+    "generic": "https://www.google.com/",
 }
 
 # ---------------- DB helpers ----------------
@@ -75,7 +73,8 @@ def _fetch_user_keywords(tid: int) -> List[str]:
     try:
         with _get_session() as s:
             row = s.execute(_sql('SELECT id FROM "user" WHERE telegram_id=:tid'), {"tid": tid}).fetchone()
-            if not row: return []
+            if not row:
+                return []
             uid = int(row[0])
         kws = _list_keywords(uid) or []
         return [k.strip() for k in kws if k.strip()]
@@ -85,8 +84,8 @@ def _fetch_user_keywords(tid: int) -> List[str]:
 # ---------------- Utils ----------------
 def _job_key(it: Dict) -> str:
     base = (it.get("original_url") or it.get("url") or it.get("title") or "").strip()
-    src  = (it.get("source") or "").strip()
-    return hashlib.sha1(f"{src}|{base}".encode("utf-8","ignore")).hexdigest()
+    src = (it.get("source") or "").strip()
+    return hashlib.sha1(f"{src}|{base}".encode("utf-8", "ignore")).hexdigest()
 
 def _to_dt(val) -> Optional[datetime]:
     if not val: return None
@@ -108,17 +107,17 @@ def _time_ago(dt: datetime) -> str:
     s = int(max(0, delta.total_seconds()))
     if s < 60: return "just now"
     m = s // 60
-    if m < 60: return f"{m} minute{'s' if m!=1 else ''} ago"
+    if m < 60: return f"{m} minute{'s' if m != 1 else ''} ago"
     h = m // 60
-    if h < 24: return f"{h} hour{'s' if h!=1 else ''} ago"
+    if h < 24: return f"{h} hour{'s' if h != 1 else ''} ago"
     d = h // 24
-    return f"{d} day{'s' if d!=1 else ''} ago"
+    return f"{d} day{'s' if d != 1 else ''} ago"
 
 def _safe_default_url(source: str) -> str:
     s = (source or "").lower()
     if "peopleperhour" in s: return DEFAULT_URLS["peopleperhour"]
-    if "skywalker" in s:     return DEFAULT_URLS["skywalker"]
-    if "freelancer" in s:    return DEFAULT_URLS["freelancer"]
+    if "skywalker" in s: return DEFAULT_URLS["skywalker"]
+    if "freelancer" in s: return DEFAULT_URLS["freelancer"]
     return DEFAULT_URLS["generic"]
 
 def _build_keyboard(it: Dict) -> InlineKeyboardMarkup:
@@ -127,12 +126,10 @@ def _build_keyboard(it: Dict) -> InlineKeyboardMarkup:
     original = (it.get("original_url") or "").strip()
     affiliate = (it.get("affiliate_url") or "").strip()
     safe = _safe_default_url(src)
-
     url1 = proposal or affiliate or original or safe
     url2 = original or affiliate or proposal or safe
     if not url1.startswith("http"): url1 = safe
     if not url2.startswith("http"): url2 = safe
-
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📄 Proposal", url=url1),
@@ -149,10 +146,8 @@ def _compose_message(it: Dict) -> str:
     desc = (it.get("description") or "").strip()
     src = (it.get("source") or "Freelancer").strip()
     kw = (it.get("matched_keyword") or "").strip()
-
     bmin, bmax = it.get("budget_min"), it.get("budget_max")
     ccy = it.get("budget_currency") or "USD"
-
     budget_line = ""
     if bmin and bmax:
         budget_line = f"{bmin}–{bmax} {ccy}"
@@ -160,15 +155,12 @@ def _compose_message(it: Dict) -> str:
         budget_line = f"from {bmin} {ccy}"
     elif bmax:
         budget_line = f"up to {bmax} {ccy}"
-
-    # ✅ Add USD equivalent if available
     usd_equiv = usd_line(bmin, bmax, ccy)
     if usd_equiv:
         if budget_line:
             budget_line = f"{budget_line} ({usd_equiv})"
         else:
             budget_line = usd_equiv
-
     lines = [f"<b>{title}</b>"]
     if budget_line:
         lines.append(f"<b>Budget:</b> {budget_line}")
@@ -184,7 +176,67 @@ def _compose_message(it: Dict) -> str:
         lines.append(f"<i>{_time_ago(dt)}</i>")
     return "\n".join(lines)
 
-# ---------------- Main Logic ----------------
-_last_run = {"freelancer":0, "pph":0, "greek":0}
+# ---------------- Main Worker Logic ----------------
+async def send_jobs(bot: Bot, user_id: int, items: List[Dict]):
+    for it in items:
+        job_key = _job_key(it)
+        if _already_sent(user_id, job_key):
+            continue
+        try:
+            msg = _compose_message(it)
+            await bot.send_message(
+                chat_id=user_id,
+                text=msg,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_build_keyboard(it),
+                disable_web_page_preview=True,
+            )
+            _mark_sent(user_id, job_key)
+            time.sleep(0.5)
+        except Exception as e:
+            log.error(f"[Send error] {e}")
 
-# (remaining code unchanged)
+async def worker_main(bot: Bot):
+    log.info("[Worker] Starting unified job fetch loop...")
+    while True:
+        users = _fetch_all_users()
+        for uid in users:
+            keywords = _fetch_user_keywords(uid)
+            if not keywords:
+                continue
+
+            log.info(f"[Worker] Fetching for user {uid} ({len(keywords)} keywords)")
+
+            # Fetch from all platforms
+            jobs = []
+            try:
+                jobs += fetch_freelancer_jobs(keywords)
+                jobs += fetch_pph_jobs(keywords)
+                jobs += fetch_skywalker_jobs(keywords)
+            except Exception as e:
+                log.error(f"[Worker fetch error] {e}")
+
+            # Match title+description with keywords
+            filtered = []
+            for it in jobs:
+                text_match = (it.get("title", "") + " " + it.get("description", "")).lower()
+                for kw in keywords:
+                    if kw.lower() in text_match:
+                        it["matched_keyword"] = kw
+                        filtered.append(it)
+                        break
+
+            # Remove duplicates based on URL key
+            unique_jobs = []
+            seen_keys = set()
+            for j in filtered:
+                jk = _job_key(j)
+                if jk not in seen_keys:
+                    seen_keys.add(jk)
+                    unique_jobs.append(j)
+
+            if unique_jobs:
+                log.info(f"[Worker] Sending {len(unique_jobs)} jobs to {uid}")
+                await send_jobs(bot, uid, unique_jobs)
+
+        await asyncio.sleep(WORKER_INTERVAL)
