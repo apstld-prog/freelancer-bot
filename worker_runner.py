@@ -34,7 +34,8 @@ async def run_pipeline():
         if not keywords:
             continue
 
-        joined_keywords = ", ".join(k["keyword"] for k in keywords)
+        keywords_list = [k["keyword"] for k in keywords]
+        joined_keywords = ", ".join(keywords_list)
         logger.info(f"[Worker] Fetching jobs for user {user_id}: {joined_keywords}")
 
         now = time.time()
@@ -42,7 +43,7 @@ async def run_pipeline():
         # FREELANCER
         if now - last_run["freelancer"] >= FREELANCER_INTERVAL:
             try:
-                freelancer_jobs = await fetch_freelancer_jobs(joined_keywords)
+                freelancer_jobs = await asyncio.to_thread(fetch_freelancer_jobs, keywords_list)
                 await send_jobs_to_user(user_id, freelancer_jobs, "freelancer")
                 total_jobs += len(freelancer_jobs)
             except Exception as e:
