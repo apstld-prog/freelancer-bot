@@ -34,7 +34,9 @@ async def run_pipeline():
         if not keywords:
             continue
 
-        keywords_list = [k["keyword"] for k in keywords]
+        # ✅ FIX: υποστήριξη και για dict και για string
+        keywords_list = [k["keyword"] if isinstance(k, dict) else k for k in keywords]
+
         joined_keywords = ", ".join(keywords_list)
         logger.info(f"[Worker] Fetching jobs for user {user_id}: {joined_keywords}")
 
