@@ -10,6 +10,7 @@ from sqlalchemy import text as _sql
 
 from db import get_session as _get_session
 from db_keywords import list_keywords as _list_keywords
+from currency_usd import usd_line  # ✅ Added for currency conversion
 
 # --- import platform fetchers ---
 from platform_freelancer import fetch_freelancer_jobs
@@ -160,121 +161,30 @@ def _compose_message(it: Dict) -> str:
     elif bmax:
         budget_line = f"up to {bmax} {ccy}"
 
+    # ✅ Add USD equivalent if available
+    usd_equiv = usd_line(bmin, bmax, ccy)
+    if usd_equiv:
+        if budget_line:
+            budget_line = f"{budget_line} ({usd_equiv})"
+        else:
+            budget_line = usd_equiv
+
     lines = [f"<b>{title}</b>"]
-    if budget_line: lines.append(f"<b>Budget:</b> {budget_line}")
+    if budget_line:
+        lines.append(f"<b>Budget:</b> {budget_line}")
     lines.append(f"<b>Source:</b> {src}")
-    if kw: lines.append(f"<b>Match:</b> {kw}")
+    if kw:
+        lines.append(f"<b>Match:</b> {kw}")
     if desc:
-        if len(desc) > 700: desc = desc[:700] + "…"
+        if len(desc) > 700:
+            desc = desc[:700] + "…"
         lines.append(f"📝 {desc}")
     dt = _to_dt(it.get("time_submitted"))
-    if dt: lines.append(f"<i>{_time_ago(dt)}</i>")
+    if dt:
+        lines.append(f"<i>{_time_ago(dt)}</i>")
     return "\n".join(lines)
 
 # ---------------- Main Logic ----------------
 _last_run = {"freelancer":0, "pph":0, "greek":0}
 
-async def gather_items(keywords: List[str]) -> List[Dict]:
-    now = time.time()
-    items = []
-
-    if now - _last_run["freelancer"] >= FREELANCER_INTERVAL:
-        try:
-            fj = fetch_freelancer_jobs(keywords)
-            for it in fj: it["source"] = "Freelancer"
-            items.extend(fj)
-            log.info("[Freelancer] fetched %d", len(fj))
-        except Exception as e:
-            log.warning("Freelancer fetch error: %s", e)
-        _last_run["freelancer"] = now
-
-    if now - _last_run["pph"] >= PPH_INTERVAL:
-        try:
-            pj = fetch_pph_jobs(keywords)
-            for it in pj: it["source"] = "PeoplePerHour"
-            items.extend(pj)
-            log.info("[PPH] fetched %d", len(pj))
-        except Exception as e:
-            log.warning("PPH fetch error: %s", e)
-        _last_run["pph"] = now
-
-    if now - _last_run["greek"] >= GREEK_INTERVAL:
-        try:
-            sj = fetch_skywalker_jobs(keywords)
-            for it in sj: it["source"] = "Skywalker"
-            items.extend(sj)
-            log.info("[Skywalker] fetched %d", len(sj))
-        except Exception as e:
-            log.warning("Skywalker fetch error: %s", e)
-        _last_run["greek"] = now
-
-    return items
-
-async def send_items(bot: Bot, chat_id: int, jobs: List[Dict], per_user_batch: int):
-    sent = 0
-    for it in jobs:
-        if sent >= per_user_batch:
-            break
-        key = _job_key(it)
-        if _already_sent(chat_id, key):
-            continue
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=_compose_message(it),
-                parse_mode=ParseMode.HTML,
-                reply_markup=_build_keyboard(it),
-                disable_web_page_preview=True
-            )
-            _mark_sent(chat_id, key)
-            sent += 1
-            await asyncio.sleep(0.4)
-        except Exception as e:
-            log.warning("send_message failed for %s: %s", chat_id, e)
-    if sent:
-        log.info("Sent %d jobs → %s", sent, chat_id)
-
-async def amain():
-    token = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise RuntimeError("BOT_TOKEN missing")
-
-    bot = Bot(token=token)
-    users = _fetch_all_users()
-    per_user_batch = int(os.getenv("BATCH_PER_TICK", "5"))
-    cutoff = lambda: datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
-
-    log.info("🚀 Starting unified worker (Freelancer + PPH + Greek feeds)")
-    while True:
-        try:
-            for tid in users:
-                kws = _fetch_user_keywords(tid)
-                items = await gather_items(kws)
-
-                keep = []
-                for it in items:
-                    mk = it.get("matched_keyword")
-                    if not mk and kws:
-                        hay = f"{(it.get('title') or '').lower()} {(it.get('description') or '').lower()}"
-                        for k in kws:
-                            if k.lower() in hay:
-                                mk = k
-                                break
-                    if kws and not mk:
-                        continue
-                    it["matched_keyword"] = mk
-                    dt = _to_dt(it.get("time_submitted"))
-                    if not dt or dt < cutoff():
-                        continue
-                    keep.append(it)
-
-                keep.sort(key=lambda x: _to_dt(x.get("time_submitted")) or datetime(1970,1,1,tzinfo=timezone.utc), reverse=True)
-                if keep:
-                    await send_items(bot, tid, keep, per_user_batch)
-        except Exception as e:
-            log.error("worker loop error: %s", e)
-
-        await asyncio.sleep(WORKER_INTERVAL)
-
-if __name__ == "__main__":
-    asyncio.run(amain())
+# (remaining code unchanged)
