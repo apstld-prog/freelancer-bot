@@ -204,10 +204,7 @@ async def worker_main(bot: Bot):
             keywords = _fetch_user_keywords(uid)
             if not keywords:
                 continue
-
             log.info(f"[Worker] Fetching for user {uid} ({len(keywords)} keywords)")
-
-            # Fetch from all platforms
             jobs = []
             try:
                 jobs += fetch_freelancer_jobs(keywords)
@@ -215,8 +212,6 @@ async def worker_main(bot: Bot):
                 jobs += fetch_skywalker_jobs(keywords)
             except Exception as e:
                 log.error(f"[Worker fetch error] {e}")
-
-            # Match title+description with keywords
             filtered = []
             for it in jobs:
                 text_match = (it.get("title", "") + " " + it.get("description", "")).lower()
@@ -225,8 +220,6 @@ async def worker_main(bot: Bot):
                         it["matched_keyword"] = kw
                         filtered.append(it)
                         break
-
-            # Remove duplicates based on URL key
             unique_jobs = []
             seen_keys = set()
             for j in filtered:
@@ -234,9 +227,15 @@ async def worker_main(bot: Bot):
                 if jk not in seen_keys:
                     seen_keys.add(jk)
                     unique_jobs.append(j)
-
             if unique_jobs:
                 log.info(f"[Worker] Sending {len(unique_jobs)} jobs to {uid}")
                 await send_jobs(bot, uid, unique_jobs)
-
         await asyncio.sleep(WORKER_INTERVAL)
+
+# ---------------- Entry Point ----------------
+if __name__ == "__main__":
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise SystemExit("❌ Missing BOT_TOKEN environment variable")
+    bot = Bot(token=token)
+    asyncio.run(worker_main(bot))
