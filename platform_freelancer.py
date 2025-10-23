@@ -1,4 +1,6 @@
-import httpx, time, math, datetime
+import httpx, time, math, datetime, traceback, logging
+
+log = logging.getLogger("platform_freelancer")
 
 FREELANCER_SEARCH_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 HEADERS = {"User-Agent": "Mozilla/5.0 (FreelancerFeedBot)"}
@@ -34,7 +36,7 @@ def _normalize(p, kw):
     }
 
 def fetch_freelancer_jobs(keywords):
-    """Fetch Freelancer jobs one keyword at a time with fault tolerance."""
+    """Fetch Freelancer jobs one keyword at a time with detailed logging."""
     all_jobs = []
     for kw in [k.strip() for k in keywords if k.strip()]:
         params = {
@@ -46,21 +48,38 @@ def fetch_freelancer_jobs(keywords):
             "sort_direction": "desc",
             "query": kw,
         }
+
+        log.info(f"[Freelancer] Fetching jobs for keyword: {kw}")
         try:
-            with httpx.Client(timeout=12.0, headers=HEADERS) as cli:
+            with httpx.Client(timeout=15.0, headers=HEADERS) as cli:
                 r = cli.get(FREELANCER_SEARCH_URL, params=params)
+                log.info(f"[Freelancer] Status {r.status_code} for '{kw}'")
                 if r.status_code != 200:
+                    log.warning(f"[Freelancer] Non-200 response for '{kw}': {r.status_code}")
                     continue
-                data = r.json()
+                try:
+                    data = r.json()
+                except Exception as je:
+                    log.error(f"[Freelancer] JSON decode error for '{kw}': {je}")
+                    log.debug(r.text[:300])
+                    continue
+
                 projects = (data.get("result") or {}).get("projects", [])
+                log.info(f"[Freelancer] Retrieved {len(projects)} projects for '{kw}'")
+
                 for p in projects:
                     try:
                         job = _normalize(p, kw)
                         all_jobs.append(job)
                     except Exception as inner:
-                        print("[Freelancer normalize error]", inner)
+                        log.warning(f"[Freelancer] normalize error: {inner}")
+                        log.debug(traceback.format_exc())
+
         except Exception as e:
-            print("[Freelancer fetch error]", e)
+            log.error(f"[Freelancer] fetch error for '{kw}': {e}")
+            log.debug(traceback.format_exc())
+
         time.sleep(1)
-    print(f"[Freelancer] total merged: {len(all_jobs)}")
+
+    log.info(f"[Freelancer] total merged: {len(all_jobs)}")
     return all_jobs
