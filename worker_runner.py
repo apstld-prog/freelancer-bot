@@ -2,15 +2,20 @@ import logging
 import asyncio
 import httpx
 import psycopg2
+import os
+import time
 from datetime import datetime, timedelta, timezone
+
 from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
 from platform_skywalker import fetch_skywalker_jobs
-import os
 
 log = logging.getLogger("worker")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 DB_URL = os.getenv("DATABASE_URL")
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
 
 def get_connection():
     return psycopg2.connect(DB_URL)
@@ -41,7 +46,9 @@ async def send_job(bot_token, chat_id, job):
         }
 
         if url:
-            payload["reply_markup"] = {"inline_keyboard": [[{"text": "🔗 View Job", "url": str(url)}]]}
+            payload["reply_markup"] = {
+                "inline_keyboard": [[{"text": "🔗 View Job", "url": str(url)}]]
+            }
 
         async with httpx.AsyncClient() as client:
             r = await client.post(
@@ -54,3 +61,55 @@ async def send_job(bot_token, chat_id, job):
 
     except Exception as e:
         log.warning(f"send_job exception: {e}")
+
+
+async def process_user(user):
+    try:
+        user_id = user[0]
+        keywords = user[1]
+        if not keywords:
+            return
+
+        kw_list = [k.strip() for k in keywords.split(",") if k.strip()]
+        log.info(f"[Worker] Fetching for user {user_id} (kw={','.join(kw_list)})")
+
+        jobs_f = await fetch_freelancer_jobs(kw_list)
+        jobs_p = await fetch_pph_jobs(kw_list)
+        jobs_s = await fetch_skywalker_jobs(kw_list)
+
+        total = jobs_f + jobs_p + jobs_s
+        log.info(f"[Worker] Total jobs merged: {len(total)}")
+
+        for job in total[:10]:
+            await send_job(BOT_TOKEN, user_id, job)
+
+        log.info(f"[Worker] ✅ Sent {len(total[:10])} jobs → {user_id}")
+
+    except Exception as e:
+        log.error(f"[Worker] Error processing user {user}: {e}")
+
+
+async def main_loop():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, keywords FROM \"user\";")
+    users = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    log.info(f"[Worker] Total users: {len(users)}")
+    for user in users:
+        await process_user(user)
+
+
+if __name__ == "__main__":
+    log.info("[Worker] Starting background process...")
+    try:
+        while True:
+            asyncio.run(main_loop())
+            log.info("[Worker] Cycle complete. Sleeping...")
+            time.sleep(int(os.getenv("WORKER_INTERVAL", "180")))
+    except KeyboardInterrupt:
+        log.info("[Worker] Stopped manually.")
+    except Exception as e:
+        log.error(f"[Worker main_loop error] {e}")
