@@ -10,7 +10,7 @@ import psycopg2.extras
 from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
 from platform_skywalker import fetch_skywalker_jobs
-from currency_usd import usd_line  # ✅ διορθωμένο import
+from currency_usd import usd_line
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
@@ -19,7 +19,12 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 FRESH_HOURS = int(os.getenv("FRESH_HOURS", "48"))
 
 def db_connect():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+    raw_url = os.getenv("DATABASE_URL")
+    if not raw_url:
+        raise RuntimeError("❌ DATABASE_URL not found in environment variables")
+    clean_url = raw_url.replace("postgresql+psycopg2://", "postgresql://")
+    log.info(f"[DB] Connecting using URL: {clean_url.split('@')[-1]}")
+    return psycopg2.connect(clean_url, sslmode="require")
 
 def get_all_users():
     conn = db_connect()
@@ -91,7 +96,7 @@ async def send_job(bot, user_id, job):
         budget_cur = job.get("budget_currency", "")
         budget_min = job.get("budget_min") or 0
         budget_max = job.get("budget_max") or 0
-        usd_text = usd_line(budget_min, budget_max, budget_cur) or ""  # ✅ σωστό όνομα συνάρτησης
+        usd_text = usd_line(budget_min, budget_max, budget_cur) or ""
 
         text = f"*{title}*\n"
         if budget_min or budget_max:
