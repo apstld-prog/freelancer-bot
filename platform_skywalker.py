@@ -14,7 +14,12 @@ async def fetch_skywalker_jobs(keywords=None):
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(SKYWALKER_FEED_URL)
             if r.status_code == 200:
-                soup = BeautifulSoup(r.text, "xml")
+                # ✅ Try xml parser, fallback to html.parser if unavailable
+                try:
+                    soup = BeautifulSoup(r.text, "xml")
+                except Exception:
+                    soup = BeautifulSoup(r.text, "html.parser")
+
                 items = soup.find_all("item")
                 log.info(f"Skywalker parsed {len(items)} entries")
 
@@ -30,7 +35,6 @@ async def fetch_skywalker_jobs(keywords=None):
                         except Exception:
                             ts = datetime.now(tz=timezone.utc).timestamp()
 
-                    # Always ensure URLs are strings
                     link = str(link) if link else ""
 
                     job = {
