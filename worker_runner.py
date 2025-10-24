@@ -63,6 +63,13 @@ async def send_job(bot_token, chat_id, job):
         log.warning(f"send_job exception: {e}")
 
 
+# ✅ Helper: safely await if coroutine
+async def ensure_awaitable(func_result):
+    if asyncio.iscoroutine(func_result):
+        return await func_result
+    return func_result
+
+
 async def process_user(user):
     try:
         user_id = user[0]
@@ -73,12 +80,12 @@ async def process_user(user):
         kw_list = [k.strip() for k in keywords.split(",") if k.strip()]
         log.info(f"[Worker] Fetching for user {user_id} (kw={','.join(kw_list)})")
 
-        # FIX: remove await since these functions return lists, not coroutines
-        jobs_f = fetch_freelancer_jobs(kw_list)
-        jobs_p = fetch_pph_jobs(kw_list)
-        jobs_s = fetch_skywalker_jobs(kw_list)
+        # Unified handling for async/sync functions
+        jobs_f = await ensure_awaitable(fetch_freelancer_jobs(kw_list))
+        jobs_p = await ensure_awaitable(fetch_pph_jobs(kw_list))
+        jobs_s = await ensure_awaitable(fetch_skywalker_jobs(kw_list))
 
-        total = jobs_f + jobs_p + jobs_s
+        total = (jobs_f or []) + (jobs_p or []) + (jobs_s or [])
         log.info(f"[Worker] Total jobs merged: {len(total)}")
 
         for job in total[:10]:
