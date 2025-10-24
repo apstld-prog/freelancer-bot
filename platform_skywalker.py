@@ -1,94 +1,101 @@
 import httpx
 import logging
-from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
+from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger("skywalker")
 
-SKYWALKER_FEED_URL = "https://www.skywalker.gr/jobs/feed"
+BASE_URL = "https://www.skywalker.gr/el/thesis-ergasias"
 
-async def fetch_skywalker_jobs(keywords=None):
-    """Fetch jobs from Skywalker RSS feed or HTML fallback."""
+def parse_skywalker_date(date_text: str):
+    """Μετατροπή ελληνικών ημερομηνιών σε datetime"""
+    try:
+        # Συνήθεις μορφές: "24 Οκτ 2025" ή "Σήμερα", "Χθες"
+        date_text = date_text.strip().lower()
+        now = datetime.now(tz=timezone.utc)
+        months = {
+            "ιαν": 1, "φεβ": 2, "μαρ": 3, "απρ": 4,
+            "μαι": 5, "ιουν": 6, "ιουλ": 7, "αυγ": 8,
+            "σεπ": 9, "οκτ": 10, "νοε": 11, "δεκ": 12
+        }
+
+        if "σήμερα" in date_text:
+            return now
+        if "χθες" in date_text:
+            return now - timedelta(days=1)
+
+        parts = date_text.replace(",", "").split()
+        if len(parts) >= 3:
+            day = int(parts[0])
+            month = months.get(parts[1][:3], now.month)
+            year = int(parts[2])
+            return datetime(year, month, day, tzinfo=timezone.utc)
+
+    except Exception:
+        pass
+    return datetime.now(tz=timezone.utc)
+
+async def fetch_skywalker_jobs(keywords):
+    """Αναζήτηση αγγελιών απευθείας από τη σελίδα Skywalker."""
     jobs = []
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(SKYWALKER_FEED_URL)
-            if r.status_code == 200:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            log.info(f"[Skywalker] Fetching {BASE_URL}")
+            r = await client.get(BASE_URL)
+            if r.status_code != 200:
+                log.warning(f"[Skywalker] Status {r.status_code}")
+                return []
+
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            # Επιλογή αγγελιών (2025 layout)
+            job_cards = soup.select("article.job, div.job-item, div.job-list-item")
+            log.info(f"[Skywalker] Found {len(job_cards)} raw listings")
+
+            for card in job_cards:
                 try:
-                    soup = BeautifulSoup(r.text, "xml")
-                    items = soup.find_all("item")
-                except Exception:
-                    soup = BeautifulSoup(r.text, "html.parser")
-                    items = soup.find_all("item")
+                    # Τίτλος
+                    title_tag = card.find("a")
+                    title = title_tag.text.strip() if title_tag else ""
+                    link = title_tag["href"] if title_tag and title_tag.get("href") else ""
+                    if link and not link.startswith("http"):
+                        link = f"https://www.skywalker.gr{link}"
 
-                # ✅ Αν το RSS είναι άδειο, δοκιμάζουμε HTML fallback
-                if not items:
-                    log.info("[Skywalker] RSS empty, trying HTML fallback...")
-                    html = await client.get("https://www.skywalker.gr/el/thesis-ergasias")
-                    hsoup = BeautifulSoup(html.text, "html.parser")
-                    blocks = hsoup.find_all("div", class_="job")
+                    # Περιγραφή
+                    desc_tag = card.find("p") or card.find("div", class_="desc")
+                    desc = desc_tag.text.strip() if desc_tag else ""
+                    desc = desc[:400]
 
-                    for b in blocks:
-                        title_tag = b.find("a")
-                        title = title_tag.text.strip() if title_tag else ""
-                        link = title_tag["href"] if title_tag and title_tag.get("href") else ""
-                        link = link if link.startswith("http") else f"https://www.skywalker.gr{link}"
-                        desc = (b.find("p").text.strip() if b.find("p") else "")
-                        ts = datetime.now(tz=timezone.utc).timestamp()
+                    # Ημερομηνία δημοσίευσης
+                    date_tag = card.find("span", class_="date") or card.find("div", class_="job-date")
+                    date_text = date_tag.text.strip() if date_tag else "σήμερα"
+                    dt = parse_skywalker_date(date_text)
 
-                        job = {
-                            "title": title,
-                            "description": desc,
-                            "original_url": link,
-                            "affiliate_url": link,
-                            "budget_amount": 0,
-                            "budget_currency": "EUR",
-                            "source": "Skywalker",
-                            "timestamp": ts,
-                        }
-                        jobs.append(job)
+                    # Φιλτράρισμα 48 ωρών
+                    if dt < datetime.now(tz=timezone.utc) - timedelta(hours=48):
+                        continue
 
-                # ✅ Διαβάζουμε κανονικό RSS
-                else:
-                    for item in items:
-                        title = item.title.text.strip() if item.title else ""
-                        desc = item.description.text.strip() if item.description else ""
-                        link = item.link.text.strip() if item.link else ""
-                        pub_date = item.pubDate.text.strip() if item.pubDate else ""
-                        ts = None
-                        if pub_date:
-                            try:
-                                ts = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z").timestamp()
-                            except Exception:
-                                ts = datetime.now(tz=timezone.utc).timestamp()
-                        link = str(link) if link else ""
-                        job = {
-                            "title": title,
-                            "description": desc,
-                            "original_url": link,
-                            "affiliate_url": link,
-                            "budget_amount": 0,
-                            "budget_currency": "EUR",
-                            "source": "Skywalker",
-                            "timestamp": ts,
-                        }
-                        jobs.append(job)
+                    # Ταίριασμα με keywords
+                    text_to_match = (title + " " + desc).lower()
+                    if not any(k.lower() in text_to_match for k in keywords):
+                        continue
 
-                # ✅ Φιλτράρισμα λέξεων-κλειδιών
-                if keywords:
-                    kw_lower = [k.lower() for k in keywords]
-                    jobs = [
-                        j for j in jobs
-                        if any(k in (j["title"].lower() + j["description"].lower()) for k in kw_lower)
-                    ]
+                    jobs.append({
+                        "title": title,
+                        "description": desc,
+                        "original_url": link,
+                        "affiliate_url": link,
+                        "budget_amount": None,
+                        "budget_currency": "",
+                        "source": "Skywalker",
+                        "timestamp": dt.timestamp()
+                    })
 
-                # ✅ Μόνο αγγελίες έως 48 ωρών
-                cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=48)
-                jobs = [j for j in jobs if datetime.fromtimestamp(j["timestamp"], tz=timezone.utc) >= cutoff]
+                except Exception as e:
+                    log.warning(f"[Skywalker parse error] {e}")
 
-                log.info(f"Skywalker parsed {len(jobs)} entries after filtering")
-            else:
-                log.warning(f"[Skywalker] status {r.status_code}")
     except Exception as e:
-        log.warning(f"Skywalker error: {e}")
+        log.warning(f"[Skywalker error] {e}")
+
+    log.info(f"[Skywalker parsed {len(jobs)} entries after filtering]")
     return jobs

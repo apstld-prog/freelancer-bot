@@ -1,119 +1,108 @@
 import httpx
-import asyncio
 import logging
 import re
-from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
+from bs4 import BeautifulSoup
 
 log = logging.getLogger("platform_peopleperhour")
 
 BASE_URL = "https://www.peopleperhour.com/freelance-jobs"
-PROXY_URL = "https://pph-proxy-service.onrender.com/api/pph"
 
-async def fetch_peopleperhour_jobs(keyword):
-    """Fetch jobs from PeoplePerHour (proxy or HTML fallback)."""
-    jobs = []
+# --- Βοηθητικό για μετατροπή σε USD (προσεγγιστικά rates)
+CURRENCY_TO_USD = {
+    "GBP": 1.28,
+    "EUR": 1.09,
+    "USD": 1.0
+}
+
+def convert_to_usd(amount, currency):
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            url = f"{PROXY_URL}?key=1211&q={keyword}"
-            r = await client.get(url)
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, dict):
-                    data = data.get("jobs", [])
-                elif not isinstance(data, list):
-                    data = []
+        rate = CURRENCY_TO_USD.get(currency.upper(), 1.0)
+        return round(amount * rate, 2)
+    except Exception:
+        return amount
 
-                if not data:
-                    log.info(f"⚠️ Proxy empty → fallback to HTML for '{keyword}'")
-                    html = await client.get(f"{BASE_URL}?q={keyword}")
-                    soup = BeautifulSoup(html.text, "html.parser")
-                    cards = soup.find_all("section", class_="job-tile")
+async def fetch_peopleperhour_jobs(keywords):
+    """Πραγματικό scraping από το peopleperhour.com σαν αναζήτηση χρήστη."""
+    results = []
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            for kw in keywords:
+                url = f"{BASE_URL}?q={kw}"
+                log.info(f"[PPH HTML] Fetching {url}")
+                r = await client.get(url)
+                if r.status_code != 200:
+                    log.warning(f"[PPH HTML] Status {r.status_code} for {kw}")
+                    continue
 
-                    for c in cards:
-                        title_tag = c.find("a", class_="job-tile-title")
-                        title = title_tag.text.strip() if title_tag else ""
-                        link = title_tag["href"] if title_tag and title_tag.get("href") else ""
-                        link = link if link.startswith("http") else f"https://www.peopleperhour.com{link}"
-                        desc = c.find("p", class_="job-tile-description")
-                        desc = desc.text.strip() if desc else ""
-                        budget_tag = c.find("span", class_="job-tile-budget")
-                        budget_text = budget_tag.text.strip() if budget_tag else ""
-                        m = re.findall(r"([\d\.]+)", budget_text)
-                        budget = float(m[0]) if m else 0.0
-                        currency = "GBP" if "£" in budget_text else "EUR" if "€" in budget_text else "USD"
+                soup = BeautifulSoup(r.text, "html.parser")
+
+                # Κάθε job σε PeoplePerHour (2025 layout)
+                job_cards = soup.select("li.project-list-item, section.job, article.job-tile, div.search-result")
+                log.info(f"[PPH HTML] Found {len(job_cards)} listings for '{kw}'")
+
+                for card in job_cards:
+                    try:
+                        # Τίτλος & link
+                        a_tag = card.find("a", href=re.compile(r"^/job/"))
+                        title = a_tag.text.strip() if a_tag else ""
+                        link = a_tag["href"] if a_tag and a_tag.get("href") else ""
+                        if link and not link.startswith("http"):
+                            link = f"https://www.peopleperhour.com{link}"
+
+                        # Περιγραφή
+                        desc = card.get_text(separator=" ", strip=True)
+                        desc = desc[:400]  # truncate για ασφάλεια
+
+                        # Budget & νόμισμα
+                        budget_text = ""
+                        for elem in card.find_all(text=re.compile(r"[$€£]")):
+                            budget_text = elem.strip()
+                            break
+                        amount = 0.0
+                        currency = "USD"
+                        if budget_text:
+                            if "£" in budget_text:
+                                currency = "GBP"
+                            elif "€" in budget_text:
+                                currency = "EUR"
+                            elif "$" in budget_text:
+                                currency = "USD"
+                            m = re.findall(r"[\d\.]+", budget_text)
+                            if m:
+                                amount = float(m[0])
+
+                        amount_usd = convert_to_usd(amount, currency)
+
+                        # Χρονική σήμανση τώρα (δεν δίνει ημερομηνία η σελίδα)
                         ts = datetime.now(tz=timezone.utc).timestamp()
+
+                        # Δημιουργία αντικειμένου
                         job = {
                             "title": title,
                             "description": desc,
                             "original_url": link,
                             "affiliate_url": link,
-                            "budget_amount": budget,
-                            "budget_currency": currency,
+                            "budget_amount": amount,
+                            "budget_currency": f"{currency} (~${amount_usd} USD)",
                             "source": "PeoplePerHour",
                             "timestamp": ts,
                         }
-                        jobs.append(job)
-                else:
-                    for j in data:
-                        try:
-                            title = str(j.get("title", "")).strip()
-                            link = j.get("url") or ""
-                            if not isinstance(link, str):
-                                link = str(link)
-                            desc = str(j.get("description", "")).strip()
-                            budget = j.get("budget") or ""
-                            currency = str(j.get("currency", "")).strip() or "GBP"
-                            posted = j.get("posted") or ""
-                            ts = None
-                            if posted:
-                                try:
-                                    ts = datetime.fromisoformat(posted.replace("Z", "+00:00")).timestamp()
-                                except Exception:
-                                    ts = datetime.now(tz=timezone.utc).timestamp()
-                            else:
-                                ts = datetime.now(tz=timezone.utc).timestamp()
-                            clean_budget = 0
-                            if isinstance(budget, (int, float)):
-                                clean_budget = float(budget)
-                            elif isinstance(budget, str):
-                                m = re.findall(r"[\d\.]+", budget)
-                                if m:
-                                    clean_budget = float(m[0])
-                            job = {
-                                "title": title,
-                                "description": desc,
-                                "original_url": link,
-                                "affiliate_url": link,
-                                "budget_amount": clean_budget,
-                                "budget_currency": currency,
-                                "source": "PeoplePerHour",
-                                "timestamp": ts,
-                            }
-                            jobs.append(job)
-                        except Exception as e:
-                            log.warning(f"[PPH parse error] {e}")
 
-                # ✅ Φιλτράρουμε αγγελίες έως 48 ωρών
-                cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=48)
-                jobs = [j for j in jobs if datetime.fromtimestamp(j["timestamp"], tz=timezone.utc) >= cutoff]
+                        # Match keywords
+                        text_to_match = (title + " " + desc).lower()
+                        if any(k.lower() in text_to_match for k in keywords):
+                            results.append(job)
 
-            else:
-                log.warning(f"[PPH] Status {r.status_code} for '{keyword}'")
+                    except Exception as e:
+                        log.warning(f"[PPH HTML parse error] {e}")
+
+            # ✅ Μόνο αγγελίες έως 48 ωρών (timestamp τώρα)
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=48)
+            results = [j for j in results if datetime.fromtimestamp(j["timestamp"], tz=timezone.utc) >= cutoff]
+
     except Exception as e:
-        log.warning(f"[PPH error] {e}")
+        log.warning(f"[PPH HTML error] {e}")
 
-    log.info(f"[PPH total merged: {len(jobs)}]")
-    return jobs
-
-
-async def fetch_pph_jobs(keywords):
-    """Wrapper για το fetch_peopleperhour_jobs."""
-    if isinstance(keywords, list):
-        results = []
-        for kw in keywords:
-            jobs = await fetch_peopleperhour_jobs(kw)
-            results.extend(jobs)
-        return results
-    else:
-        return await fetch_peopleperhour_jobs(str(keywords))
+    log.info(f"[PPH total merged: {len(results)}]")
+    return results
