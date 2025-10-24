@@ -1,4 +1,4 @@
-import httpx, time, math, datetime, traceback, logging
+import httpx, time, traceback, logging
 
 log = logging.getLogger("platform_freelancer")
 
@@ -18,7 +18,7 @@ def _make_url(p):
     return f"https://www.freelancer.com/projects/{p.get('id')}"
 
 def _detect_currency(p):
-    """Try to detect currency code from various Freelancer API fields."""
+    """Improved currency detection for Freelancer jobs."""
     b = p.get("budget") or {}
     cur_info = b.get("currency") if isinstance(b.get("currency"), dict) else None
 
@@ -26,7 +26,25 @@ def _detect_currency(p):
     if cur_info and "code" in cur_info and cur_info["code"]:
         return cur_info["code"].upper()
 
-    # Priority 2: currency_id lookup table
+    # Priority 2: sign or name detection
+    if cur_info:
+        sign = str(cur_info.get("sign") or "").strip()
+        name = str(cur_info.get("name") or "").lower()
+
+        if sign in ["£", "₤"] or "pound" in name:
+            return "GBP"
+        if sign in ["€"] or "euro" in name:
+            return "EUR"
+        if sign in ["₹"] or "rupee" in name or "inr" in name:
+            return "INR"
+        if "a$" in name or "aud" in name or "australian" in name:
+            return "AUD"
+        if "cad" in name or "canadian" in name or sign == "C$":
+            return "CAD"
+        if "php" in name or "peso" in name:
+            return "PHP"
+
+    # Priority 3: currency_id lookup
     cur_id = None
     if isinstance(cur_info, dict) and cur_info.get("id"):
         cur_id = cur_info["id"]
@@ -45,11 +63,22 @@ def _detect_currency(p):
     if cur_id and cur_id in id_map:
         return id_map[cur_id]
 
-    # Priority 3: currency string fields
+    # Priority 4: try parsing text fields
     for key in ("currency", "currency_code"):
         val = b.get(key)
         if isinstance(val, str) and len(val) == 3:
             return val.upper()
+
+    # Priority 5: sign detection from description or title
+    text = (p.get("title", "") + " " + p.get("preview_description", "")).lower()
+    if "£" in text or "pound" in text:
+        return "GBP"
+    if "€" in text or "euro" in text:
+        return "EUR"
+    if "₹" in text or "inr" in text:
+        return "INR"
+    if "$" in text:
+        return "USD"
 
     # Default fallback
     return "USD"

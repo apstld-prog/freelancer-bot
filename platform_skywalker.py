@@ -3,8 +3,23 @@ import logging, time, httpx, feedparser
 log = logging.getLogger("skywalker")
 FEED_URL = "https://www.skywalker.gr/jobs/feed"
 
+def _detect_currency(text: str) -> str:
+    """Smart currency detection for Skywalker listings."""
+    if not text:
+        return "EUR"
+    t = text.lower()
+    if "€" in t or "eur" in t or "ευρώ" in t:
+        return "EUR"
+    if "£" in t or "gbp" in t or "pound" in t:
+        return "GBP"
+    if "$" in t or "usd" in t or "dollar" in t:
+        return "USD"
+    if "₹" in t or "inr" in t or "rupee" in t:
+        return "INR"
+    return "EUR"
+
 def fetch_skywalker_jobs(keywords):
-    """Fetch Skywalker RSS feed with keyword filtering and default currency detection."""
+    """Fetch Skywalker RSS feed with keyword filtering and currency detection."""
     try:
         url = FEED_URL[0] if isinstance(FEED_URL, list) else FEED_URL
         txt = httpx.get(url, timeout=25, headers={"User-Agent": "Mozilla/5.0"}).text
@@ -33,8 +48,7 @@ def fetch_skywalker_jobs(keywords):
         if kws and not matched:
             continue
 
-        # Default currency assumption for Greek market
-        currency = "EUR"
+        currency = _detect_currency(hay)
 
         out.append({
             "title": title.strip() or "(untitled)",

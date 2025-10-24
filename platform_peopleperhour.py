@@ -6,35 +6,40 @@ log = logging.getLogger("platform_peopleperhour")
 PROXY_URL = "https://pph-proxy-service.onrender.com/api/pph"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-def _detect_currency_pph(entry: dict) -> str:
-    """Try to detect the correct currency code for PeoplePerHour listings."""
-    cur = entry.get("budget_currency")
-    if cur and isinstance(cur, str) and len(cur) == 3:
-        return cur.upper()
-
-    # fallback from symbols or text
-    txt = f"{entry.get('budget_min', '')} {entry.get('budget_max', '')}".lower()
-    if "€" in txt:
-        return "EUR"
-    if "£" in txt:
+def _detect_currency(text: str) -> str:
+    """Smart currency detection for PeoplePerHour listings."""
+    if not text:
         return "GBP"
-    if "$" in txt:
+    t = text.lower()
+    if "€" in t or "eur" in t or "euro" in t:
+        return "EUR"
+    if "£" in t or "gbp" in t or "pound" in t:
+        return "GBP"
+    if "₹" in t or "inr" in t or "rupee" in t:
+        return "INR"
+    if "aud" in t or "a$" in t or "australian" in t:
+        return "AUD"
+    if "cad" in t or "c$" in t or "canadian" in t:
+        return "CAD"
+    if "php" in t or "peso" in t:
+        return "PHP"
+    if "$" in t or "usd" in t or "dollar" in t:
         return "USD"
-    return "GBP"  # default fallback (PPH uses GBP most often)
+    return "GBP"  # default fallback
 
 def fetch_pph_jobs(keywords):
-    """Fetch PeoplePerHour jobs via proxy + fallback HTML."""
+    """Fetch PeoplePerHour jobs via proxy + fallback HTML with currency detection."""
     all_jobs = []
     for kw in [k.strip() for k in keywords if k.strip()]:
         try:
-            # 1️⃣ Try proxy
+            # Try proxy JSON API
             proxy_url = f"{PROXY_URL}?key=1211&q={kw}"
             r = httpx.get(proxy_url, timeout=25, headers=HEADERS)
             if r.status_code == 200:
                 js = r.json()
                 if isinstance(js, list) and js:
                     for j in js:
-                        cur = _detect_currency_pph(j)
+                        cur = j.get("budget_currency") or _detect_currency(str(j))
                         all_jobs.append({
                             "title": j.get("title"),
                             "description": j.get("description"),
@@ -48,7 +53,7 @@ def fetch_pph_jobs(keywords):
                         })
                     continue
 
-            # 2️⃣ HTML fallback
+            # HTML fallback
             html_url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
             resp = httpx.get(html_url, timeout=25, headers=HEADERS)
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -58,13 +63,8 @@ def fetch_pph_jobs(keywords):
                 title_el = c.select_one("h5 a, h3 a")
                 desc_el = c.select_one("p.truncated, p.description")
                 budget_el = c.select_one("span.value")
-                cur = "GBP"
-                if budget_el:
-                    val = budget_el.text
-                    if "€" in val:
-                        cur = "EUR"
-                    elif "$" in val:
-                        cur = "USD"
+                budget_text = budget_el.text if budget_el else ""
+                cur = _detect_currency(budget_text)
                 all_jobs.append({
                     "title": title_el.text.strip() if title_el else "(no title)",
                     "description": desc_el.text.strip() if desc_el else "",
