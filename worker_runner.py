@@ -38,7 +38,7 @@ def ensure_sent_table():
 
 def get_all_users():
     with db_connect() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, keywords, countries FROM tg_user")
+        cur.execute('SELECT id, keywords, countries FROM "user"')
         rows = cur.fetchall()
         return [{"id": r[0], "keywords": r[1] or "", "countries": r[2] or "ALL"} for r in rows]
 
@@ -85,12 +85,13 @@ async def send_job(tid, job, client):
 
         kb = {"inline_keyboard": [[{"text": "🌐 View Job", "url": str(url)}]]} if url else None
 
-        async with client.post(
+        r = await client.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             json={"chat_id": tid, "text": msg, "parse_mode": "HTML", "reply_markup": kb},
-        ) as r:
-            if r.status_code != 200:
-                log.warning(f"send_job error {r.status_code}: {r.text}")
+        )
+        if r.status_code != 200:
+            log.warning(f"send_job error {r.status_code}: {r.text}")
+
     except Exception as e:
         log.warning(f"send_job error: {e}")
 
