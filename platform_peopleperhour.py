@@ -1,52 +1,84 @@
-import logging, httpx, hashlib
-from datetime import datetime
-from typing import List, Dict, Any
+import httpx
+import asyncio
+import logging
+import re
+from bs4 import BeautifulSoup
+from datetime import datetime, timezone
 
 log = logging.getLogger("platform_peopleperhour")
 
-RATES = {"USD": 1.0, "EUR": 1.07, "GBP": 1.23, "AUD": 0.65, "CAD": 0.72, "INR": 0.012, "PHP": 0.017, "BRL": 0.18}
+BASE_URL = "https://www.peopleperhour.com/freelance-jobs"
+PROXY_URL = "https://pph-proxy-service.onrender.com/api/pph"
 
-def format_budget(min_budget, max_budget, currency):
-    if not min_budget:
-        return "Budget: —"
-    if currency not in RATES:
-        RATES[currency] = 1.0
-    usd_min = float(min_budget) * RATES[currency]
-    usd_max = float(max_budget) * RATES[currency] if max_budget else None
-
-    if currency == "USD":
-        if max_budget:
-            return f"Budget: ${min_budget:,.2f}–${max_budget:,.2f} USD"
-        return f"Budget: ${min_budget:,.2f} USD"
-    else:
-        if max_budget:
-            return f"Budget: {min_budget:,.2f}–{max_budget:,.2f} {currency} (~${usd_min:,.2f}–${usd_max:,.2f} USD)"
-        return f"Budget: {min_budget:,.2f} {currency} (~${usd_min:,.2f} USD)"
-
-async def fetch_peopleperhour_jobs(keyword: str) -> List[Dict[str, Any]]:
-    results = []
-    url = f"https://www.peopleperhour.com/freelance-jobs?q={keyword}"
-    proxy = f"https://pph-proxy-service.onrender.com/api/pph?key=1211&q={keyword}"
-    async with httpx.AsyncClient(timeout=25) as client:
-        try:
-            r = await client.get(proxy)
+async def fetch_peopleperhour_jobs(keyword):
+    """Fetch jobs from PeoplePerHour for a specific keyword"""
+    jobs = []
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            url = f"{PROXY_URL}?key=1211&q={keyword}"
+            r = await client.get(url)
             if r.status_code == 200:
                 data = r.json()
-                for j in data.get("jobs", []):
-                    title = j.get("title")
-                    link = j.get("url") or url
-                    desc = j.get("desc", "")
-                    budget_min = j.get("min", 0)
-                    budget_max = j.get("max", 0)
-                    currency = j.get("currency", "USD")
-                    btxt = format_budget(budget_min, budget_max, currency)
-                    job_hash = hashlib.sha1(f"{title}{desc}".encode()).hexdigest()
-                    results.append({
-                        "title": title, "url": link, "description": desc, "budget_text": btxt,
-                        "source": "PeoplePerHour", "job_hash": job_hash,
-                        "created_at": datetime.utcnow(),
-                    })
-        except Exception as e:
-            log.error(f"[PPH] fetch error: {e}")
-    log.info(f"[PPH total merged: {len(results)}]")
-    return results
+                if isinstance(data, list):
+                    for j in data:
+                        try:
+                            title = j.get("title") or ""
+                            url = j.get("url") or ""
+                            desc = j.get("description") or ""
+                            budget = j.get("budget") or ""
+                            currency = j.get("currency") or ""
+                            posted = j.get("posted") or ""
+                            ts = None
+                            if posted:
+                                try:
+                                    ts = datetime.fromisoformat(posted.replace("Z", "+00:00")).timestamp()
+                                except Exception:
+                                    ts = datetime.now(tz=timezone.utc).timestamp()
+
+                            # ✅ Καθαρό parsing τίτλου/προϋπολογισμού
+                            clean_budget = 0
+                            bmin, bmax = 0, 0
+                            if isinstance(budget, (int, float)):
+                                clean_budget = float(budget)
+                            elif isinstance(budget, str):
+                                m = re.findall(r"[\d\.]+", budget)
+                                if len(m) == 1:
+                                    clean_budget = float(m[0])
+                                elif len(m) == 2:
+                                    bmin, bmax = map(float, m)
+
+                            job = {
+                                "title": title.strip(),
+                                "description": desc.strip(),
+                                "original_url": url,
+                                "affiliate_url": url,
+                                "budget_amount": clean_budget,
+                                "budget_min": bmin,
+                                "budget_max": bmax,
+                                "budget_currency": currency.strip() or "GBP",
+                                "source": "PeoplePerHour",
+                                "timestamp": ts,
+                            }
+                            jobs.append(job)
+                        except Exception as e:
+                            log.warning(f"[PPH parse] {e}")
+            else:
+                log.warning(f"[PPH] Status {r.status_code} for '{keyword}'")
+    except Exception as e:
+        log.warning(f"[PPH error] {e}")
+    log.info(f"[PPH total merged: {len(jobs)}]")
+    return jobs
+
+# -----------------------------
+# ✅ Alias για συμβατότητα με worker_runner
+# -----------------------------
+async def fetch_pph_jobs(keywords):
+    """Wrapper για το fetch_peopleperhour_jobs (δέχεται είτε λίστα είτε string keywords)."""
+    if isinstance(keywords, list):
+        results = []
+        for kw in keywords:
+            jobs = await fetch_peopleperhour_jobs(kw)
+            results.extend(jobs)
+        return results
+    else:
+        return await fetch_peopleperhour_jobs(str(keywords))
