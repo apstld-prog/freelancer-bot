@@ -26,16 +26,42 @@ def db_connect():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def ensure_sent_table():
+    """
+    Δημιουργεί/διορθώνει τον πίνακα sent_job ώστε να υπάρχουν ΠΑΝΤΑ:
+      - user_id BIGINT
+      - job_hash TEXT
+      - sent_at TIMESTAMPTZ (UTC default)
+    και το index (user_id, job_hash).
+    """
     conn = db_connect()
     cur = conn.cursor()
+    # 1) Δημιουργία αν δεν υπάρχει
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sent_job (
-            user_id BIGINT NOT NULL,          -- telegram_id
-            job_hash TEXT NOT NULL,
-            sent_at  TIMESTAMP WITH TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+            user_id BIGINT,
+            job_hash TEXT,
+            sent_at TIMESTAMP WITH TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
         )
     """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_sent_job_user_hash ON sent_job(user_id, job_hash)")
+    # 2) Ασφαλή ALTERs για παλιά σχήματα
+    cur.execute("ALTER TABLE sent_job ADD COLUMN IF NOT EXISTS user_id BIGINT")
+    cur.execute("ALTER TABLE sent_job ADD COLUMN IF NOT EXISTS job_hash TEXT")
+    cur.execute("ALTER TABLE sent_job ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC')")
+    # 3) Index αφού σιγουρευτούμε ότι υπάρχουν οι στήλες
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM   pg_class c
+                JOIN   pg_namespace n ON n.oid = c.relnamespace
+                WHERE  c.relname = 'idx_sent_job_user_hash'
+                AND    n.nspname = 'public'
+            ) THEN
+                EXECUTE 'CREATE INDEX idx_sent_job_user_hash ON sent_job(user_id, job_hash)';
+            END IF;
+        END$$;
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -66,18 +92,16 @@ def get_users_with_keywords():
     """
     conn = db_connect()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    # Φέρνουμε ενεργούς, όχι blocked
     cur.execute(
         'SELECT id, telegram_id, COALESCE(countries, \'ALL\') AS countries, is_active, is_blocked '
         'FROM "user" WHERE is_active=TRUE'
     )
     users = cur.fetchall() or []
-    # Για κάθε user, φέρνουμε keywords από το table `keyword`
     for u in users:
         db_user_id = u["id"]
         cur.execute('SELECT keyword FROM keyword WHERE user_id=%s ORDER BY id ASC', (db_user_id,))
         rows = cur.fetchall() or []
-        kws = [ (r["keyword"] or "").strip() for r in rows if (r.get("keyword") or "").strip() ]
+        kws = [(r["keyword"] or "").strip() for r in rows if (r.get("keyword") or "").strip()]
         u["keywords_list"] = kws
         u["keywords_str"] = ", ".join(kws)
     cur.close()
@@ -116,7 +140,7 @@ def matches_country(job: dict, countries: str) -> bool:
         return True
     val = (job.get("country") or job.get("location") or "").upper()
     if not val:
-        # Αν η αγγελία δεν δίνει χώρα, δεν την κόβουμε (ή αλλάξ' το σε False αν θες αυστηρό φίλτρο)
+        # Αν η αγγελία δεν δίνει χώρα, επιτρέπεται (χαλαρό φίλτρο)
         return True
     wanted = [c.strip().upper() for c in countries.split(",") if c.strip()]
     return any(c in val for c in wanted)
