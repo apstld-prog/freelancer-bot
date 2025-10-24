@@ -73,9 +73,10 @@ async def process_user(user):
         kw_list = [k.strip() for k in keywords.split(",") if k.strip()]
         log.info(f"[Worker] Fetching for user {user_id} (kw={','.join(kw_list)})")
 
-        jobs_f = await fetch_freelancer_jobs(kw_list)
-        jobs_p = await fetch_pph_jobs(kw_list)
-        jobs_s = await fetch_skywalker_jobs(kw_list)
+        # FIX: remove await since these functions return lists, not coroutines
+        jobs_f = fetch_freelancer_jobs(kw_list)
+        jobs_p = fetch_pph_jobs(kw_list)
+        jobs_s = fetch_skywalker_jobs(kw_list)
 
         total = jobs_f + jobs_p + jobs_s
         log.info(f"[Worker] Total jobs merged: {len(total)}")
@@ -92,7 +93,7 @@ async def process_user(user):
 async def main_loop():
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT id, keywords FROM \"user\";")
+    cur.execute('SELECT id, keywords FROM "user";')
     users = cur.fetchall()
     cur.close()
     conn.close()
