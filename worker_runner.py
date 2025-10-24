@@ -14,7 +14,11 @@ log = logging.getLogger("worker")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 DB_URL = os.getenv("DATABASE_URL")
-BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+BOT_TOKEN = (
+    os.getenv("BOT_TOKEN")
+    or os.getenv("TELEGRAM_BOT_TOKEN")
+    or os.getenv("TELEGRAM_TOKEN")
+)
 
 
 def get_connection():
