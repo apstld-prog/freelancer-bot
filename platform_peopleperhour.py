@@ -8,7 +8,7 @@ log = logging.getLogger("platform_peopleperhour")
 
 BASE_URL = "https://www.peopleperhour.com/freelance-jobs"
 
-# --- Βοηθητικό για μετατροπή σε USD (προσεγγιστικά rates)
+# --- Currency conversion to USD (approx rates)
 CURRENCY_TO_USD = {
     "GBP": 1.28,
     "EUR": 1.09,
@@ -22,8 +22,12 @@ def convert_to_usd(amount, currency):
     except Exception:
         return amount
 
-async def fetch_peopleperhour_jobs(keywords):
-    """Πραγματικό scraping από το peopleperhour.com σαν αναζήτηση χρήστη."""
+
+# ============================================================
+# ✅ Officially exported function name (used by worker_runner)
+# ============================================================
+async def fetch_pph_jobs(keywords):
+    """Scrape PeoplePerHour jobs by simulating user search."""
     results = []
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
@@ -37,24 +41,23 @@ async def fetch_peopleperhour_jobs(keywords):
 
                 soup = BeautifulSoup(r.text, "html.parser")
 
-                # Κάθε job σε PeoplePerHour (2025 layout)
+                # Each job tile in PeoplePerHour
                 job_cards = soup.select("li.project-list-item, section.job, article.job-tile, div.search-result")
                 log.info(f"[PPH HTML] Found {len(job_cards)} listings for '{kw}'")
 
                 for card in job_cards:
                     try:
-                        # Τίτλος & link
+                        # Title & link
                         a_tag = card.find("a", href=re.compile(r"^/job/"))
                         title = a_tag.text.strip() if a_tag else ""
                         link = a_tag["href"] if a_tag and a_tag.get("href") else ""
                         if link and not link.startswith("http"):
                             link = f"https://www.peopleperhour.com{link}"
 
-                        # Περιγραφή
-                        desc = card.get_text(separator=" ", strip=True)
-                        desc = desc[:400]  # truncate για ασφάλεια
+                        # Description
+                        desc = card.get_text(separator=" ", strip=True)[:400]
 
-                        # Budget & νόμισμα
+                        # Budget & currency
                         budget_text = ""
                         for elem in card.find_all(text=re.compile(r"[$€£]")):
                             budget_text = elem.strip()
@@ -74,10 +77,9 @@ async def fetch_peopleperhour_jobs(keywords):
 
                         amount_usd = convert_to_usd(amount, currency)
 
-                        # Χρονική σήμανση τώρα (δεν δίνει ημερομηνία η σελίδα)
+                        # Timestamp now (site doesn’t show posted date)
                         ts = datetime.now(tz=timezone.utc).timestamp()
 
-                        # Δημιουργία αντικειμένου
                         job = {
                             "title": title,
                             "description": desc,
@@ -89,7 +91,7 @@ async def fetch_peopleperhour_jobs(keywords):
                             "timestamp": ts,
                         }
 
-                        # Match keywords
+                        # Keyword matching
                         text_to_match = (title + " " + desc).lower()
                         if any(k.lower() in text_to_match for k in keywords):
                             results.append(job)
@@ -97,9 +99,12 @@ async def fetch_peopleperhour_jobs(keywords):
                     except Exception as e:
                         log.warning(f"[PPH HTML parse error] {e}")
 
-            # ✅ Μόνο αγγελίες έως 48 ωρών (timestamp τώρα)
+            # ✅ Keep only jobs from the last 48h
             cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=48)
-            results = [j for j in results if datetime.fromtimestamp(j["timestamp"], tz=timezone.utc) >= cutoff]
+            results = [
+                j for j in results
+                if datetime.fromtimestamp(j["timestamp"], tz=timezone.utc) >= cutoff
+            ]
 
     except Exception as e:
         log.warning(f"[PPH HTML error] {e}")
