@@ -8,13 +8,35 @@ log = logging.getLogger("platform_peopleperhour")
 BASE_URL = "https://www.peopleperhour.com/freelance-jobs?q="
 
 
+def _parse_budget(text: str):
+    """Normalize a budget string like '£150' → numeric + currency."""
+    if not text:
+        return None, None
+    text = text.strip().replace(",", "")
+    cur = None
+    if text.startswith("£"):
+        cur = "GBP"
+        text = text.replace("£", "")
+    elif text.startswith("$"):
+        cur = "USD"
+        text = text.replace("$", "")
+    elif text.startswith("€"):
+        cur = "EUR"
+        text = text.replace("€", "")
+    try:
+        value = float(text.split()[0])
+    except Exception:
+        value = None
+    return value, cur
+
+
 def fetch_pph_jobs(keywords):
     results = []
     for kw in keywords:
         try:
             url = f"{BASE_URL}{kw}"
             log.info(f"[PPH HTML] Fetching {url}")
-            r = httpx.get(url, timeout=20)
+            r = httpx.get(url, timeout=25)
             r.raise_for_status()
 
             soup = BeautifulSoup(r.text, "html.parser")
@@ -34,17 +56,27 @@ def fetch_pph_jobs(keywords):
                 desc_tag = card.select_one(".section-card__content")
                 desc = desc_tag.get_text(strip=True) if desc_tag else ""
 
+                # Parse budget text
                 budget_tag = card.select_one(".value, .budget")
-                budget = budget_tag.get_text(strip=True) if budget_tag else None
+                budget_text = budget_tag.get_text(strip=True) if budget_tag else ""
+                budget_val, currency = _parse_budget(budget_text)
 
+                # Convert GBP/EUR → USD approx for display
+                usd_amount = None
+                if currency == "GBP" and budget_val:
+                    usd_amount = budget_val * 1.28
+                elif currency == "EUR" and budget_val:
+                    usd_amount = budget_val * 1.08
+
+                # Extract date if possible
                 time_tag = card.select_one("time")
                 if time_tag and time_tag.has_attr("datetime"):
                     try:
-                        created_at = datetime.fromisoformat(time_tag["datetime"]).astimezone(timezone.utc)
+                        posted_at = datetime.fromisoformat(time_tag["datetime"]).astimezone(timezone.utc)
                     except Exception:
-                        created_at = datetime.now(timezone.utc)
+                        posted_at = datetime.now(timezone.utc)
                 else:
-                    created_at = datetime.now(timezone.utc)
+                    posted_at = datetime.now(timezone.utc)
 
                 job = {
                     "title": title,
@@ -52,11 +84,16 @@ def fetch_pph_jobs(keywords):
                     "original_url": link,
                     "affiliate_url": link,
                     "source": "PeoplePerHour",
-                    "budget_amount": budget,
-                    "budget_currency": "GBP" if budget else None,
-                    "created_at": created_at,
+                    "posted_at": posted_at.isoformat(),
+                    "budget_amount": budget_val,
+                    "budget_currency": currency or "GBP",
+                    "usd_amount": usd_amount,
+                    "match": kw,
                 }
-                results.append(job)
+
+                # Keep only relevant results matching keyword
+                if kw.lower() in (title.lower() + desc.lower()):
+                    results.append(job)
 
             log.info(f"[PPH HTML] Parsed {len(results)} total listings so far")
 

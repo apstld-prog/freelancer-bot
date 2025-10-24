@@ -12,11 +12,11 @@ def fetch_skywalker_jobs(keywords):
     jobs = []
     try:
         log.info(f"[Skywalker] Fetching {BASE_URL}")
-        r = httpx.get(BASE_URL, timeout=20)
+        r = httpx.get(BASE_URL, timeout=25, follow_redirects=True)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        cards = soup.select("div.job-item") or soup.select("article.job")
+        cards = soup.select("div.job-item, article.job, div.list-item")
         if not cards:
             log.info("[Skywalker] Found 0 raw listings")
             return []
@@ -31,7 +31,16 @@ def fetch_skywalker_jobs(keywords):
             desc_tag = card.select_one(".job-description, p")
             desc = desc_tag.get_text(strip=True) if desc_tag else ""
 
-            created_at = datetime.now(timezone.utc)
+            posted_at = datetime.now(timezone.utc)
+
+            matched_kw = None
+            for kw in keywords:
+                if kw.lower() in (title.lower() + desc.lower()):
+                    matched_kw = kw
+                    break
+
+            if not matched_kw:
+                continue
 
             job = {
                 "title": title,
@@ -39,13 +48,12 @@ def fetch_skywalker_jobs(keywords):
                 "original_url": link,
                 "affiliate_url": link,
                 "source": "Skywalker",
+                "posted_at": posted_at.isoformat(),
                 "budget_amount": None,
                 "budget_currency": None,
-                "created_at": created_at,
+                "match": matched_kw,
             }
-
-            if any(kw.lower() in (title.lower() + desc.lower()) for kw in keywords):
-                jobs.append(job)
+            jobs.append(job)
 
         log.info(f"[Skywalker parsed {len(jobs)} entries after filtering]")
         return jobs
