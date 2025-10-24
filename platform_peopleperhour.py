@@ -1,113 +1,67 @@
 import httpx
-import logging
-import re
-from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
+import logging
+from datetime import datetime, timezone
 
 log = logging.getLogger("platform_peopleperhour")
 
-BASE_URL = "https://www.peopleperhour.com/freelance-jobs"
-
-# --- Currency conversion to USD (approx rates)
-CURRENCY_TO_USD = {
-    "GBP": 1.28,
-    "EUR": 1.09,
-    "USD": 1.0
-}
-
-def convert_to_usd(amount, currency):
-    try:
-        rate = CURRENCY_TO_USD.get(currency.upper(), 1.0)
-        return round(amount * rate, 2)
-    except Exception:
-        return amount
+BASE_URL = "https://www.peopleperhour.com/freelance-jobs?q="
 
 
-# ============================================================
-# ✅ Officially exported function name (used by worker_runner)
-# ============================================================
-async def fetch_pph_jobs(keywords):
-    """Scrape PeoplePerHour jobs by simulating user search."""
+def fetch_pph_jobs(keywords):
     results = []
-    try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            for kw in keywords:
-                url = f"{BASE_URL}?q={kw}"
-                log.info(f"[PPH HTML] Fetching {url}")
-                r = await client.get(url)
-                if r.status_code != 200:
-                    log.warning(f"[PPH HTML] Status {r.status_code} for {kw}")
-                    continue
+    for kw in keywords:
+        try:
+            url = f"{BASE_URL}{kw}"
+            log.info(f"[PPH HTML] Fetching {url}")
+            r = httpx.get(url, timeout=20)
+            r.raise_for_status()
 
-                soup = BeautifulSoup(r.text, "html.parser")
+            soup = BeautifulSoup(r.text, "html.parser")
+            job_cards = soup.select("section.section--card")
 
-                # Each job tile in PeoplePerHour
-                job_cards = soup.select("li.project-list-item, section.job, article.job-tile, div.search-result")
-                log.info(f"[PPH HTML] Found {len(job_cards)} listings for '{kw}'")
+            if not job_cards:
+                log.info(f"[PPH HTML] Found 0 listings for '{kw}'")
+                continue
 
-                for card in job_cards:
+            for card in job_cards:
+                title_tag = card.select_one("h2 a")
+                title = title_tag.get_text(strip=True) if title_tag else "Untitled"
+                link = title_tag["href"] if title_tag and title_tag.has_attr("href") else None
+                if link and not link.startswith("http"):
+                    link = "https://www.peopleperhour.com" + link
+
+                desc_tag = card.select_one(".section-card__content")
+                desc = desc_tag.get_text(strip=True) if desc_tag else ""
+
+                budget_tag = card.select_one(".value, .budget")
+                budget = budget_tag.get_text(strip=True) if budget_tag else None
+
+                time_tag = card.select_one("time")
+                if time_tag and time_tag.has_attr("datetime"):
                     try:
-                        # Title & link
-                        a_tag = card.find("a", href=re.compile(r"^/job/"))
-                        title = a_tag.text.strip() if a_tag else ""
-                        link = a_tag["href"] if a_tag and a_tag.get("href") else ""
-                        if link and not link.startswith("http"):
-                            link = f"https://www.peopleperhour.com{link}"
+                        created_at = datetime.fromisoformat(time_tag["datetime"]).astimezone(timezone.utc)
+                    except Exception:
+                        created_at = datetime.now(timezone.utc)
+                else:
+                    created_at = datetime.now(timezone.utc)
 
-                        # Description
-                        desc = card.get_text(separator=" ", strip=True)[:400]
+                job = {
+                    "title": title,
+                    "description": desc,
+                    "original_url": link,
+                    "affiliate_url": link,
+                    "source": "PeoplePerHour",
+                    "budget_amount": budget,
+                    "budget_currency": "GBP" if budget else None,
+                    "created_at": created_at,
+                }
+                results.append(job)
 
-                        # Budget & currency
-                        budget_text = ""
-                        for elem in card.find_all(text=re.compile(r"[$€£]")):
-                            budget_text = elem.strip()
-                            break
-                        amount = 0.0
-                        currency = "USD"
-                        if budget_text:
-                            if "£" in budget_text:
-                                currency = "GBP"
-                            elif "€" in budget_text:
-                                currency = "EUR"
-                            elif "$" in budget_text:
-                                currency = "USD"
-                            m = re.findall(r"[\d\.]+", budget_text)
-                            if m:
-                                amount = float(m[0])
+            log.info(f"[PPH HTML] Parsed {len(results)} total listings so far")
 
-                        amount_usd = convert_to_usd(amount, currency)
-
-                        # Timestamp now (site doesn’t show posted date)
-                        ts = datetime.now(tz=timezone.utc).timestamp()
-
-                        job = {
-                            "title": title,
-                            "description": desc,
-                            "original_url": link,
-                            "affiliate_url": link,
-                            "budget_amount": amount,
-                            "budget_currency": f"{currency} (~${amount_usd} USD)",
-                            "source": "PeoplePerHour",
-                            "timestamp": ts,
-                        }
-
-                        # Keyword matching
-                        text_to_match = (title + " " + desc).lower()
-                        if any(k.lower() in text_to_match for k in keywords):
-                            results.append(job)
-
-                    except Exception as e:
-                        log.warning(f"[PPH HTML parse error] {e}")
-
-            # ✅ Keep only jobs from the last 48h
-            cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=48)
-            results = [
-                j for j in results
-                if datetime.fromtimestamp(j["timestamp"], tz=timezone.utc) >= cutoff
-            ]
-
-    except Exception as e:
-        log.warning(f"[PPH HTML error] {e}")
+        except Exception as e:
+            log.error(f"[PPH HTML] Error fetching keyword '{kw}': {e}")
 
     log.info(f"[PPH total merged: {len(results)}]")
     return results
