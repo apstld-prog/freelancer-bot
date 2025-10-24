@@ -1,13 +1,19 @@
 import logging
 import asyncio
 import httpx
+import psycopg2
 from datetime import datetime, timedelta, timezone
-from db import get_connection
 from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
 from platform_skywalker import fetch_skywalker_jobs
+import os
 
 log = logging.getLogger("worker")
+
+DB_URL = os.getenv("DATABASE_URL")
+
+def get_connection():
+    return psycopg2.connect(DB_URL)
 
 
 async def send_job(bot_token, chat_id, job):
