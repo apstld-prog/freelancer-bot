@@ -1,65 +1,48 @@
-import logging, time, httpx, feedparser
+import logging, httpx, hashlib, xml.etree.ElementTree as ET
+from datetime import datetime
+from typing import List, Dict, Any
 
 log = logging.getLogger("skywalker")
-FEED_URL = "https://www.skywalker.gr/jobs/feed"
 
-def _detect_currency(text: str) -> str:
-    """Smart currency detection for Skywalker listings."""
-    if not text:
-        return "EUR"
-    t = text.lower()
-    if "€" in t or "eur" in t or "ευρώ" in t:
-        return "EUR"
-    if "£" in t or "gbp" in t or "pound" in t:
-        return "GBP"
-    if "$" in t or "usd" in t or "dollar" in t:
-        return "USD"
-    if "₹" in t or "inr" in t or "rupee" in t:
-        return "INR"
-    return "EUR"
+RATES = {"USD": 1.0, "EUR": 1.07, "GBP": 1.23, "AUD": 0.65, "CAD": 0.72, "INR": 0.012, "PHP": 0.017, "BRL": 0.18}
 
-def fetch_skywalker_jobs(keywords):
-    """Fetch Skywalker RSS feed with keyword filtering and currency detection."""
-    try:
-        url = FEED_URL[0] if isinstance(FEED_URL, list) else FEED_URL
-        txt = httpx.get(url, timeout=25, headers={"User-Agent": "Mozilla/5.0"}).text
-        if not txt:
-            log.warning("Skywalker feed empty")
+def format_budget(min_budget, max_budget, currency):
+    if not min_budget:
+        return "Budget: —"
+    if currency not in RATES:
+        RATES[currency] = 1.0
+    usd_min = float(min_budget) * RATES[currency]
+    usd_max = float(max_budget) * RATES[currency] if max_budget else None
+
+    if currency == "USD":
+        if max_budget:
+            return f"Budget: ${min_budget:,.2f}–${max_budget:,.2f} USD"
+        return f"Budget: ${min_budget:,.2f} USD"
+    else:
+        if max_budget:
+            return f"Budget: {min_budget:,.2f}–{max_budget:,.2f} {currency} (~${usd_min:,.2f}–${usd_max:,.2f} USD)"
+        return f"Budget: {min_budget:,.2f} {currency} (~${usd_min:,.2f} USD)"
+
+async def fetch_skywalker_jobs() -> List[Dict[str, Any]]:
+    url = "https://www.skywalker.gr/jobs/feed"
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url)
+        if r.status_code != 200:
+            log.warning(f"Skywalker status {r.status_code}")
             return []
-        feed = feedparser.parse(txt)
-    except Exception as e:
-        log.warning("Skywalker fetch error: %s", e)
-        return []
-
-    kws = [k.strip().lower() for k in (keywords or []) if k and k.strip()]
-    out = []
-    now = int(time.time())
-    for e in feed.entries:
-        title = e.get("title", "") or ""
-        desc = e.get("summary", "") or ""
-        link = e.get("link", "") or ""
-        hay = f"{title}\n{desc}".lower()
-
-        matched = None
-        for k in kws:
-            if k in hay:
-                matched = k
-                break
-        if kws and not matched:
-            continue
-
-        currency = _detect_currency(hay)
-
-        out.append({
-            "title": title.strip() or "(untitled)",
-            "description": desc.strip(),
-            "original_url": link,
-            "budget_min": None,
-            "budget_max": None,
-            "budget_currency": currency,
-            "source": "Skywalker",
-            "time_submitted": now,
-            "matched_keyword": matched,
-        })
-    log.info("Skywalker parsed %d entries", len(out))
-    return out
+        xml_text = r.text
+        root = ET.fromstring(xml_text)
+        items = root.findall(".//item")
+        jobs = []
+        for it in items:
+            title = it.findtext("title", "")
+            link = it.findtext("link", "")
+            desc = it.findtext("description", "")
+            job_hash = hashlib.sha1(f"{title}{desc}".encode()).hexdigest()
+            jobs.append({
+                "title": title, "url": link, "description": desc,
+                "budget_text": "—", "source": "Skywalker",
+                "job_hash": job_hash, "created_at": datetime.utcnow(),
+            })
+        log.info(f"Skywalker parsed {len(jobs)} entries")
+        return jobs
