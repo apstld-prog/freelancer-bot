@@ -76,13 +76,13 @@ async def ensure_awaitable(func_result):
 
 async def process_user(user):
     try:
-        user_id = user[0]
+        chat_id = user[0]
         keywords = user[1]
         if not keywords:
             return
 
         kw_list = [k.strip() for k in keywords.split(",") if k.strip()]
-        log.info(f"[Worker] Fetching for user {user_id} (kw={','.join(kw_list)})")
+        log.info(f"[Worker] Fetching for user {chat_id} (kw={','.join(kw_list)})")
 
         # Unified handling for async/sync functions
         jobs_f = await ensure_awaitable(fetch_freelancer_jobs(kw_list))
@@ -93,9 +93,9 @@ async def process_user(user):
         log.info(f"[Worker] Total jobs merged: {len(total)}")
 
         for job in total[:10]:
-            await send_job(BOT_TOKEN, user_id, job)
+            await send_job(BOT_TOKEN, chat_id, job)
 
-        log.info(f"[Worker] ✅ Sent {len(total[:10])} jobs → {user_id}")
+        log.info(f"[Worker] ✅ Sent {len(total[:10])} jobs → {chat_id}")
 
     except Exception as e:
         log.error(f"[Worker] Error processing user {user}: {e}")
@@ -104,7 +104,10 @@ async def process_user(user):
 async def main_loop():
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute('SELECT id, keywords FROM "user";')
+
+    # ✅ Αντικατέστησε με το πραγματικό πεδίο της βάσης σου (telegram_id ή chat_id)
+    cur.execute('SELECT telegram_id, keywords FROM "user";')
+
     users = cur.fetchall()
     cur.close()
     conn.close()
