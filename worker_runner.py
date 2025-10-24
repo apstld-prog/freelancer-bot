@@ -10,7 +10,7 @@ import psycopg2.extras
 from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
 from platform_skywalker import fetch_skywalker_jobs
-from currency_usd import convert_to_usd
+from currency_usd import usd_line  # ✅ διορθωμένο import
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
@@ -91,7 +91,7 @@ async def send_job(bot, user_id, job):
         budget_cur = job.get("budget_currency", "")
         budget_min = job.get("budget_min") or 0
         budget_max = job.get("budget_max") or 0
-        usd_text = convert_to_usd(budget_min, budget_max, budget_cur)
+        usd_text = usd_line(budget_min, budget_max, budget_cur) or ""  # ✅ σωστό όνομα συνάρτησης
 
         text = f"*{title}*\n"
         if budget_min or budget_max:
