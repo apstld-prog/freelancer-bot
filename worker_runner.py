@@ -11,6 +11,7 @@ from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
 from platform_skywalker import fetch_skywalker_jobs
 from currency_usd import usd_line
+from db_events import record_event  # ✅ Added import
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
@@ -194,9 +195,21 @@ async def process_user(bot, user_row):
 
     all_jobs = []
     try:
-        all_jobs.extend(await fetch_freelancer_jobs(kw_list))
-        all_jobs.extend(await fetch_pph_jobs(kw_list))
-        all_jobs.extend(await fetch_skywalker_jobs(kw_list))
+        jobs_f = await fetch_freelancer_jobs(kw_list)
+        if jobs_f:
+            record_event("freelancer")  # ✅ log fetch event
+        all_jobs.extend(jobs_f)
+
+        jobs_p = await fetch_pph_jobs(kw_list)
+        if jobs_p:
+            record_event("peopleperhour")  # ✅ log fetch event
+        all_jobs.extend(jobs_p)
+
+        jobs_s = await fetch_skywalker_jobs(kw_list)
+        if jobs_s:
+            record_event("skywalker")  # ✅ log fetch event
+        all_jobs.extend(jobs_s)
+
     except Exception as e:
         log.exception("Fetch error: %s", e)
 
