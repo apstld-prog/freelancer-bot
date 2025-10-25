@@ -1,96 +1,99 @@
-import httpx
-import logging
+import os
 import asyncio
+import random
+import logging
+import httpx
 from bs4 import BeautifulSoup
-from utils import convert_to_usd, format_time_ago
+from utils import convert_to_usd
+from datetime import datetime, timezone
 
-logger = logging.getLogger("peopleperhour")
+logger = logging.getLogger("platform_peopleperhour")
 
 BASE_URL = "https://www.peopleperhour.com/freelance-jobs"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.google.com/",
+}
 
-async def fetch_pph_jobs(keyword):
-    """Fetch and format job results from PeoplePerHour using HTML parsing."""
-    jobs = []
-    try:
-        search_url = f"{BASE_URL}?q={keyword}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; FreelancerBot/1.0)"
-        }
+# Rate limiting configuration from .env
+PPH_DELAY_MIN = float(os.getenv("PPH_DELAY_MIN", "3"))
+PPH_DELAY_MAX = float(os.getenv("PPH_DELAY_MAX", "7"))
+PPH_BATCH_LIMIT = int(os.getenv("PPH_BATCH_LIMIT", "2"))
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(search_url, headers=headers)
-            if response.status_code == 429:
-                logger.warning(f"[PPH] Rate-limited for keyword '{keyword}', sleeping 20s...")
-                await asyncio.sleep(20)
-                return []
-            response.raise_for_status()
-            html = response.text
-    except Exception as e:
-        logger.error(f"[PPH] Error fetching keyword '{keyword}': {e}")
-        return jobs
+# Global semaphore for concurrent keyword fetches
+pph_semaphore = asyncio.Semaphore(PPH_BATCH_LIMIT)
 
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        cards = soup.select("section.job-card")
-        if not cards:
-            logger.info(f"[PPH] No jobs found for keyword '{keyword}'")
-            return jobs
 
-        for card in cards:
-            try:
-                title_tag = card.select_one("h2 a")
-                title = title_tag.text.strip() if title_tag else "Untitled"
-                url = title_tag["href"] if title_tag and title_tag.has_attr("href") else BASE_URL
+async def fetch_pph_jobs(keyword: str):
+    """Fetch jobs from PeoplePerHour safely with delay and concurrency control."""
+    await asyncio.sleep(random.uniform(PPH_DELAY_MIN, PPH_DELAY_MAX))  # random delay before each request
+    async with pph_semaphore:
+        try:
+            async with httpx.AsyncClient(timeout=20, headers=HEADERS) as client:
+                response = await client.get(BASE_URL, params={"q": keyword})
+                if response.status_code != 200:
+                    logger.warning(f"[PPH HTML] Skipped {keyword}: {response.status_code}")
+                    return []
 
-                desc_tag = card.select_one(".job-card__description")
-                desc = desc_tag.text.strip() if desc_tag else ""
+            soup = BeautifulSoup(response.text, "html.parser")
+            cards = soup.select("section.search-listing > div")
+            jobs = []
 
-                budget_tag = card.select_one(".job-card__price")
-                budget_text = budget_tag.text.strip() if budget_tag else "N/A"
+            for card in cards[:15]:
+                title_el = card.select_one("h5 a")
+                desc_el = card.select_one("p")
+                budget_el = card.select_one(".js-budget")
+                time_el = card.select_one(".js-posted")
 
-                # --- Parse budget properly ---
-                amount, currency = 0, "USD"
-                if budget_text != "N/A":
-                    parts = budget_text.replace(",", "").split()
-                    for part in parts:
-                        if part.replace(".", "", 1).isdigit():
-                            amount = float(part)
-                        elif len(part) <= 4:
-                            currency = part.upper()
-                usd_value = convert_to_usd(amount, currency)
+                if not title_el:
+                    continue
 
-                # --- Posted info ---
-                posted_tag = card.select_one(".job-card__date")
-                posted_text = posted_tag.text.strip() if posted_tag else "N/A"
+                title = title_el.get_text(strip=True)
+                description = desc_el.get_text(strip=True) if desc_el else ""
+                budget_text = budget_el.get_text(strip=True) if budget_el else ""
+                amount = 0
+                currency = "USD"
 
-                formatted = (
-                    f"<b>🧭 Platform:</b> PeoplePerHour\n"
-                    f"<b>📄 Title:</b> {title}\n"
-                    f"<b>🔑 Keyword:</b> {keyword}\n"
-                    f"<b>💰 Budget:</b> {currency} {amount} (~${usd_value} USD)\n"
-                    f"<b>🕓 Posted:</b> {posted_text}\n\n"
-                    f"{desc}\n\n"
-                    f"<a href='{url}'>🔗 View Project</a>"
-                )
+                if "£" in budget_text:
+                    currency = "GBP"
+                    try:
+                        amount = float(budget_text.replace("£", "").split()[0])
+                    except Exception:
+                        amount = 0
+                elif "$" in budget_text:
+                    currency = "USD"
+                    try:
+                        amount = float(budget_text.replace("$", "").split()[0])
+                    except Exception:
+                        amount = 0
+                elif "€" in budget_text:
+                    currency = "EUR"
+                    try:
+                        amount = float(budget_text.replace("€", "").split()[0])
+                    except Exception:
+                        amount = 0
+
+                usd_value = await convert_to_usd(amount, currency)
+                posted = time_el.get_text(strip=True) if time_el else "recently"
 
                 jobs.append({
                     "platform": "PeoplePerHour",
                     "title": title,
-                    "description": desc,
+                    "description": description[:250],
+                    "budget_amount": f"{amount:.1f} {currency}",
+                    "budget_usd": f"~${usd_value:.1f} USD",
+                    "posted": posted,
+                    "original_url": title_el["href"],
                     "keyword": keyword,
-                    "budget_amount": amount,
-                    "budget_currency": currency,
-                    "budget_usd": usd_value,
-                    "created_at": posted_text,
-                    "url": url,
-                    "formatted": formatted,
                 })
-            except Exception as e:
-                logger.warning(f"[PPH] Skipped one job due to parse error: {e}")
 
-        logger.info(f"[PPH] Retrieved {len(jobs)} jobs for keyword '{keyword}'")
+            logger.info(f"[PPH HTML] ✅ Retrieved {len(jobs)} jobs for keyword '{keyword}'")
+            return jobs
 
-    except Exception as e:
-        logger.error(f"[PPH] Parse error: {e}")
-
-    return jobs
+        except httpx.RequestError as e:
+            logger.warning(f"[PPH HTML] Network error for '{keyword}': {e}")
+            return []
+        except Exception as e:
+            logger.warning(f"[PPH HTML] Error fetching keyword '{keyword}': {e}")
+            return []
