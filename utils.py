@@ -8,21 +8,27 @@ from telegram.error import TelegramError
 
 logger = logging.getLogger("utils")
 
+# --- Updated, accurate conversion rates ---
 CURRENCY_RATES = {
     "USD": 1.0,
-    "EUR": 1.1,
-    "GBP": 1.3,
-    "AUD": 0.65,
-    "INR": 0.012,
+    "EUR": 1.07,   # 1 EUR = 1.07 USD
+    "GBP": 1.27,   # 1 GBP = 1.27 USD
+    "AUD": 0.65,   # 1 AUD = 0.65 USD
+    "INR": 0.012,  # 1 INR = 0.012 USD
 }
 
+
 def convert_to_usd(amount, currency):
-    """Convert any known currency to USD with correct rounding."""
+    """Convert known currency to USD accurately."""
     try:
+        if not amount or amount == "N/A":
+            return 0.0
         rate = CURRENCY_RATES.get(currency.upper(), 1.0)
-        return round(amount * rate, 2)
-    except Exception:
-        return amount
+        return round(float(amount) * rate, 2)
+    except Exception as e:
+        logger.warning(f"convert_to_usd error: {e}")
+        return 0.0
+
 
 def format_time_ago(timestamp):
     """Return formatted 'x hours ago' style time."""
@@ -44,9 +50,17 @@ def format_time_ago(timestamp):
     except Exception:
         return "N/A"
 
-async def send_job_to_user(bot, user_id, job):
-    """Send formatted job post to Telegram user with full HTML layout."""
+
+async def send_job_to_user(user_id, job):
+    """
+    Send formatted job post to Telegram user with full HTML layout.
+    Note: simplified to work with worker_runner's call (no 'bot' argument).
+    """
     try:
+        from telegram import Bot
+        TOKEN = os.getenv("TELEGRAM_TOKEN")
+        bot = Bot(token=TOKEN)
+
         title = job.get("title", "Untitled")
         desc = job.get("description", "")
         platform = job.get("platform", "Unknown")
@@ -58,7 +72,7 @@ async def send_job_to_user(bot, user_id, job):
         timeago = format_time_ago(created_at)
         url = job.get("url") or job.get("original_url") or job.get("affiliate_url")
 
-        # ---- format block (identical layout for all platforms) ----
+        # ---- Unified format for all job platforms ----
         text = (
             f"<b>🧭 Platform:</b> {platform}\n"
             f"<b>📄 Title:</b> {title}\n"
@@ -69,9 +83,7 @@ async def send_job_to_user(bot, user_id, job):
             f"<a href='{url}'>🔗 View Project</a>"
         )
 
-        buttons = [
-            [InlineKeyboardButton("🔗 View Project", url=url)],
-        ]
+        buttons = [[InlineKeyboardButton("🔗 View Project", url=url)]]
         reply_markup = InlineKeyboardMarkup(buttons)
 
         await bot.send_message(
@@ -83,13 +95,16 @@ async def send_job_to_user(bot, user_id, job):
         )
 
         logger.info(f"✅ Sent job '{title}' to user {user_id}")
+        return True
 
     except TelegramError as e:
         logger.error(f"TelegramError sending job to {user_id}: {e}")
     except Exception as e:
         logger.error(f"Error sending job to {user_id}: {e}")
+    return False
 
-# ========== Other shared helpers retained ==========
+
+# ---------- Other shared helpers remain unchanged ----------
 
 async def async_get_json(url, headers=None):
     """Async GET returning parsed JSON."""
@@ -102,6 +117,7 @@ async def async_get_json(url, headers=None):
         logger.error(f"HTTPX get_json error: {e}")
         return {}
 
+
 def safe_get(d, *keys, default=None):
     """Nested dict.get with default."""
     for k in keys:
@@ -111,6 +127,7 @@ def safe_get(d, *keys, default=None):
             return default
     return d
 
+
 def log_env_check():
     """Log environment key variables once."""
     keys = [
@@ -119,6 +136,7 @@ def log_env_check():
     ]
     for key in keys:
         logger.info(f"{key}={os.getenv(key, 'undefined')}")
+
 
 async def sleep_safe(seconds):
     """Non-blocking asyncio sleep."""
