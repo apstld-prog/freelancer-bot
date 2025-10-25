@@ -17,8 +17,10 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
 
+
 def now_utc():
     return datetime.now(timezone.utc)
+
 
 # ------------------------- MODELS -------------------------
 
@@ -35,6 +37,7 @@ class User(Base):
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     keywords = relationship("Keyword", back_populates="user", cascade="all, delete-orphan")
 
+
 class Keyword(Base):
     __tablename__ = "keyword"
     id = Column(Integer, primary_key=True)
@@ -44,6 +47,7 @@ class Keyword(Base):
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     user = relationship("User", back_populates="keywords")
     __table_args__ = (UniqueConstraint("user_id", "value", name="uq_keyword_user_value"),)
+
 
 # ------------------------- SCHEMA / MIGRATIONS -------------------------
 
@@ -56,6 +60,7 @@ def _safe_exec(session, sql: str):
         session.rollback()
         log.warning("migrate skip: %s", e)
         return False
+
 
 def ensure_schema():
     Base.metadata.create_all(bind=engine)
@@ -107,10 +112,12 @@ def ensure_schema():
         END $$;
         """)
 
+
 # ------------------------- HELPERS -------------------------
 
 def get_session():
     return SessionLocal()
+
 
 def get_or_create_user_by_tid(db, telegram_id: int) -> User:
     u = db.query(User).filter(User.telegram_id == telegram_id).one_or_none()
@@ -122,9 +129,11 @@ def get_or_create_user_by_tid(db, telegram_id: int) -> User:
     db.refresh(u)
     return u
 
+
 def list_user_keywords(db, user_id: int) -> list[str]:
     rows = db.query(Keyword).filter(Keyword.user_id == user_id).order_by(Keyword.id.asc()).all()
     return [r.value for r in rows]
+
 
 def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
     if not keywords:
@@ -157,6 +166,7 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
         db.commit()
     return len(to_insert)
 
+
 # ------------------------- WORKER HELPERS -------------------------
 
 def get_user_list():
@@ -171,13 +181,22 @@ def get_user_list():
             GROUP BY u.telegram_id
         """)).fetchall()
 
-    # ✅ Ensure everything returned is (int, str) — no lists
     cleaned = []
     for r in rows:
-        tid = int(r[0]) if r[0] else 0
+        try:
+            tid = r[0]
+            # some DB adapters return nested lists or tuples
+            if isinstance(tid, (list, tuple)):
+                tid = tid[0]
+            tid = int(tid)
+        except Exception:
+            continue
+
         kws = r[1]
-        if isinstance(kws, list):
-            kws = ",".join(kws)
+        if isinstance(kws, (list, tuple)):
+            kws = ",".join(str(x) for x in kws if x)
         kws = str(kws or "")
+
         cleaned.append((tid, kws))
+
     return cleaned
