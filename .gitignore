@@ -1,50 +1,73 @@
-# OS
+# ============================
+# 🚀 FREELANCER BOT GITIGNORE
+# ============================
+
+# 🧠 Python build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+
+# ⚙️ Virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# 🧩 System files
 .DS_Store
 Thumbs.db
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.egg-info/
-.eggs/
-.build/
-dist/
-.venv/
-venv/
-env/
-
-# IDE
-.vscode/
-.idea/
-
-# Env & secrets
-.env
+# 🔒 Environment & local configs
+*.env
 .env.*
-!.env.example
+!freelancer-bot.env        # επιτρέπουμε ρητά το κύριο env αρχείο
 
-# Logs
-*.log
+# 📦 Backup files (κρατάμε μόνο το φάκελο, όχι τα περιεχόμενα)
+backups/*
+!backups/.keep              # άδειο αρχείο για να υπάρχει ο φάκελος
+
+# 🗂 Logs
 logs/
+*.log
+nohup.out
 
-# Cache
-.cache/
-.pytest_cache/
-
-# Misc
-*.sqlite3
-*.db
-*.pid
-
-# Node (σε περίπτωση που προστεθεί κάτι)
-node_modules/
-
-# Binary/office files που δεν θες στο repo
-*.xlsx
-*.xls
-*.docx
-*.pptx
-
-# Render / local
+# 🌐 Cache & temporary
+*.cache
+*.tmp
 *.bak
+*.swp
+*.lock
+
+# 💻 Node / web build folders (αν υπάρχουν)
+node_modules/
+dist/
+build/
+
+# 🧩 Render artifacts
+.render/
+*.sqlite
+*.db-journal
+
+# ============================
+# ✅ Folders to include
+# ============================
+!data/
+!feeds/
+!static/
+!workers/
+!pph-proxy-service/
+
+# ✅ Include the Render startup scripts
+!start.sh
+!diagnostic.sh
+!git_auto_push.bat
+
+# ============================
+# ✅ Include Python source files
+# ============================
+!*.py
