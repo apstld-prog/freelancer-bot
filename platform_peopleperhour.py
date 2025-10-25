@@ -2,11 +2,12 @@ import httpx
 from bs4 import BeautifulSoup
 import logging
 from datetime import datetime, timezone
+import time
+import random
 
 log = logging.getLogger("platform_peopleperhour")
 
 BASE_URL = "https://www.peopleperhour.com/freelance-jobs?q="
-
 
 def _parse_budget(text: str):
     """Normalize a budget string like '£150' → numeric + currency."""
@@ -29,14 +30,18 @@ def _parse_budget(text: str):
         value = None
     return value, cur
 
-
 def fetch_pph_jobs(keywords):
     results = []
     for kw in keywords:
         try:
             url = f"{BASE_URL}{kw}"
             log.info(f"[PPH HTML] Fetching {url}")
-            r = httpx.get(url, timeout=25)
+
+            # ✅ Delay between requests to avoid rate-limit or ban
+            sleep_time = random.uniform(1.8, 2.2)
+            time.sleep(sleep_time)
+
+            r = httpx.get(url, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
             r.raise_for_status()
 
             soup = BeautifulSoup(r.text, "html.parser")

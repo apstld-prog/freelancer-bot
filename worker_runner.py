@@ -40,6 +40,11 @@ async def process_user(user):
 
     for job in all_jobs:
         job_url = job.get("url") or job.get("original_url") or ""
+        # ✅ Fix: ensure job_url is always a string
+        if isinstance(job_url, list):
+            job_url = job_url[0] if job_url else ""
+        job_url = str(job_url).strip()
+
         if not job_url:
             continue
         if job_url in user_cache:
