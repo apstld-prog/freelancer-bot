@@ -1,57 +1,81 @@
-import os
 import httpx
-import asyncio
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot
+import os
+import logging
 
-USD_EXCHANGE_RATES = {
-    "EUR": 1.09,
-    "GBP": 1.28,
-    "AUD": 0.66,
-    "CAD": 0.73,
-    "INR": 0.012,
-    "JPY": 0.0067,
-}
+logger = logging.getLogger("utils")
 
+# ------------------------------------------------------
+# Currency conversion (non-async)
+# ------------------------------------------------------
 def convert_to_usd(amount, currency):
+    """Convert a given amount to USD using a fixed daily rate."""
+    if not amount or not currency:
+        return None
     try:
-        if not amount or not currency:
-            return None
-        currency = currency.upper()
-        if currency == "USD":
-            return amount
-        rate = USD_EXCHANGE_RATES.get(currency)
-        if not rate:
-            return None
-        return round(amount * rate, 2)
+        amount = float(amount)
     except Exception:
         return None
 
-async def send_job_to_user(bot_token, user_id, job):
-    bot = Bot(token=bot_token)
+    currency = currency.upper().strip()
+    rates = {
+        "EUR": 1.07,
+        "GBP": 1.25,
+        "AUD": 0.65,
+        "CAD": 0.73,
+        "INR": 0.012,
+        "USD": 1.0
+    }
+
+    rate = rates.get(currency, 1.0)
+    usd = round(amount * rate, 2)
+    return usd
+
+# ------------------------------------------------------
+# Telegram message sending
+# ------------------------------------------------------
+def build_message_text(job):
+    """Return formatted message text with currency and keyword info."""
+    platform = job.get("platform", "Unknown").capitalize()
     title = job.get("title", "No title")
-    desc = job.get("description", "No description")[:400]
-    url = job.get("affiliate_url") or job.get("original_url")
-    budget = job.get("budget_display", "Budget: N/A")
+    url = job.get("affiliate_url") or job.get("original_url") or "N/A"
+    budget = job.get("budget_amount")
+    currency = job.get("budget_currency", "USD").upper()
     keyword = job.get("matched_keyword", "N/A")
-    platform = job.get("platform", "").capitalize()
+
+    # Budget display
+    if budget:
+        if currency != "USD":
+            usd_value = convert_to_usd(budget, currency)
+            budget_str = f"{budget} {currency} (~${usd_value} USD)"
+        else:
+            budget_str = f"{budget} USD"
+    else:
+        budget_str = "N/A"
 
     text = (
-        f"📢 <b>{title}</b>\n"
-        f"💼 Platform: {platform}\n"
-        f"💰 {budget}\n"
-        f"🔑 Keyword: <code>{keyword}</code>\n\n"
-        f"{desc}\n\n"
-        f"<a href='{url}'>Open job link</a>"
+        f"🌐 <b>{platform}</b>\n"
+        f"💼 <b>{title}</b>\n"
+        f"💰 <b>Budget:</b> {budget_str}\n"
+        f"🔑 <b>Keyword:</b> {keyword}\n"
+        f"🔗 <a href='{url}'>View Project</a>"
     )
+    return text
 
+async def send_job_to_user(bot, user_id, job):
+    """Send formatted job to Telegram user."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    text = build_message_text(job)
+    url = job.get("affiliate_url") or job.get("original_url")
+
+    # Inline keyboard buttons
     keyboard = [
         [
-            InlineKeyboardButton("💾 Save", callback_data=f"save|{url}"),
-            InlineKeyboardButton("❌ Delete", callback_data=f"delete|{url}")
+            InlineKeyboardButton("🔗 Open", url=url),
+            InlineKeyboardButton("💾 Save", callback_data=f"save_{job.get('id', '0')}"),
         ],
         [
-            InlineKeyboardButton("🌐 Open", url=url),
-            InlineKeyboardButton("🔗 Visit", url=url)
+            InlineKeyboardButton("🗑 Delete", callback_data=f"delete_{job.get('id', '0')}")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -60,9 +84,10 @@ async def send_job_to_user(bot_token, user_id, job):
         await bot.send_message(
             chat_id=user_id,
             text=text,
-            reply_markup=reply_markup,
             parse_mode="HTML",
-            disable_web_page_preview=False
+            disable_web_page_preview=True,
+            reply_markup=reply_markup,
         )
+        logger.info(f"[Telegram] Sent job to {user_id}")
     except Exception as e:
-        print(f"[Telegram] Error sending job to {user_id}: {e}")
+        logger.error(f"[Telegram] Error sending job to {user_id}: {e}")
