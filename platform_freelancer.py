@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import httpx
 from datetime import datetime, timezone
@@ -28,25 +27,26 @@ async def fetch_freelancer_jobs(keyword: str):
 
         jobs = []
         for p in data.get("result", {}).get("projects", []):
-            title = p.get("title")
-            description = p.get("preview_description", "")
+            title = p.get("title", "N/A")
+            description = p.get("preview_description", "—")
             budget = p.get("budget", {})
-            min_b = budget.get("minimum", 0)
-            max_b = budget.get("maximum", 0)
+            min_b = budget.get("minimum") or 0
+            max_b = budget.get("maximum") or 0
             currency = budget.get("currency", {}).get("code", "USD")
 
-            usd_value = await convert_to_usd(max_b or min_b, currency)
+            usd_value = convert_to_usd(max_b or min_b, currency)
             created = datetime.fromtimestamp(p.get("submitdate", 0), tz=timezone.utc)
-            posted = f"{(datetime.now(timezone.utc) - created).seconds // 60} min ago"
+            age_minutes = int((datetime.now(timezone.utc) - created).total_seconds() / 60)
+            posted = f"{age_minutes} min ago" if age_minutes < 60 else f"{age_minutes // 60} h ago"
 
             jobs.append({
                 "platform": "Freelancer",
                 "title": title,
                 "description": description[:250],
-                "budget_amount": f"{min_b:.1f}–{max_b:.1f} {currency}",
-                "budget_usd": f"~${usd_value:.1f} USD",
+                "budget_amount": f"{min_b}–{max_b} {currency}" if max_b else f"{min_b} {currency}",
+                "budget_usd": f"~${usd_value} USD",
                 "posted": posted,
-                "original_url": f"https://www.freelancer.com/projects/{p.get('seo_url')}",
+                "original_url": f"https://www.freelancer.com/projects/{p.get('seo_url', '')}",
                 "keyword": keyword,
             })
         return jobs
