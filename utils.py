@@ -16,30 +16,35 @@ def convert_to_usd(amount, currency):
             return None
         currency = currency.upper()
         if currency == "USD":
-            return amount
+            return float(amount)
         rate = STATIC_RATES.get(currency)
         if not rate:
             return None
         return round(float(amount) * rate, 2)
     except Exception as e:
-        logger.error(f"Currency convert_to_usd error: {e}")
+        logger.warning(f"Currency convert_to_usd error: {e}")
         return None
 
 
 # ---------------------------------------------
-# 💰 Budget formatter (original + USD)
+# 💰 Budget formatter (safe conversion)
 # ---------------------------------------------
 def format_budget(amount_min, amount_max, currency):
+    """Formats original + USD safely."""
     try:
+        # Handle missing / N/A data gracefully
+        if not amount_min or str(amount_min).upper() == "N/A":
+            return f"Budget: N/A"
+
         base = f"{amount_min}–{amount_max} {currency}" if amount_max else f"{amount_min} {currency}"
-        if currency.upper() != "USD":
-            usd_val = convert_to_usd(float(amount_max or amount_min), currency)
+        if currency and currency.upper() != "USD":
+            usd_val = convert_to_usd(amount_max or amount_min, currency)
             if usd_val:
                 base += f" (~${usd_val} USD)"
         return base
     except Exception as e:
-        logger.error(f"format_budget error: {e}")
-        return f"{amount_min} {currency}"
+        logger.warning(f"format_budget error: {e}")
+        return f"Budget: N/A"
 
 
 # ---------------------------------------------
@@ -51,17 +56,18 @@ async def send_job_to_user(bot, chat_id, job):
         title = job.get("title", "Untitled")
         platform = job.get("platform", "Unknown")
         desc = job.get("description", "")[:300]
-        keyword = job.get("keyword", "N/A")
-        budget_amount = job.get("budget_amount")
+        keyword = job.get("keyword") or "(missing)"
+        budget_amount = job.get("budget_amount", "N/A")
         budget_currency = job.get("budget_currency", "USD")
-        budget_text = format_budget(budget_amount, None, budget_currency)
+        budget_max = job.get("budget_max", None)
+        budget_text = format_budget(budget_amount, budget_max, budget_currency)
         url = job.get("url") or job.get("affiliate_url") or job.get("original_url")
 
         text = (
             f"💼 <b>{title}</b>\n"
             f"🌐 <b>Platform:</b> {platform}\n"
             f"🔑 <b>Keyword:</b> {keyword}\n"
-            f"💰 <b>Budget:</b> {budget_text}\n\n"
+            f"💰 <b>{budget_text}</b>\n\n"
             f"{desc}..."
         )
 
