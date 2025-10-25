@@ -10,39 +10,36 @@ from utils import send_job_to_user
 logger = logging.getLogger("worker")
 
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
-sent_cache = {}  # avoid duplicate sends per user
+sent_cache = {}
 
-
-def to_safe_str(value):
-    """Convert any value (even nested lists) safely to a flat string."""
+def to_hashable(value):
+    """Convert any value (even nested) to a hashable string."""
     if isinstance(value, (list, tuple, set)):
-        # flatten any nested structure
         flat = []
         for v in value:
-            if isinstance(v, (list, tuple, set)):
-                flat.extend(v)
-            else:
-                flat.append(v)
-        return ", ".join(str(v) for v in flat if v)
-    if isinstance(value, dict):
-        return ", ".join(f"{k}:{v}" for k, v in value.items())
-    if value is None:
+            flat.append(to_hashable(v))
+        return ",".join(flat)
+    elif isinstance(value, dict):
+        return ",".join(f"{k}:{to_hashable(v)}" for k, v in sorted(value.items()))
+    elif value is None:
         return ""
-    return str(value).strip()
-
+    else:
+        return str(value).strip()
 
 async def process_user(user):
     user_id, keywords_raw = user
-    keywords = [kw.strip() for kw in keywords_raw.split(",") if kw.strip()]
+    keywords = [kw.strip() for kw in str(keywords_raw).split(",") if kw.strip()]
     logger.info(f"[Worker] Fetching for user {user_id} (kw={','.join(keywords)})")
 
-    # collect all jobs
-    all_jobs = []
-    tasks = [fetch_freelancer_jobs(kw) for kw in keywords] + \
-            [fetch_pph_jobs(kw) for kw in keywords] + \
-            [fetch_skywalker_jobs(kw) for kw in keywords]
+    # fetch from all platforms
+    tasks = [
+        *[fetch_freelancer_jobs(kw) for kw in keywords],
+        *[fetch_pph_jobs(kw) for kw in keywords],
+        *[fetch_skywalker_jobs(kw) for kw in keywords],
+    ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    all_jobs = []
     for res in results:
         if isinstance(res, list):
             all_jobs.extend(res)
@@ -55,27 +52,25 @@ async def process_user(user):
     sent_count = 0
 
     for job in all_jobs:
-        # always normalize url fields
-        job_url = job.get("url") or job.get("original_url") or ""
-        job_url = to_safe_str(job_url)
+        # normalize and hash URL
+        job_url = to_hashable(job.get("url") or job.get("original_url") or "")
         if not job_url:
             continue
 
-        # duplicate prevention
+        # prevent duplicates
         if job_url in user_cache:
             continue
 
         ok = await send_job_to_user(user_id, job)
         if ok:
-            # ✅ force string here before caching
-            user_cache.add(to_safe_str(job_url))
+            user_cache.add(job_url)
             sent_count += 1
 
+        # clear cache if too large
         if len(user_cache) > 300:
             user_cache.clear()
 
     logger.info(f"[Worker] ✅ Sent {sent_count} jobs → {user_id}")
-
 
 async def main_loop():
     while True:
@@ -91,7 +86,6 @@ async def main_loop():
             logger.error(f"[Worker main_loop error] {e}")
         logger.info("[Worker] Cycle complete. Sleeping...")
         await asyncio.sleep(WORKER_INTERVAL)
-
 
 if __name__ == "__main__":
     asyncio.run(main_loop())
