@@ -1,49 +1,51 @@
+import logging
 import httpx
 from utils import convert_to_usd
-from datetime import datetime
 
-API_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
+logger = logging.getLogger("Freelancer")
+
+BASE_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 
 async def fetch_freelancer_jobs(keyword):
-    jobs = []
+    """Fetch Freelancer.com projects for a keyword."""
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            params = {
-                "query": keyword,
-                "limit": 20,
-                "full_description": "true",
-                "sort_field": "time_submitted",
-                "sort_direction": "desc"
-            }
-            resp = await client.get(API_URL, params=params)
-            data = resp.json().get("result", {}).get("projects", [])
-            for item in data:
-                title = item.get("title", "")
-                desc = item.get("preview_description", "")
-                currency = item.get("currency", {}).get("code", "USD")
-                budget = item.get("budget", {})
-                budget_min = budget.get("minimum")
-                budget_max = budget.get("maximum")
-
-                if budget_min and budget_max:
-                    budget_display = f"{budget_min}–{budget_max} {currency}"
-                    if currency != "USD":
-                        usd_min = convert_to_usd(budget_min, currency)
-                        usd_max = convert_to_usd(budget_max, currency)
-                        if usd_min and usd_max:
-                            budget_display += f" (~${usd_min}–${usd_max} USD)"
+        params = {
+            "query": keyword,
+            "limit": 5,
+            "offset": 0,
+            "full_description": False,
+            "job_details": False,
+            "sort_field": "time_submitted",
+            "sort_direction": "desc"
+        }
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(BASE_URL, params=params)
+            r.raise_for_status()
+            data = r.json()
+            projects = data.get("result", {}).get("projects", [])
+            jobs = []
+            for p in projects:
+                budget = p.get("budget", {})
+                min_b, max_b = budget.get("minimum"), budget.get("maximum")
+                currency = budget.get("currency", {}).get("code", "USD")
+                if max_b or min_b:
+                    budget_str = f"{min_b or ''}-{max_b or ''}".strip("-")
                 else:
-                    budget_display = "Budget: N/A"
-
+                    budget_str = "N/A"
+                converted = convert_to_usd(max_b or min_b, currency)
                 jobs.append({
-                    "platform": "Freelancer",
-                    "title": title,
-                    "description": desc,
-                    "affiliate_url": f"https://www.freelancer.com/projects/{item.get('seo_url')}",
-                    "budget_display": budget_display,
-                    "matched_keyword": keyword,
-                    "created_at": datetime.utcnow().isoformat()
+                    "id": p["id"],
+                    "platform": "freelancer",
+                    "title": p.get("title", "Untitled"),
+                    "description": p.get("preview_description", ""),
+                    "budget_amount": budget_str,
+                    "budget_currency": currency,
+                    "budget_usd": converted,
+                    "created_at": p.get("time_submitted", ""),
+                    "affiliate_url": f"https://www.freelancer.com/projects/{p['seo_url']}",
+                    "matched_keyword": keyword
                 })
+            return jobs
     except Exception as e:
-        print(f"[Freelancer] Error fetching {keyword}: {e}")
-    return jobs
+        logger.error(f"[Freelancer] Error fetching {keyword}: {e}")
+        return []
