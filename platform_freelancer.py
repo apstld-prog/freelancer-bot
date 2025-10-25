@@ -1,85 +1,66 @@
 import httpx
 import logging
 from datetime import datetime, timezone
+from utils import convert_to_usd, format_time_ago
 
-logger = logging.getLogger("platform_freelancer")
-
+logger = logging.getLogger("freelancer")
 
 async def fetch_freelancer_jobs(keyword):
-    """Fetch latest jobs from Freelancer API by keyword with proper budget + USD conversion."""
-    url = (
-        "https://www.freelancer.com/api/projects/0.1/projects/active/"
-        "?full_description=false&job_details=false&limit=30&sort_field=time_submitted"
-        "&sort_direction=desc&query=" + keyword
-    )
+    """Fetch and format job results from Freelancer.com API."""
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
+        url = (
+            "https://www.freelancer.com/api/projects/0.1/projects/active/"
+            f"?query={keyword}&limit=30&full_description=true"
+        )
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            raw = response.json()
     except Exception as e:
-        logger.warning(f"[Freelancer error for '{keyword}']: {e}")
+        logger.error(f"[Freelancer] Error fetching for '{keyword}': {e}")
         return []
 
+    projects = raw.get("result", {}).get("projects", [])
     jobs = []
-    projects = data.get("result", {}).get("projects", [])
-    for project in projects:
+
+    for proj in projects:
         try:
-            title = project.get("title", "Untitled")
-            desc = project.get("preview_description", "")
-            currency = project.get("currency", {}).get("code", "N/A")
-            budget = project.get("budget", {})
-            min_budget = budget.get("minimum", 0)
-            max_budget = budget.get("maximum", 0)
+            title = proj.get("title", "Untitled")
+            desc = proj.get("preview_description", "") or ""
+            budget = proj.get("budget", {}) or {}
+            amount = budget.get("minimum", 0)
+            currency = (budget.get("currency", {}) or {}).get("code", "USD")
 
-            # USD conversion approximations
-            conversion_rates = {"USD": 1.0, "EUR": 1.08, "GBP": 1.28, "AUD": 0.66, "CAD": 0.73}
-            rate = conversion_rates.get(currency, 1.0)
+            usd_value = convert_to_usd(amount, currency)
 
-            if min_budget and max_budget:
-                avg_budget = (min_budget + max_budget) / 2
-            elif min_budget or max_budget:
-                avg_budget = min_budget or max_budget
-            else:
-                avg_budget = None
+            created_at = proj.get("submitdate") or proj.get("time_submitted")
+            posted = format_time_ago(created_at) if created_at else "N/A"
+            url = f"https://www.freelancer.com/projects/{proj.get('seo_url','')}/{proj.get('id','')}"
 
-            usd_amount = None
-            if avg_budget:
-                usd_amount = round(avg_budget * rate, 2)
-
-            # Build formatted budget display
-            if avg_budget:
-                if usd_amount and currency != "USD":
-                    budget_display = f"{min_budget}–{max_budget} {currency} (~${usd_amount} USD)"
-                else:
-                    budget_display = f"{min_budget}–{max_budget} {currency}"
-            else:
-                budget_display = "N/A"
-
-            # Time posted
-            posted_ts = project.get("submitdate")
-            if posted_ts:
-                dt = datetime.fromtimestamp(posted_ts, tz=timezone.utc)
-                posted = dt.strftime("%Y-%m-%d %H:%M UTC")
-            else:
-                posted = "unknown"
-
-            jobs.append(
-                {
-                    "platform": "Freelancer",
-                    "title": title,
-                    "description": desc.strip(),
-                    "budget_display": budget_display,
-                    "budget_amount": avg_budget,
-                    "budget_currency": currency,
-                    "budget_usd": usd_amount,
-                    "keyword": keyword,
-                    "url": f"https://www.freelancer.com/projects/{project.get('seo_url', '')}",
-                    "posted_at": posted,
-                }
+            formatted = (
+                f"<b>🧭 Platform:</b> Freelancer\n"
+                f"<b>📄 Title:</b> {title}\n"
+                f"<b>🔑 Keyword:</b> {keyword}\n"
+                f"<b>💰 Budget:</b> {currency} {amount} (~${usd_value} USD)\n"
+                f"<b>🕓 Posted:</b> {posted}\n\n"
+                f"{desc.strip()}\n\n"
+                f"<a href='{url}'>🔗 View Project</a>"
             )
-        except Exception as e:
-            logger.warning(f"[Freelancer parse error]: {e}")
 
-    logger.info(f"[Freelancer] total merged: {len(jobs)}")
+            jobs.append({
+                "platform": "Freelancer",
+                "title": title,
+                "description": desc,
+                "keyword": keyword,
+                "budget_amount": amount,
+                "budget_currency": currency,
+                "budget_usd": usd_value,
+                "created_at": created_at,
+                "url": url,
+                "formatted": formatted,
+            })
+        except Exception as e:
+            logger.warning(f"[Freelancer] Skipped job due to error: {e}")
+
+    logger.info(f"[Freelancer] Retrieved {len(jobs)} jobs for keyword '{keyword}'")
     return jobs
