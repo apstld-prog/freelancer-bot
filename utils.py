@@ -17,8 +17,9 @@ async def convert_to_usd(amount, currency):
         return None
     try:
         currency = currency.upper().strip()
+        amount = float(str(amount).replace(",", "").replace("–", "-").split("-")[0].strip())
         if currency == "USD":
-            return float(amount)
+            return amount
 
         async with httpx.AsyncClient(timeout=10) as client:
             url = f"https://api.exchangerate.host/convert?from={currency}&to=USD&amount={amount}"
@@ -34,23 +35,30 @@ async def convert_to_usd(amount, currency):
 # 📩 Telegram Send Job
 # ============================
 async def send_job_to_user(bot, user_id, job):
-    """Send a job posting with full inline buttons (View, Save, Delete)."""
+    """Send a job posting to a Telegram user with View, Save, Delete buttons."""
     try:
         title = job.get("title", "Untitled")
         platform = job.get("platform", "Unknown")
+
+        # --- Budget formatting ---
         budget = job.get("budget_display") or job.get("budget_amount")
         currency = job.get("budget_currency", "")
         usd_val = job.get("budget_usd")
 
-        # Budget formatting
+        try:
+            usd_val = float(usd_val) if usd_val not in (None, "") else None
+        except Exception:
+            usd_val = None
+
         if not budget and usd_val:
             budget = f"~${usd_val:.2f}"
         elif not budget:
             budget = "N/A"
         else:
             if usd_val:
-                budget = f"{budget} ({usd_val:.2f} USD)"
+                budget = f"{budget} (~${usd_val:.2f} USD)"
 
+        # --- Description and formatting ---
         url = job.get("affiliate_url") or job.get("original_url") or job.get("url")
         desc = job.get("description", "").strip()
         if len(desc) > 500:
@@ -60,6 +68,7 @@ async def send_job_to_user(bot, user_id, job):
         keyword = job.get("matched_keyword", "")
         keyword_line = f"🔎 Keyword: {keyword}\n" if keyword else ""
 
+        # --- Message body ---
         message = (
             f"💼 <b>{title}</b>\n"
             f"🌍 Platform: {platform}\n"
@@ -69,12 +78,12 @@ async def send_job_to_user(bot, user_id, job):
             f"{desc}"
         )
 
-        # Safe callbacks
+        # --- Safe callback hashes ---
         hash_key = hashlib.md5(str(url).encode()).hexdigest()[:10]
         callback_save = f"save_{hash_key}"
         callback_delete = f"delete_{hash_key}"
 
-        # Buttons layout
+        # --- Inline buttons ---
         buttons = [
             [InlineKeyboardButton("🌐 View Job", url=url or "https://freelancer.com")],
             [
@@ -84,7 +93,7 @@ async def send_job_to_user(bot, user_id, job):
         ]
         reply_markup = InlineKeyboardMarkup(buttons)
 
-        # Send message
+        # --- Send message ---
         await bot.send_message(
             chat_id=user_id,
             text=message,
