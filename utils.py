@@ -16,7 +16,6 @@ CACHED_RATES = {"USD": 1.0}
 LAST_RATE_UPDATE = None
 RATE_TTL = timedelta(hours=12)  # refresh every 12 hours
 
-# --- Fallback static rates in case API is unreachable ---
 FALLBACK_RATES = {
     "USD": 1.0,
     "EUR": 1.07,
@@ -24,7 +23,6 @@ FALLBACK_RATES = {
     "AUD": 0.65,
     "INR": 0.012,
 }
-
 
 # ======================================================================
 # 📊 CURRENCY CONVERSION HELPERS
@@ -46,7 +44,7 @@ async def fetch_live_rates():
             if "rates" in data:
                 CACHED_RATES = data["rates"]
                 LAST_RATE_UPDATE = now
-                logger.info(f"[Currency] Live rates updated ({len(CACHED_RATES)} currencies)")
+                logger.info(f"[Currency] ✅ Live rates updated ({len(CACHED_RATES)} currencies)")
                 return CACHED_RATES
     except Exception as e:
         logger.warning(f"[Currency] Could not update live rates, using fallback: {e}")
@@ -63,7 +61,7 @@ async def convert_to_usd(amount, currency):
         rates = await fetch_live_rates()
         rate = rates.get(currency)
         if rate:
-            usd_value = round(float(amount) / rate, 2)  # because rates are BASE=USD
+            usd_value = round(float(amount) / rate, 2)
         else:
             fallback = FALLBACK_RATES.get(currency, 1.0)
             usd_value = round(float(amount) * fallback, 2)
@@ -104,13 +102,14 @@ def format_time_ago(timestamp):
 # ======================================================================
 
 async def send_job_to_user(user_id, job):
-    """
-    Send formatted job post to Telegram user with full HTML layout.
-    Compatible with worker_runner async calls.
-    """
+    """Send formatted job post to Telegram user."""
     try:
         from telegram import Bot
         TOKEN = os.getenv("TELEGRAM_TOKEN")
+        if not TOKEN:
+            logger.error("[Telegram] ❌ TELEGRAM_TOKEN missing in environment!")
+            return False
+
         bot = Bot(token=TOKEN)
 
         title = job.get("title", "Untitled")
@@ -119,12 +118,12 @@ async def send_job_to_user(user_id, job):
         keyword = job.get("keyword", "")
         amount = job.get("budget_amount", 0)
         currency = job.get("budget_currency", "USD")
+
         usd_value = await convert_to_usd(amount, currency)
         created_at = job.get("created_at", "")
         timeago = format_time_ago(created_at)
         url = job.get("url") or job.get("original_url") or job.get("affiliate_url")
 
-        # ---- Unified layout for all job platforms ----
         text = (
             f"<b>🧭 Platform:</b> {platform}\n"
             f"<b>📄 Title:</b> {title}\n"
@@ -146,13 +145,13 @@ async def send_job_to_user(user_id, job):
             disable_web_page_preview=True,
         )
 
-        logger.info(f"[Worker] ✅ Sent job '{title}' to user {user_id}")
+        logger.info(f"[Telegram] ✅ Sent job '{title}' to user {user_id}")
         return True
 
     except TelegramError as e:
         logger.error(f"[Telegram] Error sending job to {user_id}: {e}")
     except Exception as e:
-        logger.error(f"[Worker] send_job_to_user({user_id}) failed: {e}")
+        logger.error(f"[Telegram] send_job_to_user({user_id}) failed: {e}")
     return False
 
 
