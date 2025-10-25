@@ -170,3 +170,18 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
     if to_insert:
         db.commit()
     return len(to_insert)
+
+# ------------------------- WORKER HELPERS -------------------------
+
+def get_user_list():
+    """Return list of tuples (telegram_id, comma_separated_keywords) for active users."""
+    from sqlalchemy import text
+    with get_session() as s:
+        rows = s.execute(text("""
+            SELECT u.telegram_id, COALESCE(STRING_AGG(k.value, ','), '') AS keywords
+            FROM "user" u
+            LEFT JOIN keyword k ON u.id = k.user_id
+            WHERE u.is_active = TRUE AND u.is_blocked = FALSE
+            GROUP BY u.telegram_id
+        """)).fetchall()
+    return rows
