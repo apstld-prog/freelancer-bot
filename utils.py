@@ -1,13 +1,40 @@
 import logging
 import hashlib
 import asyncio
+import httpx
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 logger = logging.getLogger("utils")
 
 
+# ============================
+# 💱 Currency Conversion
+# ============================
+async def convert_to_usd(amount, currency):
+    """Convert given amount and currency to USD using exchangerate.host."""
+    if not amount or not currency:
+        return None
+    try:
+        currency = currency.upper().strip()
+        if currency == "USD":
+            return float(amount)
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            url = f"https://api.exchangerate.host/convert?from={currency}&to=USD&amount={amount}"
+            r = await client.get(url)
+            data = r.json()
+            return float(data.get("result", 0))
+    except Exception as e:
+        logger.error(f"[Currency] convert_to_usd error: {e}")
+        return None
+
+
+# ============================
+# 📩 Telegram Send Job
+# ============================
 async def send_job_to_user(bot, user_id, job):
-    """Send a job posting to a Telegram user with full inline buttons (View, Save, Delete)."""
+    """Send a job posting with full inline buttons (View, Save, Delete)."""
     try:
         title = job.get("title", "Untitled")
         platform = job.get("platform", "Unknown")
@@ -15,6 +42,7 @@ async def send_job_to_user(bot, user_id, job):
         currency = job.get("budget_currency", "")
         usd_val = job.get("budget_usd")
 
+        # Budget formatting
         if not budget and usd_val:
             budget = f"~${usd_val:.2f}"
         elif not budget:
@@ -32,7 +60,6 @@ async def send_job_to_user(bot, user_id, job):
         keyword = job.get("matched_keyword", "")
         keyword_line = f"🔎 Keyword: {keyword}\n" if keyword else ""
 
-        # Main message text
         message = (
             f"💼 <b>{title}</b>\n"
             f"🌍 Platform: {platform}\n"
@@ -42,16 +69,14 @@ async def send_job_to_user(bot, user_id, job):
             f"{desc}"
         )
 
-        # Safe callback data
+        # Safe callbacks
         hash_key = hashlib.md5(str(url).encode()).hexdigest()[:10]
         callback_save = f"save_{hash_key}"
         callback_delete = f"delete_{hash_key}"
 
-        # Inline buttons layout
+        # Buttons layout
         buttons = [
-            [
-                InlineKeyboardButton("🌐 View Job", url=url or "https://freelancer.com"),
-            ],
+            [InlineKeyboardButton("🌐 View Job", url=url or "https://freelancer.com")],
             [
                 InlineKeyboardButton("💾 Save", callback_data=callback_save),
                 InlineKeyboardButton("❌ Delete", callback_data=callback_delete),
@@ -74,6 +99,9 @@ async def send_job_to_user(bot, user_id, job):
         logger.error(f"[Telegram] Error sending job to {user_id}: {e}")
 
 
+# ============================
+# 🚀 Bulk Job Sender
+# ============================
 async def send_chunked_jobs(bot, user_id, jobs, delay=2):
     """Send multiple jobs sequentially to avoid Telegram flood limits."""
     for job in jobs:
