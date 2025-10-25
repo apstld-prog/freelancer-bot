@@ -9,7 +9,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 log = logging.getLogger("db")
 
-DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgres://user:pass@host/db
+DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL env var is required")
 
@@ -77,38 +77,13 @@ def ensure_schema():
 
             IF EXISTS (
                 SELECT 1 FROM information_schema.columns
-                WHERE table_name='keyword' AND column_name='keyword'
+                WHERE table_name='keyword' AND column_name IN ('keyword','name','term')
             ) THEN
                 UPDATE keyword SET value = COALESCE(value, keyword) WHERE value IS NULL OR value='';
-            END IF;
-            IF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name='keyword' AND column_name='name'
-            ) THEN
-                UPDATE keyword SET value = COALESCE(value, name) WHERE value IS NULL OR value='';
-            END IF;
-            IF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name='keyword' AND column_name='term'
-            ) THEN
-                UPDATE keyword SET value = COALESCE(value, term) WHERE value IS NULL OR value='';
             END IF;
 
             UPDATE keyword SET value = '' WHERE value IS NULL;
             ALTER TABLE keyword ALTER COLUMN value SET NOT NULL;
-        END $$;
-        """)
-
-        _safe_exec(s, """
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_indexes
-                WHERE schemaname = 'public' AND indexname = 'uq_keyword_user_value'
-            ) THEN
-                CREATE UNIQUE INDEX uq_keyword_user_value
-                    ON keyword(user_id, value);
-            END IF;
         END $$;
         """)
 
@@ -170,7 +145,7 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
 # ------------------------- WORKER HELPERS -------------------------
 
 def get_user_list():
-    """Return list of tuples (telegram_id, comma_separated_keywords) for active users."""
+    """Return list of tuples (int telegram_id, str keywords)."""
     from sqlalchemy import text
     with get_session() as s:
         rows = s.execute(text("""
@@ -183,15 +158,16 @@ def get_user_list():
 
     cleaned = []
     for r in rows:
+        # Normalize Telegram ID
+        raw_id = r[0]
+        if isinstance(raw_id, (list, tuple)):
+            raw_id = raw_id[0] if raw_id else 0
         try:
-            tid = r[0]
-            # some DB adapters return nested lists or tuples
-            if isinstance(tid, (list, tuple)):
-                tid = tid[0]
-            tid = int(tid)
+            tid = int(raw_id)
         except Exception:
             continue
 
+        # Normalize keywords
         kws = r[1]
         if isinstance(kws, (list, tuple)):
             kws = ",".join(str(x) for x in kws if x)
@@ -199,4 +175,15 @@ def get_user_list():
 
         cleaned.append((tid, kws))
 
-    return cleaned
+    # Force-clean: ensure every element is truly tuple(int,str)
+    final = []
+    for u in cleaned:
+        tid, kws = u
+        if isinstance(tid, list):
+            tid = tid[0] if tid else 0
+        try:
+            tid = int(tid)
+        except Exception:
+            continue
+        final.append((tid, str(kws)))
+    return final
