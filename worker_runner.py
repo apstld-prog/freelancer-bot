@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import inspect
 from db import get_user_list
 from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
@@ -11,20 +12,29 @@ logger = logging.getLogger("worker")
 
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
 
-# Avoid duplicates
 sent_cache = {}
 
 
 def make_job_key(job):
-    """Generate a unique key for caching jobs."""
     url = job.get("url") or job.get("original_url") or job.get("affiliate_url")
     if url:
         return str(url).strip()
     return f"{job.get('platform','')}-{job.get('title','')}-{job.get('posted_at','')}"
 
 
+async def run_fetch(func, kw):
+    """Run fetch whether it's async or sync."""
+    try:
+        if inspect.iscoroutinefunction(func):
+            return await func(kw)
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, func, kw)
+    except Exception as e:
+        logger.warning(f"[Worker] Fetch error in {func.__name__}: {e}")
+        return []
+
+
 async def process_user(user_id: int, keywords: str):
-    """Process jobs for one user safely."""
     try:
         keywords_list = [kw.strip() for kw in str(keywords).split(",") if kw.strip()]
         if not keywords_list:
@@ -33,16 +43,11 @@ async def process_user(user_id: int, keywords: str):
 
         logger.info(f"[Worker] Fetching jobs for {user_id}: {','.join(keywords_list)}")
 
-        async def run_fetch_sync(func, kw):
-            """Run sync fetch function in a thread."""
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, func, kw)
-
         tasks = []
         for kw in keywords_list:
-            tasks.append(run_fetch_sync(fetch_freelancer_jobs, kw))
-            tasks.append(run_fetch_sync(fetch_pph_jobs, kw))
-            tasks.append(run_fetch_sync(fetch_skywalker_jobs, kw))
+            tasks.append(run_fetch(fetch_freelancer_jobs, kw))
+            tasks.append(run_fetch(fetch_pph_jobs, kw))
+            tasks.append(run_fetch(fetch_skywalker_jobs, kw))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -76,7 +81,6 @@ async def process_user(user_id: int, keywords: str):
 
 
 async def main_loop():
-    """Main infinite loop."""
     while True:
         try:
             rows = get_user_list()
