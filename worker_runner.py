@@ -10,46 +10,38 @@ from utils import send_job_to_user
 logger = logging.getLogger("worker")
 
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
-
-# Cache to prevent duplicate job sends (per user)
-sent_cache = {}
+sent_cache = {}  # avoid duplicate sends per user
 
 
-def normalize_url_field(url_field):
-    """Ensure job URLs are always safe strings."""
-    if isinstance(url_field, (list, tuple, set)):
-        if not url_field:
-            return ""
-        # if list of lists, flatten once
-        first = url_field[0]
-        if isinstance(first, (list, tuple, set)):
-            first = list(first)[0] if first else ""
-        return str(first).strip()
-    if url_field is None:
+def to_safe_str(value):
+    """Convert any value (even nested lists) safely to a flat string."""
+    if isinstance(value, (list, tuple, set)):
+        # flatten any nested structure
+        flat = []
+        for v in value:
+            if isinstance(v, (list, tuple, set)):
+                flat.extend(v)
+            else:
+                flat.append(v)
+        return ", ".join(str(v) for v in flat if v)
+    if isinstance(value, dict):
+        return ", ".join(f"{k}:{v}" for k, v in value.items())
+    if value is None:
         return ""
-    return str(url_field).strip()
-
-
-def normalize_job_urls(job: dict):
-    """Normalize all URL-related fields inside a job dict."""
-    for key in ["url", "original_url", "affiliate_url"]:
-        if key in job:
-            job[key] = normalize_url_field(job[key])
-    return job
+    return str(value).strip()
 
 
 async def process_user(user):
-    """Fetch and send jobs for a single user, filtering out duplicates."""
     user_id, keywords_raw = user
     keywords = [kw.strip() for kw in keywords_raw.split(",") if kw.strip()]
     logger.info(f"[Worker] Fetching for user {user_id} (kw={','.join(keywords)})")
 
+    # collect all jobs
     all_jobs = []
-    freelancer_tasks = [fetch_freelancer_jobs(kw) for kw in keywords]
-    pph_tasks = [fetch_pph_jobs(kw) for kw in keywords]
-    skywalker_tasks = [fetch_skywalker_jobs(kw) for kw in keywords]
-
-    results = await asyncio.gather(*(freelancer_tasks + pph_tasks + skywalker_tasks), return_exceptions=True)
+    tasks = [fetch_freelancer_jobs(kw) for kw in keywords] + \
+            [fetch_pph_jobs(kw) for kw in keywords] + \
+            [fetch_skywalker_jobs(kw) for kw in keywords]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for res in results:
         if isinstance(res, list):
@@ -63,23 +55,22 @@ async def process_user(user):
     sent_count = 0
 
     for job in all_jobs:
-        # ✅ Clean up any list/tuple URLs
-        job = normalize_job_urls(job)
-
+        # always normalize url fields
         job_url = job.get("url") or job.get("original_url") or ""
-        job_url = str(job_url).strip()
-
+        job_url = to_safe_str(job_url)
         if not job_url:
             continue
+
+        # duplicate prevention
         if job_url in user_cache:
-            continue  # skip duplicates
+            continue
 
         ok = await send_job_to_user(user_id, job)
         if ok:
-            user_cache.add(job_url)
+            # ✅ force string here before caching
+            user_cache.add(to_safe_str(job_url))
             sent_count += 1
 
-        # limit cache size
         if len(user_cache) > 300:
             user_cache.clear()
 
@@ -87,7 +78,6 @@ async def process_user(user):
 
 
 async def main_loop():
-    """Main worker loop."""
     while True:
         try:
             users = get_user_list()
