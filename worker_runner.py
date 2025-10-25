@@ -10,33 +10,88 @@ from utils import send_job_to_user
 logger = logging.getLogger("worker")
 
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
+
+# Cache to prevent duplicate job sends (per user_id)
+# Structure: { int(user_id): set([job_key, ...]) }
 sent_cache = {}
 
+
 def to_hashable(value):
-    """Convert any value (even nested) to a hashable string."""
+    """
+    Convert any value (even nested list/tuple/set/dict) to a stable hashable string.
+    This prevents 'unhashable type: list' in set/dict operations.
+    """
     if isinstance(value, (list, tuple, set)):
         flat = []
         for v in value:
             flat.append(to_hashable(v))
-        return ",".join(flat)
-    elif isinstance(value, dict):
-        return ",".join(f"{k}:{to_hashable(v)}" for k, v in sorted(value.items()))
-    elif value is None:
+        return "|".join(flat)
+    if isinstance(value, dict):
+        # sort keys for stability
+        parts = []
+        for k in sorted(value.keys()):
+            parts.append(f"{k}={to_hashable(value[k])}")
+        return "&".join(parts)
+    if value is None:
         return ""
-    else:
-        return str(value).strip()
+    return str(value).strip()
 
-async def process_user(user):
-    user_id, keywords_raw = user
+
+def normalize_user(raw_user):
+    """Ensure (user_id:int, keywords:str). Drops malformed rows safely."""
+    try:
+        user_id, keywords_raw = raw_user
+    except Exception:
+        return None
+
+    # normalize user_id
+    if isinstance(user_id, (list, tuple)):
+        user_id = user_id[0] if user_id else 0
+    try:
+        user_id = int(user_id)
+    except Exception:
+        return None
+
+    # normalize keywords
+    keywords_raw = to_hashable(keywords_raw)
+    return (user_id, keywords_raw)
+
+
+def make_job_key(job: dict) -> str:
+    """
+    Build a stable job key for duplicate prevention.
+    Prefer URL fields; fallback to (platform/title/posted_at).
+    Always returns a plain string (hashable).
+    """
+    url = job.get("url") or job.get("original_url") or job.get("affiliate_url") or ""
+    url_key = to_hashable(url)
+    if url_key:
+        return url_key
+
+    # Fallback if URL missing/empty
+    platform = job.get("platform") or job.get("source") or "job"
+    title = job.get("title") or ""
+    posted = job.get("posted_at") or ""
+    return to_hashable([platform, title, posted])
+
+
+async def process_user(raw_user):
+    normalized = normalize_user(raw_user)
+    if not normalized:
+        logger.warning(f"[Worker] Skipping malformed user row: {raw_user}")
+        return
+
+    user_id, keywords_raw = normalized
     keywords = [kw.strip() for kw in str(keywords_raw).split(",") if kw.strip()]
+
     logger.info(f"[Worker] Fetching for user {user_id} (kw={','.join(keywords)})")
 
-    # fetch from all platforms
-    tasks = [
-        *[fetch_freelancer_jobs(kw) for kw in keywords],
-        *[fetch_pph_jobs(kw) for kw in keywords],
-        *[fetch_skywalker_jobs(kw) for kw in keywords],
-    ]
+    # Fetch from all platforms concurrently
+    tasks = (
+        [fetch_freelancer_jobs(kw) for kw in keywords] +
+        [fetch_pph_jobs(kw) for kw in keywords] +
+        [fetch_skywalker_jobs(kw) for kw in keywords]
+    )
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     all_jobs = []
@@ -52,40 +107,50 @@ async def process_user(user):
     sent_count = 0
 
     for job in all_jobs:
-        # normalize and hash URL
-        job_url = to_hashable(job.get("url") or job.get("original_url") or "")
-        if not job_url:
+        # Build stable key (handles any nested/list/dict structures)
+        job_key = make_job_key(job)
+        if not job_key:
             continue
 
-        # prevent duplicates
-        if job_url in user_cache:
+        # Skip duplicates for this user
+        if job_key in user_cache:
             continue
 
         ok = await send_job_to_user(user_id, job)
         if ok:
-            user_cache.add(job_url)
+            user_cache.add(job_key)
             sent_count += 1
 
-        # clear cache if too large
+        # keep cache bounded
         if len(user_cache) > 300:
             user_cache.clear()
 
     logger.info(f"[Worker] ✅ Sent {sent_count} jobs → {user_id}")
 
+
 async def main_loop():
     while True:
         try:
-            users = get_user_list()
+            rows = get_user_list()
+            users = []
+            for r in rows:
+                u = normalize_user(r)
+                if u:
+                    users.append(u)
+
             logger.info(f"[Worker] Total users: {len(users)}")
-            for user in users:
+
+            for u in users:
                 try:
-                    await process_user(user)
+                    await process_user(u)
                 except Exception as e:
-                    logger.error(f"[Worker] Error processing user {user}: {e}")
+                    logger.error(f"[Worker] Error processing user {u}: {e}")
         except Exception as e:
             logger.error(f"[Worker main_loop error] {e}")
+
         logger.info("[Worker] Cycle complete. Sleeping...")
         await asyncio.sleep(WORKER_INTERVAL)
+
 
 if __name__ == "__main__":
     asyncio.run(main_loop())
