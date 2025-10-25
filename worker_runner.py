@@ -11,16 +11,10 @@ logger = logging.getLogger("worker")
 
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
 
-# Cache to prevent duplicate job sends (per user_id)
-# Structure: { int(user_id): set([job_key, ...]) }
 sent_cache = {}
 
 
 def to_hashable(value):
-    """
-    Convert any value (even nested list/tuple/set/dict) to a stable hashable string.
-    This prevents 'unhashable type: list' in set/dict operations.
-    """
     if isinstance(value, (list, tuple, set)):
         flat = []
         for v in value:
@@ -37,13 +31,11 @@ def to_hashable(value):
 
 
 def normalize_user(raw_user):
-    """Ensure (user_id:int, keywords:str). Drops malformed rows safely."""
     try:
         user_id, keywords_raw = raw_user
     except Exception:
         return None
 
-    # Normalize user_id
     if isinstance(user_id, (list, tuple)):
         user_id = user_id[0] if user_id else 0
     try:
@@ -51,20 +43,15 @@ def normalize_user(raw_user):
     except Exception:
         return None
 
-    # Normalize keywords -> always string
     if isinstance(keywords_raw, list):
         keywords_raw = ",".join(map(str, keywords_raw))
     else:
         keywords_raw = str(keywords_raw)
+
     return (user_id, keywords_raw)
 
 
 def make_job_key(job: dict) -> str:
-    """
-    Build a stable job key for duplicate prevention.
-    Prefer URL fields; fallback to (platform/title/posted_at).
-    Always returns a plain string (hashable).
-    """
     url = job.get("url") or job.get("original_url") or job.get("affiliate_url") or ""
     url_key = to_hashable(url)
     if url_key:
@@ -86,7 +73,6 @@ async def process_user(raw_user):
     keywords = [kw.strip() for kw in str(keywords_str).split(",") if kw.strip()]
     logger.info(f"[Worker] Fetching for user {user_id} (kw={','.join(keywords)})")
 
-    # Fetch from all platforms concurrently
     tasks = (
         [fetch_freelancer_jobs(kw) for kw in keywords] +
         [fetch_pph_jobs(kw) for kw in keywords] +
@@ -110,17 +96,12 @@ async def process_user(raw_user):
         job_key = make_job_key(job)
         if not job_key:
             continue
-
-        # Skip duplicates for this user
         if job_key in user_cache:
             continue
-
         ok = await send_job_to_user(user_id, job)
         if ok:
             user_cache.add(job_key)
             sent_count += 1
-
-        # keep cache bounded per user
         if len(user_cache) > 300:
             user_cache.clear()
 
@@ -143,7 +124,9 @@ async def main_loop():
                 try:
                     await process_user(u)
                 except Exception as e:
-                    logger.error(f"[Worker] Error processing user {u}: {e}")
+                    # 👇 Fix: force string conversion before logging
+                    u_str = str(u)
+                    logger.error(f"[Worker] Error processing user {u_str}: {e}")
         except Exception as e:
             logger.error(f"[Worker main_loop error] {e}")
 
