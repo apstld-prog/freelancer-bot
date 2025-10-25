@@ -2,33 +2,81 @@ import os
 import httpx
 import logging
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 logger = logging.getLogger("utils")
 
-# --- Updated, accurate conversion rates ---
-CURRENCY_RATES = {
+# ======================================================================
+# GLOBALS
+# ======================================================================
+
+CACHED_RATES = {"USD": 1.0}
+LAST_RATE_UPDATE = None
+RATE_TTL = timedelta(hours=12)  # refresh every 12 hours
+
+# --- Fallback static rates in case API is unreachable ---
+FALLBACK_RATES = {
     "USD": 1.0,
-    "EUR": 1.07,   # 1 EUR = 1.07 USD
-    "GBP": 1.27,   # 1 GBP = 1.27 USD
-    "AUD": 0.65,   # 1 AUD = 0.65 USD
-    "INR": 0.012,  # 1 INR = 0.012 USD
+    "EUR": 1.07,
+    "GBP": 1.27,
+    "AUD": 0.65,
+    "INR": 0.012,
 }
 
 
-def convert_to_usd(amount, currency):
-    """Convert known currency to USD accurately."""
+# ======================================================================
+# 📊 CURRENCY CONVERSION HELPERS
+# ======================================================================
+
+async def fetch_live_rates():
+    """Fetch live rates from exchangerate.host API with caching."""
+    global CACHED_RATES, LAST_RATE_UPDATE
+    try:
+        now = datetime.utcnow()
+        if LAST_RATE_UPDATE and (now - LAST_RATE_UPDATE) < RATE_TTL:
+            return CACHED_RATES  # still fresh
+
+        url = "https://api.exchangerate.host/latest?base=USD"
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+            if "rates" in data:
+                CACHED_RATES = data["rates"]
+                LAST_RATE_UPDATE = now
+                logger.info(f"[Currency] Live rates updated ({len(CACHED_RATES)} currencies)")
+                return CACHED_RATES
+    except Exception as e:
+        logger.warning(f"[Currency] Could not update live rates, using fallback: {e}")
+    return FALLBACK_RATES
+
+
+async def convert_to_usd(amount, currency):
+    """Convert any currency to USD using live or fallback rates."""
     try:
         if not amount or amount == "N/A":
             return 0.0
-        rate = CURRENCY_RATES.get(currency.upper(), 1.0)
-        return round(float(amount) * rate, 2)
+
+        currency = currency.upper().strip()
+        rates = await fetch_live_rates()
+        rate = rates.get(currency)
+        if rate:
+            usd_value = round(float(amount) / rate, 2)  # because rates are BASE=USD
+        else:
+            fallback = FALLBACK_RATES.get(currency, 1.0)
+            usd_value = round(float(amount) * fallback, 2)
+
+        return usd_value
     except Exception as e:
-        logger.warning(f"convert_to_usd error: {e}")
+        logger.warning(f"[Currency] convert_to_usd error: {e}")
         return 0.0
 
+
+# ======================================================================
+# 🕓 TIME & TEXT UTILITIES
+# ======================================================================
 
 def format_time_ago(timestamp):
     """Return formatted 'x hours ago' style time."""
@@ -51,10 +99,14 @@ def format_time_ago(timestamp):
         return "N/A"
 
 
+# ======================================================================
+# 📬 TELEGRAM MESSAGE HANDLER
+# ======================================================================
+
 async def send_job_to_user(user_id, job):
     """
     Send formatted job post to Telegram user with full HTML layout.
-    Note: simplified to work with worker_runner's call (no 'bot' argument).
+    Compatible with worker_runner async calls.
     """
     try:
         from telegram import Bot
@@ -67,12 +119,12 @@ async def send_job_to_user(user_id, job):
         keyword = job.get("keyword", "")
         amount = job.get("budget_amount", 0)
         currency = job.get("budget_currency", "USD")
-        usd_value = convert_to_usd(amount, currency)
+        usd_value = await convert_to_usd(amount, currency)
         created_at = job.get("created_at", "")
         timeago = format_time_ago(created_at)
         url = job.get("url") or job.get("original_url") or job.get("affiliate_url")
 
-        # ---- Unified format for all job platforms ----
+        # ---- Unified layout for all job platforms ----
         text = (
             f"<b>🧭 Platform:</b> {platform}\n"
             f"<b>📄 Title:</b> {title}\n"
@@ -94,17 +146,19 @@ async def send_job_to_user(user_id, job):
             disable_web_page_preview=True,
         )
 
-        logger.info(f"✅ Sent job '{title}' to user {user_id}")
+        logger.info(f"[Worker] ✅ Sent job '{title}' to user {user_id}")
         return True
 
     except TelegramError as e:
-        logger.error(f"TelegramError sending job to {user_id}: {e}")
+        logger.error(f"[Telegram] Error sending job to {user_id}: {e}")
     except Exception as e:
-        logger.error(f"Error sending job to {user_id}: {e}")
+        logger.error(f"[Worker] send_job_to_user({user_id}) failed: {e}")
     return False
 
 
-# ---------- Other shared helpers remain unchanged ----------
+# ======================================================================
+# 🌐 ASYNC HTTP & GENERIC HELPERS
+# ======================================================================
 
 async def async_get_json(url, headers=None):
     """Async GET returning parsed JSON."""
@@ -130,10 +184,7 @@ def safe_get(d, *keys, default=None):
 
 def log_env_check():
     """Log environment key variables once."""
-    keys = [
-        "WORKER_INTERVAL",
-        "KEYWORD_FILTER_MODE",
-    ]
+    keys = ["WORKER_INTERVAL", "KEYWORD_FILTER_MODE"]
     for key in keys:
         logger.info(f"{key}={os.getenv(key, 'undefined')}")
 
