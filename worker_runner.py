@@ -14,15 +14,29 @@ WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
 # Cache to prevent duplicate job sends (per user)
 sent_cache = {}
 
-def normalize_url(url_field):
-    """Ensure job URLs are always simple strings."""
-    if isinstance(url_field, list):
+
+def normalize_url_field(url_field):
+    """Ensure job URLs are always safe strings."""
+    if isinstance(url_field, (list, tuple, set)):
         if not url_field:
             return ""
-        return str(url_field[0]).strip()
+        # if list of lists, flatten once
+        first = url_field[0]
+        if isinstance(first, (list, tuple, set)):
+            first = list(first)[0] if first else ""
+        return str(first).strip()
     if url_field is None:
         return ""
     return str(url_field).strip()
+
+
+def normalize_job_urls(job: dict):
+    """Normalize all URL-related fields inside a job dict."""
+    for key in ["url", "original_url", "affiliate_url"]:
+        if key in job:
+            job[key] = normalize_url_field(job[key])
+    return job
+
 
 async def process_user(user):
     """Fetch and send jobs for a single user, filtering out duplicates."""
@@ -49,25 +63,28 @@ async def process_user(user):
     sent_count = 0
 
     for job in all_jobs:
-        # ✅ Always normalize URLs to plain string
-        job_url = normalize_url(job.get("url")) or normalize_url(job.get("original_url"))
+        # ✅ Clean up any list/tuple URLs
+        job = normalize_job_urls(job)
+
+        job_url = job.get("url") or job.get("original_url") or ""
+        job_url = str(job_url).strip()
+
         if not job_url:
             continue
-
-        # Prevent duplicate sends
         if job_url in user_cache:
-            continue
+            continue  # skip duplicates
 
         ok = await send_job_to_user(user_id, job)
         if ok:
             user_cache.add(job_url)
             sent_count += 1
 
-        # Keep cache small
+        # limit cache size
         if len(user_cache) > 300:
             user_cache.clear()
 
     logger.info(f"[Worker] ✅ Sent {sent_count} jobs → {user_id}")
+
 
 async def main_loop():
     """Main worker loop."""
@@ -84,6 +101,7 @@ async def main_loop():
             logger.error(f"[Worker main_loop error] {e}")
         logger.info("[Worker] Cycle complete. Sleeping...")
         await asyncio.sleep(WORKER_INTERVAL)
+
 
 if __name__ == "__main__":
     asyncio.run(main_loop())
