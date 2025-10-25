@@ -14,6 +14,16 @@ WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
 # Cache to prevent duplicate job sends (per user)
 sent_cache = {}
 
+def normalize_url(url_field):
+    """Ensure job URLs are always simple strings."""
+    if isinstance(url_field, list):
+        if not url_field:
+            return ""
+        return str(url_field[0]).strip()
+    if url_field is None:
+        return ""
+    return str(url_field).strip()
+
 async def process_user(user):
     """Fetch and send jobs for a single user, filtering out duplicates."""
     user_id, keywords_raw = user
@@ -39,23 +49,21 @@ async def process_user(user):
     sent_count = 0
 
     for job in all_jobs:
-        job_url = job.get("url") or job.get("original_url") or ""
-        # ✅ Fix: ensure job_url is always a string
-        if isinstance(job_url, list):
-            job_url = job_url[0] if job_url else ""
-        job_url = str(job_url).strip()
-
+        # ✅ Always normalize URLs to plain string
+        job_url = normalize_url(job.get("url")) or normalize_url(job.get("original_url"))
         if not job_url:
             continue
+
+        # Prevent duplicate sends
         if job_url in user_cache:
-            continue  # skip duplicates
+            continue
 
         ok = await send_job_to_user(user_id, job)
         if ok:
             user_cache.add(job_url)
             sent_count += 1
 
-        # limit cache size
+        # Keep cache small
         if len(user_cache) > 300:
             user_cache.clear()
 
