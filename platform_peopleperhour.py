@@ -1,44 +1,60 @@
-import logging
-import httpx
-from utils import convert_to_usd
+import httpx, time, logging
+from bs4 import BeautifulSoup
 
-logger = logging.getLogger("PeoplePerHour")
+log = logging.getLogger("platform_peopleperhour")
 
-BASE_URL = "https://www.peopleperhour.com"
+PROXY_URL = "https://pph-proxy-service.onrender.com/api/pph"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-async def fetch_pph_jobs(keyword):
-    """Fetch PeoplePerHour jobs by keyword in title or description."""
-    try:
-        search_url = f"{BASE_URL}/freelance-{keyword}-jobs"
-        async with httpx.AsyncClient(timeout=25) as client:
-            r = await client.get(search_url)
-            if r.status_code != 200:
-                logger.warning(f"[PPH] HTTP {r.status_code} for {keyword}")
-                return []
+def fetch_pph_jobs(keywords):
+    """Fetch PeoplePerHour jobs via proxy + fallback HTML."""
+    all_jobs = []
+    for kw in [k.strip() for k in keywords if k.strip()]:
+        try:
+            # 1️⃣ Try proxy
+            proxy_url = f"{PROXY_URL}?key=1211&q={kw}"
+            r = httpx.get(proxy_url, timeout=25, headers=HEADERS)
+            if r.status_code == 200:
+                js = r.json()
+                if isinstance(js, list) and js:
+                    for j in js:
+                        all_jobs.append({
+                            "title": j.get("title"),
+                            "description": j.get("description"),
+                            "budget_min": j.get("budget_min"),
+                            "budget_max": j.get("budget_max"),
+                            "budget_currency": j.get("budget_currency", "GBP"),
+                            "original_url": j.get("url"),
+                            "source": "PeoplePerHour",
+                            "time_submitted": j.get("time_submitted") or int(time.time()),
+                            "matched_keyword": kw,
+                        })
+                    continue
 
-            text = r.text
-            lines = text.split("\n")
-            jobs = []
-            for line in lines:
-                if '/job/' in line and 'title="' in line:
-                    title = line.split('title="')[1].split('"')[0]
-                    if keyword.lower() not in title.lower():
-                        continue
-                    href = line.split('href="')[1].split('"')[0]
-                    link = BASE_URL + href
-                    jobs.append({
-                        "id": hash(link),
-                        "platform": "peopleperhour",
-                        "title": title.strip(),
-                        "description": f"Job related to '{keyword}' on PeoplePerHour.",
-                        "budget_amount": "N/A",
-                        "budget_currency": "GBP",
-                        "budget_usd": convert_to_usd(1, "GBP"),
-                        "created_at": "now",
-                        "affiliate_url": link,
-                        "keyword": keyword
-                    })
-            return jobs[:10]
-    except Exception as e:
-        logger.error(f"[PPH] Error fetching {keyword}: {e}")
-        return []
+            # 2️⃣ HTML fallback
+            html_url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
+            resp = httpx.get(html_url, timeout=25, headers=HEADERS)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            cards = soup.select("li[data-project-id]")
+
+            for c in cards:
+                title_el = c.select_one("h5 a, h3 a")
+                desc_el = c.select_one("p.truncated, p.description")
+                budget_el = c.select_one("span.value")
+                all_jobs.append({
+                    "title": title_el.text.strip() if title_el else "(no title)",
+                    "description": desc_el.text.strip() if desc_el else "",
+                    "budget_min": None,
+                    "budget_max": None,
+                    "budget_currency": "GBP",
+                    "original_url": f"https://www.peopleperhour.com{title_el['href']}" if title_el else "",
+                    "source": "PeoplePerHour",
+                    "time_submitted": int(time.time()),
+                    "matched_keyword": kw,
+                })
+            time.sleep(1.5)
+        except Exception as e:
+            log.warning(f"[PPH fetch error] {e}")
+
+    log.info(f"PPH total merged: {len(all_jobs)}")
+    return all_jobs

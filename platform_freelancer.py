@@ -1,61 +1,59 @@
-import logging
-import httpx
-from utils import convert_to_usd
+import httpx, time, math, datetime
 
-logger = logging.getLogger("Freelancer")
+FREELANCER_SEARCH_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
+HEADERS = {"User-Agent": "Mozilla/5.0 (FreelancerFeedBot)"}
 
-BASE_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
-
-async def fetch_freelancer_jobs(keyword):
-    """Fetch Freelancer.com projects filtered by keyword in title or description."""
+def _safe_num(x):
     try:
+        return round(float(x), 1)
+    except Exception:
+        return None
+
+def _make_url(p):
+    seo = p.get("seo_url")
+    if seo:
+        return f"https://www.freelancer.com/projects/{seo}"
+    return f"https://www.freelancer.com/projects/{p.get('id')}"
+
+def _normalize(p, kw):
+    b = p.get("budget") or {}
+    cur = (b.get("currency") or {}).get("code", "USD")
+    return {
+        "source": "Freelancer",
+        "title": p.get("title", ""),
+        "description": p.get("preview_description", ""),
+        "budget_min": _safe_num(b.get("minimum")),
+        "budget_max": _safe_num(b.get("maximum")),
+        "budget_currency": cur,
+        "original_url": _make_url(p),
+        "time_submitted": int(p.get("time_submitted", time.time())),
+        "matched_keyword": kw,
+    }
+
+def fetch_freelancer_jobs(keywords):
+    """Fetch Freelancer jobs one keyword at a time."""
+    all_jobs = []
+    for kw in [k.strip() for k in keywords if k.strip()]:
         params = {
-            "query": keyword,
-            "limit": 20,
+            "full_description": False,
+            "job_details": False,
+            "limit": 30,
             "offset": 0,
-            "full_description": True,
-            "job_details": True,
             "sort_field": "time_submitted",
-            "sort_direction": "desc"
+            "sort_direction": "desc",
+            "query": kw,
         }
-        async with httpx.AsyncClient(timeout=25) as client:
-            r = await client.get(BASE_URL, params=params)
-            r.raise_for_status()
-            data = r.json()
-            projects = data.get("result", {}).get("projects", [])
-            jobs = []
-            for p in projects:
-                title = p.get("title", "")
-                desc = p.get("preview_description", "")
-                # ✅ Filter only if keyword appears in title or description
-                if keyword.lower() not in title.lower() and keyword.lower() not in desc.lower():
+        try:
+            with httpx.Client(timeout=12.0, headers=HEADERS) as cli:
+                r = cli.get(FREELANCER_SEARCH_URL, params=params)
+                if r.status_code != 200:
                     continue
-
-                budget = p.get("budget", {})
-                min_b, max_b = budget.get("minimum"), budget.get("maximum")
-                currency = budget.get("currency", {}).get("code", "USD")
-
-                if max_b or min_b:
-                    budget_str = f"{min_b or ''}-{max_b or ''}".strip("-")
-                else:
-                    budget_str = "N/A"
-
-                converted = convert_to_usd(max_b or min_b, currency)
-
-                jobs.append({
-                    "id": p["id"],
-                    "platform": "freelancer",
-                    "title": title,
-                    "description": desc,
-                    "budget_amount": budget_str,
-                    "budget_currency": currency,
-                    "budget_usd": converted,
-                    "created_at": p.get("time_submitted", ""),
-                    "affiliate_url": f"https://www.freelancer.com/projects/{p['seo_url']}",
-                    "keyword": keyword
-                })
-
-            return jobs[:10]
-    except Exception as e:
-        logger.error(f"[Freelancer] Error fetching {keyword}: {e}")
-        return []
+                data = r.json()
+                for p in (data.get("result") or {}).get("projects", []):
+                    job = _normalize(p, kw)
+                    all_jobs.append(job)
+        except Exception as e:
+            print("[Freelancer fetch error]", e)
+        time.sleep(1)
+    print(f"[Freelancer] total merged: {len(all_jobs)}")
+    return all_jobs

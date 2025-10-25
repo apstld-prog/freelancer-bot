@@ -1,23 +1,22 @@
-#!/usr/bin/env bash
-set -e
-
+#!/bin/bash
 echo "======================================================"
-echo "🚀 Starting Freelancer Alert Bot full service"
+echo "🚀 Starting Modular Freelancer Alert Bot"
 echo "======================================================"
 date
 
+# Load environment variables
+export $(grep -v '^#' .env | xargs)
+
 echo "Environment check:"
-echo "WORKER_INTERVAL=${WORKER_INTERVAL}"
-echo "KEYWORD_FILTER_MODE=${KEYWORD_FILTER_MODE}"
-echo "Render Service: ${RENDER_SERVICE_NAME:-unknown}"
+echo "FREELANCER_INTERVAL=$FREELANCER_INTERVAL"
+echo "PPH_INTERVAL=$PPH_INTERVAL"
+echo "GREEK_INTERVAL=$GREEK_INTERVAL"
 echo "------------------------------------------------------"
 
-# 1️⃣ Start background worker (Gorgel) μέσω Runner
-echo "[Worker] Starting background process..."
-python -u worker_runner.py &
-sleep 2
-pgrep -fa 'python.*worker_runner.py' || echo "[Worker] Warning: process not detected (may have crashed early)"
+# Start each worker in background
+python3 workers/worker_freelancer.py &
+python3 workers/worker_pph.py &
+python3 workers/worker_skywalker.py &
 
-# 2️⃣ Start main FastAPI + Telegram bot via uvicorn (Render web process)
-echo "[Server] Starting FastAPI + Telegram bot via uvicorn..."
-exec uvicorn server:app --host 0.0.0.0 --port ${PORT:-10000} --log-level info
+# Finally start the main server (Telegram bot)
+python3 server.py

@@ -1,51 +1,49 @@
-import logging
-import httpx
-from bs4 import BeautifulSoup
-from datetime import datetime, timezone
+import logging, time
+import httpx, feedparser
 
-logger = logging.getLogger("platform_skywalker")
+log = logging.getLogger("skywalker")
+FEED_URL = "https://www.skywalker.gr/jobs/feed"
 
-BASE_URL = "https://www.skywalker.gr/elGR/aggelies"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Accept": "text/html,application/xhtml+xml",
-    "Accept-Language": "el,en;q=0.9",
-    "Referer": "https://www.google.com/",
-}
-
-async def fetch_skywalker_jobs(keyword: str):
+def fetch_skywalker_jobs(keywords):
+    """Fetch Skywalker RSS feed with keyword filtering."""
     try:
-        async with httpx.AsyncClient(timeout=15, headers=HEADERS, follow_redirects=False) as client:
-            r = await client.get(BASE_URL, params={"keyword": keyword})
-            if r.status_code != 200:
-                logger.warning(f"[Skywalker] Skipped keyword '{keyword}': {r.status_code}")
-                return []
-
-        soup = BeautifulSoup(r.text, "html.parser")
-        listings = soup.select(".job_list_listing") or soup.select("article")
-
-        jobs = []
-        for item in listings[:10]:
-            title_el = item.select_one("h2 a")
-            desc_el = item.select_one("p")
-            title = title_el.get_text(strip=True) if title_el else None
-            if not title:
-                continue
-            desc = desc_el.get_text(strip=True) if desc_el else "—"
-            link = f"https://www.skywalker.gr{title_el['href']}" if title_el and title_el.get("href") else None
-            posted = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-            jobs.append({
-                "platform": "Skywalker",
-                "title": title,
-                "description": desc[:250],
-                "budget_amount": "N/A",
-                "budget_usd": "N/A",
-                "posted": posted,
-                "original_url": link,
-                "keyword": keyword,
-            })
-        return jobs
+        url = FEED_URL[0] if isinstance(FEED_URL, list) else FEED_URL
+        txt = httpx.get(url, timeout=25, headers={"User-Agent": "Mozilla/5.0"}).text
+        if not txt:
+            log.warning("Skywalker feed empty")
+            return []
+        feed = feedparser.parse(txt)
     except Exception as e:
-        logger.warning(f"[Skywalker] Error fetching keyword '{keyword}': {e}")
+        log.warning("Skywalker fetch error: %s", e)
         return []
+
+    kws = [k.strip().lower() for k in (keywords or []) if k and k.strip()]
+    out = []
+    now = int(time.time())
+    for e in feed.entries:
+        title = e.get("title", "") or ""
+        desc = e.get("summary", "") or ""
+        link = e.get("link", "") or ""
+        hay = f"{title}\n{desc}".lower()
+
+        matched = None
+        for k in kws:
+            if k in hay:
+                matched = k
+                break
+        if kws and not matched:
+            continue
+
+        out.append({
+            "title": title.strip() or "(untitled)",
+            "description": desc.strip(),
+            "original_url": link,
+            "budget_min": None,
+            "budget_max": None,
+            "budget_currency": None,
+            "source": "Skywalker",
+            "time_submitted": now,
+            "matched_keyword": matched,
+        })
+    log.info("Skywalker parsed %d entries", len(out))
+    return out
