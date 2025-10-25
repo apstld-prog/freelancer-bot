@@ -1,7 +1,6 @@
 import os
 import logging
 from datetime import datetime, timezone
-
 from sqlalchemy import (
     create_engine, Column, Integer, BigInteger, Text, Boolean,
     TIMESTAMP, ForeignKey, text, UniqueConstraint
@@ -27,30 +26,22 @@ class User(Base):
     __tablename__ = "user"
     id = Column(Integer, primary_key=True)
     telegram_id = Column(BigInteger, unique=True, nullable=False)
-
-    # minimal fields we actually use
     is_admin = Column(Boolean, nullable=False, server_default=text("false"))
     is_active = Column(Boolean, nullable=False, server_default=text("true"))
     is_blocked = Column(Boolean, nullable=False, server_default=text("false"))
-
     countries = Column(Text, nullable=True)
     proposal_template = Column(Text, nullable=True)
-
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
-
     keywords = relationship("Keyword", back_populates="user", cascade="all, delete-orphan")
 
 class Keyword(Base):
     __tablename__ = "keyword"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
-    # always use VALUE as the single source of truth
     value = Column(Text, nullable=False)
-
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
-
     user = relationship("User", back_populates="keywords")
     __table_args__ = (UniqueConstraint("user_id", "value", name="uq_keyword_user_value"),)
 
@@ -68,8 +59,6 @@ def _safe_exec(session, sql: str):
 
 def ensure_schema():
     Base.metadata.create_all(bind=engine)
-
-    # Migrate “value” column if table exists with legacy columns
     with SessionLocal() as s:
         _safe_exec(s, """
         DO $$
@@ -81,7 +70,6 @@ def ensure_schema():
                 ALTER TABLE keyword ADD COLUMN value TEXT NULL;
             END IF;
 
-            -- backfill from legacy columns if they exist
             IF EXISTS (
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name='keyword' AND column_name='keyword'
@@ -139,10 +127,8 @@ def list_user_keywords(db, user_id: int) -> list[str]:
     return [r.value for r in rows]
 
 def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
-    """Insert unique keywords (case-insensitive). Returns how many were inserted."""
     if not keywords:
         return 0
-    # normalize: strip, lower, dedupe
     normalized = []
     seen = set()
     for k in keywords:
@@ -184,4 +170,14 @@ def get_user_list():
             WHERE u.is_active = TRUE AND u.is_blocked = FALSE
             GROUP BY u.telegram_id
         """)).fetchall()
-    return rows
+
+    # ✅ Ensure everything returned is (int, str) — no lists
+    cleaned = []
+    for r in rows:
+        tid = int(r[0]) if r[0] else 0
+        kws = r[1]
+        if isinstance(kws, list):
+            kws = ",".join(kws)
+        kws = str(kws or "")
+        cleaned.append((tid, kws))
+    return cleaned
