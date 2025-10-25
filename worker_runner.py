@@ -19,12 +19,12 @@ def make_job_key(job):
     """Generate a unique key for caching jobs."""
     url = job.get("url") or job.get("original_url") or job.get("affiliate_url")
     if url:
-        return url.strip()
+        return str(url).strip()
     return f"{job.get('platform','')}-{job.get('title','')}-{job.get('posted_at','')}"
 
 
 async def process_user(user_id: int, keywords: str):
-    """Process jobs for one user."""
+    """Process jobs for one user safely."""
     try:
         keywords_list = [kw.strip() for kw in str(keywords).split(",") if kw.strip()]
         if not keywords_list:
@@ -33,11 +33,16 @@ async def process_user(user_id: int, keywords: str):
 
         logger.info(f"[Worker] Fetching jobs for {user_id}: {','.join(keywords_list)}")
 
+        async def run_fetch_sync(func, kw):
+            """Run sync fetch function in a thread."""
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, func, kw)
+
         tasks = []
         for kw in keywords_list:
-            tasks.append(fetch_freelancer_jobs(kw))
-            tasks.append(fetch_pph_jobs(kw))
-            tasks.append(fetch_skywalker_jobs(kw))
+            tasks.append(run_fetch_sync(fetch_freelancer_jobs, kw))
+            tasks.append(run_fetch_sync(fetch_pph_jobs, kw))
+            tasks.append(run_fetch_sync(fetch_skywalker_jobs, kw))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -79,7 +84,6 @@ async def main_loop():
 
             for row in rows:
                 try:
-                    # Force-unpack safely
                     user_id, keywords = row[0], row[1]
                     await process_user(int(user_id), str(keywords))
                 except Exception as e:
