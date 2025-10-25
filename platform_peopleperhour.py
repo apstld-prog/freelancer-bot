@@ -21,6 +21,7 @@ async def fetch_pph_jobs(keyword):
                     title = line.strip().split(">")[1].split("<")[0]
                     url = "https://www.peopleperhour.com" + line.split('href="')[1].split('"')[0]
                     budget_display = "Budget: N/A"
+
                     if "£" in line:
                         amount = line.split("£")[1].split("<")[0].strip()
                         try:
