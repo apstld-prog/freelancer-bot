@@ -1,77 +1,68 @@
 import os
 import psycopg2
-from psycopg2.extras import DictCursor
 import logging
 
 logger = logging.getLogger("db")
+DB_URL = os.getenv("DATABASE_URL")
 
-# ------------------------------------------------------
-# Database connection
-# ------------------------------------------------------
-def get_db_connection():
-    conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=DictCursor)
-    return conn
+def get_connection():
+    if not DB_URL:
+        raise Exception("DATABASE_URL missing")
+    return psycopg2.connect(DB_URL)
 
-# ------------------------------------------------------
-# Ensure schema
-# ------------------------------------------------------
 def ensure_schema():
-    """Ensure all required tables exist in the database."""
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("""
+    """Ensure all required tables exist."""
+    ddl_statements = [
+        """
         CREATE TABLE IF NOT EXISTS user_settings (
             id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
+            user_id BIGINT UNIQUE NOT NULL,
             keywords TEXT,
-            active BOOLEAN DEFAULT TRUE
+            active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW()
         );
-        """)
-        conn.commit()
-    conn.close()
-    logger.info("✅ Database schema verified successfully")
-
-# ------------------------------------------------------
-# Compatibility layer for older imports
-# ------------------------------------------------------
-def get_session():
-    """Compatibility alias for older SQLAlchemy-style code."""
-    return get_db_connection()
-
-def get_or_create_user_by_tid(tid):
-    """Ensure user exists in user_settings and return their record."""
-    ensure_schema()
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT * FROM user_settings WHERE user_id = %s;", (tid,))
-        row = cur.fetchone()
-        if not row:
-            cur.execute(
-                "INSERT INTO user_settings (user_id, keywords, active) VALUES (%s, '', TRUE) RETURNING *;",
-                (tid,),
-            )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS saved_jobs (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            platform VARCHAR(50),
+            title TEXT,
+            url TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS feed_events (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            platform VARCHAR(50),
+            title TEXT,
+            url TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """
+    ]
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            for ddl in ddl_statements:
+                cur.execute(ddl)
             conn.commit()
-            cur.execute("SELECT * FROM user_settings WHERE user_id = %s;", (tid,))
-            row = cur.fetchone()
-    conn.close()
-    return row
+        conn.close()
+        logger.info("[DB] ✅ Schema verified successfully")
+    except Exception as e:
+        logger.error(f"[DB] ❌ Schema verification failed: {e}")
 
-# ------------------------------------------------------
-# Active user list for worker
-# ------------------------------------------------------
 def get_user_list():
-    """Return list of active users and their keywords."""
-    ensure_schema()
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT user_id, keywords FROM user_settings WHERE active = TRUE;")
-        rows = cur.fetchall()
-    conn.close()
+    """Return all active users with keywords."""
     users = []
-    for row in rows:
-        uid = row["user_id"]
-        kws = [k.strip() for k in (row["keywords"] or "").split(",") if k.strip()]
-        if kws:
-            users.append((uid, kws))
-    logger.info(f"📋 Loaded {len(users)} active users from database")
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id, keywords FROM user_settings WHERE active=TRUE;")
+            users = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        logger.error(f"[DB] Error loading users: {e}")
     return users

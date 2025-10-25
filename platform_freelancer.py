@@ -21,8 +21,9 @@ async def fetch_freelancer_jobs(keyword):
                 title = item.get("title", "")
                 desc = item.get("preview_description", "")
                 currency = item.get("currency", {}).get("code", "USD")
-                budget_min = item.get("budget", {}).get("minimum")
-                budget_max = item.get("budget", {}).get("maximum")
+                budget = item.get("budget", {})
+                budget_min = budget.get("minimum")
+                budget_max = budget.get("maximum")
 
                 if budget_min and budget_max:
                     budget_display = f"{budget_min}–{budget_max} {currency}"

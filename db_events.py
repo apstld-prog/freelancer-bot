@@ -3,13 +3,12 @@ import os
 import logging
 
 logger = logging.getLogger("db_events")
-
 DB_URL = os.getenv("DATABASE_URL")
 
 def ensure_feed_events_schema():
     """Ensure that the feed_events table exists."""
     if not DB_URL:
-        logger.error("[db_events] ❌ Missing DATABASE_URL environment variable")
+        logger.error("[db_events] ❌ Missing DATABASE_URL")
         return
 
     ddl = """

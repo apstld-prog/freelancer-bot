@@ -9,11 +9,11 @@ PPH_SEARCH_URL = "https://www.peopleperhour.com/freelance-jobs?q="
 async def fetch_pph_jobs(keyword):
     jobs = []
     try:
-        await asyncio.sleep(random.uniform(3.0, 5.5))  # anti-ban slowdown
+        await asyncio.sleep(random.uniform(3.0, 5.5))
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             resp = await client.get(f"{PPH_SEARCH_URL}{keyword}")
             if resp.status_code != 200 or "Too Many Requests" in resp.text:
-                print(f"[PPH HTML] Error fetching keyword '{keyword}': {resp.status_code}")
+                print(f"[PPH] Error fetching '{keyword}': {resp.status_code}")
                 return []
 
             for line in resp.text.splitlines():
