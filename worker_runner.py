@@ -27,7 +27,6 @@ def to_hashable(value):
             flat.append(to_hashable(v))
         return "|".join(flat)
     if isinstance(value, dict):
-        # sort keys for stability
         parts = []
         for k in sorted(value.keys()):
             parts.append(f"{k}={to_hashable(value[k])}")
@@ -44,7 +43,7 @@ def normalize_user(raw_user):
     except Exception:
         return None
 
-    # normalize user_id
+    # Normalize user_id
     if isinstance(user_id, (list, tuple)):
         user_id = user_id[0] if user_id else 0
     try:
@@ -52,8 +51,11 @@ def normalize_user(raw_user):
     except Exception:
         return None
 
-    # normalize keywords
-    keywords_raw = to_hashable(keywords_raw)
+    # Normalize keywords -> always string
+    if isinstance(keywords_raw, list):
+        keywords_raw = ",".join(map(str, keywords_raw))
+    else:
+        keywords_raw = str(keywords_raw)
     return (user_id, keywords_raw)
 
 
@@ -68,7 +70,6 @@ def make_job_key(job: dict) -> str:
     if url_key:
         return url_key
 
-    # Fallback if URL missing/empty
     platform = job.get("platform") or job.get("source") or "job"
     title = job.get("title") or ""
     posted = job.get("posted_at") or ""
@@ -81,9 +82,8 @@ async def process_user(raw_user):
         logger.warning(f"[Worker] Skipping malformed user row: {raw_user}")
         return
 
-    user_id, keywords_raw = normalized
-    keywords = [kw.strip() for kw in str(keywords_raw).split(",") if kw.strip()]
-
+    user_id, keywords_str = normalized
+    keywords = [kw.strip() for kw in str(keywords_str).split(",") if kw.strip()]
     logger.info(f"[Worker] Fetching for user {user_id} (kw={','.join(keywords)})")
 
     # Fetch from all platforms concurrently
@@ -107,7 +107,6 @@ async def process_user(raw_user):
     sent_count = 0
 
     for job in all_jobs:
-        # Build stable key (handles any nested/list/dict structures)
         job_key = make_job_key(job)
         if not job_key:
             continue
@@ -121,7 +120,7 @@ async def process_user(raw_user):
             user_cache.add(job_key)
             sent_count += 1
 
-        # keep cache bounded
+        # keep cache bounded per user
         if len(user_cache) > 300:
             user_cache.clear()
 
