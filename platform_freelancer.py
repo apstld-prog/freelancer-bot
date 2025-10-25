@@ -1,55 +1,48 @@
-import logging
 import httpx
-from datetime import datetime, timezone
 from utils import convert_to_usd
-
-logger = logging.getLogger("platform_freelancer")
+from datetime import datetime
 
 API_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
-HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-async def fetch_freelancer_jobs(keyword: str):
+async def fetch_freelancer_jobs(keyword):
+    jobs = []
     try:
-        params = {
-            "full_description": False,
-            "job_details": False,
-            "limit": 30,
-            "offset": 0,
-            "sort_field": "time_submitted",
-            "sort_direction": "desc",
-            "query": keyword,
-        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            params = {
+                "query": keyword,
+                "limit": 20,
+                "full_description": "true",
+                "sort_field": "time_submitted",
+                "sort_direction": "desc"
+            }
+            resp = await client.get(API_URL, params=params)
+            data = resp.json().get("result", {}).get("projects", [])
+            for item in data:
+                title = item.get("title", "")
+                desc = item.get("preview_description", "")
+                currency = item.get("currency", {}).get("code", "USD")
+                budget_min = item.get("budget", {}).get("minimum")
+                budget_max = item.get("budget", {}).get("maximum")
 
-        async with httpx.AsyncClient(timeout=15, headers=HEADERS) as client:
-            r = await client.get(API_URL, params=params)
-            r.raise_for_status()
-            data = r.json()
+                if budget_min and budget_max:
+                    budget_display = f"{budget_min}–{budget_max} {currency}"
+                    if currency != "USD":
+                        usd_min = convert_to_usd(budget_min, currency)
+                        usd_max = convert_to_usd(budget_max, currency)
+                        if usd_min and usd_max:
+                            budget_display += f" (~${usd_min}–${usd_max} USD)"
+                else:
+                    budget_display = "Budget: N/A"
 
-        jobs = []
-        for p in data.get("result", {}).get("projects", []):
-            title = p.get("title", "N/A")
-            description = p.get("preview_description", "—")
-            budget = p.get("budget", {})
-            min_b = budget.get("minimum") or 0
-            max_b = budget.get("maximum") or 0
-            currency = budget.get("currency", {}).get("code", "USD")
-
-            usd_value = convert_to_usd(max_b or min_b, currency)
-            created = datetime.fromtimestamp(p.get("submitdate", 0), tz=timezone.utc)
-            age_minutes = int((datetime.now(timezone.utc) - created).total_seconds() / 60)
-            posted = f"{age_minutes} min ago" if age_minutes < 60 else f"{age_minutes // 60} h ago"
-
-            jobs.append({
-                "platform": "Freelancer",
-                "title": title,
-                "description": description[:250],
-                "budget_amount": f"{min_b}–{max_b} {currency}" if max_b else f"{min_b} {currency}",
-                "budget_usd": f"~${usd_value} USD",
-                "posted": posted,
-                "original_url": f"https://www.freelancer.com/projects/{p.get('seo_url', '')}",
-                "keyword": keyword,
-            })
-        return jobs
+                jobs.append({
+                    "platform": "Freelancer",
+                    "title": title,
+                    "description": desc,
+                    "affiliate_url": f"https://www.freelancer.com/projects/{item.get('seo_url')}",
+                    "budget_display": budget_display,
+                    "matched_keyword": keyword,
+                    "created_at": datetime.utcnow().isoformat()
+                })
     except Exception as e:
-        logger.warning(f"[Freelancer] Error fetching {keyword}: {e}")
-        return []
+        print(f"[Freelancer] Error fetching {keyword}: {e}")
+    return jobs

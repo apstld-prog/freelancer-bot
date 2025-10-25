@@ -1,118 +1,68 @@
-import logging
-import hashlib
-import asyncio
+import os
 import httpx
+import asyncio
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+USD_EXCHANGE_RATES = {
+    "EUR": 1.09,
+    "GBP": 1.28,
+    "AUD": 0.66,
+    "CAD": 0.73,
+    "INR": 0.012,
+    "JPY": 0.0067,
+}
 
-logger = logging.getLogger("utils")
-
-
-# ============================
-# 💱 Currency Conversion
-# ============================
-async def convert_to_usd(amount, currency):
-    """Convert given amount and currency to USD using exchangerate.host."""
-    if not amount or not currency:
-        return None
+def convert_to_usd(amount, currency):
     try:
-        currency = currency.upper().strip()
-        amount = float(str(amount).replace(",", "").replace("–", "-").split("-")[0].strip())
+        if not amount or not currency:
+            return None
+        currency = currency.upper()
         if currency == "USD":
             return amount
-
-        async with httpx.AsyncClient(timeout=10) as client:
-            url = f"https://api.exchangerate.host/convert?from={currency}&to=USD&amount={amount}"
-            r = await client.get(url)
-            data = r.json()
-            return float(data.get("result", 0))
-    except Exception as e:
-        logger.error(f"[Currency] convert_to_usd error: {e}")
+        rate = USD_EXCHANGE_RATES.get(currency)
+        if not rate:
+            return None
+        return round(amount * rate, 2)
+    except Exception:
         return None
 
+async def send_job_to_user(bot_token, user_id, job):
+    bot = Bot(token=bot_token)
+    title = job.get("title", "No title")
+    desc = job.get("description", "No description")[:400]
+    url = job.get("affiliate_url") or job.get("original_url")
+    budget = job.get("budget_display", "Budget: N/A")
+    keyword = job.get("matched_keyword", "N/A")
+    platform = job.get("platform", "").capitalize()
 
-# ============================
-# 📩 Telegram Send Job
-# ============================
-async def send_job_to_user(bot, user_id, job):
-    """Send a job posting to a Telegram user with View, Save, Delete buttons."""
-    try:
-        title = job.get("title", "Untitled")
-        platform = job.get("platform", "Unknown")
+    text = (
+        f"📢 <b>{title}</b>\n"
+        f"💼 Platform: {platform}\n"
+        f"💰 {budget}\n"
+        f"🔑 Keyword: <code>{keyword}</code>\n\n"
+        f"{desc}\n\n"
+        f"<a href='{url}'>Open job link</a>"
+    )
 
-        # --- Budget formatting ---
-        budget = job.get("budget_display") or job.get("budget_amount")
-        currency = job.get("budget_currency", "")
-        usd_val = job.get("budget_usd")
-
-        try:
-            usd_val = float(usd_val) if usd_val not in (None, "") else None
-        except Exception:
-            usd_val = None
-
-        if not budget and usd_val:
-            budget = f"~${usd_val:.2f}"
-        elif not budget:
-            budget = "N/A"
-        else:
-            if usd_val:
-                budget = f"{budget} (~${usd_val:.2f} USD)"
-
-        # --- Description and formatting ---
-        url = job.get("affiliate_url") or job.get("original_url") or job.get("url")
-        desc = job.get("description", "").strip()
-        if len(desc) > 500:
-            desc = desc[:500] + "…"
-
-        created_at = job.get("created_at", "Unknown time")
-        keyword = job.get("matched_keyword", "")
-        keyword_line = f"🔎 Keyword: {keyword}\n" if keyword else ""
-
-        # --- Message body ---
-        message = (
-            f"💼 <b>{title}</b>\n"
-            f"🌍 Platform: {platform}\n"
-            f"💰 Budget: {budget}\n"
-            f"{keyword_line}"
-            f"🕒 Posted: {created_at}\n\n"
-            f"{desc}"
-        )
-
-        # --- Safe callback hashes ---
-        hash_key = hashlib.md5(str(url).encode()).hexdigest()[:10]
-        callback_save = f"save_{hash_key}"
-        callback_delete = f"delete_{hash_key}"
-
-        # --- Inline buttons ---
-        buttons = [
-            [InlineKeyboardButton("🌐 View Job", url=url or "https://freelancer.com")],
-            [
-                InlineKeyboardButton("💾 Save", callback_data=callback_save),
-                InlineKeyboardButton("❌ Delete", callback_data=callback_delete),
-            ],
+    keyboard = [
+        [
+            InlineKeyboardButton("💾 Save", callback_data=f"save|{url}"),
+            InlineKeyboardButton("❌ Delete", callback_data=f"delete|{url}")
+        ],
+        [
+            InlineKeyboardButton("🌐 Open", url=url),
+            InlineKeyboardButton("🔗 Visit", url=url)
         ]
-        reply_markup = InlineKeyboardMarkup(buttons)
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # --- Send message ---
+    try:
         await bot.send_message(
             chat_id=user_id,
-            text=message,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
+            text=text,
             reply_markup=reply_markup,
+            parse_mode="HTML",
+            disable_web_page_preview=False
         )
-
-        logger.info(f"[Telegram] ✅ Sent job to {user_id}: {title[:40]}")
-
     except Exception as e:
-        logger.error(f"[Telegram] Error sending job to {user_id}: {e}")
-
-
-# ============================
-# 🚀 Bulk Job Sender
-# ============================
-async def send_chunked_jobs(bot, user_id, jobs, delay=2):
-    """Send multiple jobs sequentially to avoid Telegram flood limits."""
-    for job in jobs:
-        await send_job_to_user(bot, user_id, job)
-        await asyncio.sleep(delay)
+        print(f"[Telegram] Error sending job to {user_id}: {e}")
