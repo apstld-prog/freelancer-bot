@@ -40,6 +40,7 @@ async def process_user(bot, user_id: int, keywords: str):
             return
 
         sent_cache.setdefault(user_id, set())
+        sent_count = 0
         for job in all_jobs:
             job_key = make_job_key(job)
             if not job_key or job_key in sent_cache[user_id]:
@@ -47,8 +48,9 @@ async def process_user(bot, user_id: int, keywords: str):
 
             await send_job_to_user(bot, user_id, job)
             sent_cache[user_id].add(job_key)
+            sent_count += 1
 
-        logger.info(f"[Worker] ✅ Sent {len(all_jobs)} jobs to {user_id}")
+        logger.info(f"[Worker] ✅ Sent {sent_count} jobs to {user_id}")
 
     except Exception as e:
         logger.error(f"[Worker] Critical error in process_user({user_id}): {e}")
@@ -66,7 +68,6 @@ async def worker_loop(bot):
                 tasks = []
                 for user_id, keywords in users:
                     tasks.append(process_user(bot, int(user_id), str(keywords)))
-
                 await asyncio.gather(*tasks)
 
             await asyncio.sleep(WORKER_INTERVAL)
@@ -78,13 +79,27 @@ async def worker_loop(bot):
 
 if __name__ == "__main__":
     import telegram
-    from telegram.ext import Application
 
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    # Accept any of the three env var names
+    TOKEN = (
+        os.getenv("TELEGRAM_BOT_TOKEN")
+        or os.getenv("TELEGRAM_TOKEN")
+        or os.getenv("BOT_TOKEN")
+        or ""
+    )
+
     if not TOKEN:
-        print("[Worker] ERROR: Missing TELEGRAM_BOT_TOKEN environment variable.")
-        exit(1)
+        print("[Worker] ERROR: Missing Telegram token. Set one of: TELEGRAM_BOT_TOKEN / TELEGRAM_TOKEN / BOT_TOKEN")
+        raise SystemExit(1)
+
+    # Log which one was used (without printing the token)
+    used_name = (
+        "TELEGRAM_BOT_TOKEN" if os.getenv("TELEGRAM_BOT_TOKEN") else
+        "TELEGRAM_TOKEN" if os.getenv("TELEGRAM_TOKEN") else
+        "BOT_TOKEN"
+    )
+    print(f"[Worker] Using Telegram token from {used_name}. Interval={WORKER_INTERVAL}s")
 
     bot = telegram.Bot(TOKEN)
-    print(f"[Worker] Starting background process with interval {WORKER_INTERVAL}s...")
+    print("[Worker] Starting background process...")
     asyncio.run(worker_loop(bot))
