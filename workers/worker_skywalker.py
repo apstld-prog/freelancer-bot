@@ -1,99 +1,47 @@
-#!/usr/bin/env python3
 import asyncio
 import logging
 import os
-from typing import Iterable, List, Tuple, Union
-from db import get_user_list
+import json
 from platform_skywalker import fetch_skywalker_jobs
 from utils import send_job_to_user
 
-logger = logging.getLogger("worker.skywalker")
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("worker_skywalker")
 
-GREEK_INTERVAL = int(
-    os.getenv("GREEK_INTERVAL")
-    or os.getenv("SKYWALKER_INTERVAL")
-    or os.getenv("CYCLE_SECONDS")
-    or "300"
+SKYWALKER_INTERVAL = int(os.getenv("SKYWALKER_INTERVAL", "300"))
+TOKEN = (
+    os.getenv("TELEGRAM_BOT_TOKEN")
+    or os.getenv("TELEGRAM_TOKEN")
+    or os.getenv("BOT_TOKEN")
 )
 
-sent_cache: dict[int, set[str]] = {}
+
+def load_users():
+    with open("data/users.json", encoding="utf-8") as f:
+        return [u for u in json.load(f) if u.get("active")]
 
 
-def normalize_keywords(raw: Union[str, List[str], Tuple[str, ...], None]) -> List[str]:
-    if raw is None:
-        return []
-    if isinstance(raw, (list, tuple)):
-        items = list(raw)
-    else:
-        items = [x.strip() for x in str(raw).replace(";", ",").split(",")]
-    seen = set()
-    out = []
-    for x in items:
-        if not x:
-            continue
-        low = x.lower()
-        if low not in seen:
-            seen.add(low)
-            out.append(x)
-    return out
+def load_keywords_for_user(user_id):
+    with open("data/keywords.json", encoding="utf-8") as f:
+        data = json.load(f)
+        return [k["keyword"] for k in data if k["user_id"] == user_id]
 
 
-def match_job(job: dict, keywords: List[str]) -> bool:
-    title = (job.get("title") or "").lower()
-    desc = (job.get("description") or "").lower()
-    text = f"{title}\n{desc}"
-    return any(k.lower() in text for k in keywords)
-
-
-def job_url_key(job: dict) -> str:
-    return (
-        job.get("url")
-        or job.get("original_url")
-        or job.get("affiliate_url")
-        or f"skywalker::{job.get('id') or job.get('title')}"
-    )
-
-
-async def process_user(user_id: int, raw_keywords: Union[str, List[str], Tuple[str, ...], None]) -> None:
-    keywords = normalize_keywords(raw_keywords)
-    if not keywords:
-        return
-    try:
-        jobs = await fetch_skywalker_jobs(",".join(keywords))
-    except Exception as e:
-        logger.error(f"[{user_id}] fetch_skywalker_jobs failed: {e}")
-        return
-
-    sent = sent_cache.setdefault(user_id, set())
-    for job in jobs:
-        if not match_job(job, keywords):
-            continue
-        key = job_url_key(job)
-        if key in sent:
-            continue
-        job["_match_keywords"] = ", ".join(keywords)
-        try:
-            await send_job_to_user(user_id, job)
-            sent.add(key)
-        except Exception as e:
-            logger.warning(f"[{user_id}] Error sending job: {e}")
+async def process_user(user, keywords):
+    for kw in keywords:
+        jobs = await fetch_skywalker_jobs(kw)
+        for job in jobs:
+            await send_job_to_user(user["telegram_id"], job)
 
 
 async def main_loop():
-    logger.info(f"[Skywalker Worker] Interval={GREEK_INTERVAL}s (env priority OK)")
+    logger.info("[Skywalker Worker] Started.")
     while True:
-        try:
-            users: Iterable[Tuple[int, str]] = get_user_list()
-            for uid, raw_keywords in users:
-                await process_user(int(uid), raw_keywords)
-        except Exception as e:
-            logger.error(f"[Skywalker Worker] main loop error: {e}")
-        await asyncio.sleep(GREEK_INTERVAL)
+        users = load_users()
+        for user in users:
+            keywords = load_keywords_for_user(user["user_id"])
+            await process_user(user, keywords)
+        await asyncio.sleep(SKYWALKER_INTERVAL)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main_loop())
-    except KeyboardInterrupt:
-        logger.info("Skywalker worker stopped by user")
+    asyncio.run(main_loop())

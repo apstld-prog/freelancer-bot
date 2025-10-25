@@ -1,0 +1,14 @@
+[
+  {
+    "user_id": 1,
+    "telegram_id": 5254014824,
+    "username": "admin",
+    "active": true
+  },
+  {
+    "user_id": 2,
+    "telegram_id": 7916253053,
+    "username": "demo_user",
+    "active": true
+  }
+]

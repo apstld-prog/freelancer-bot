@@ -1,0 +1,7 @@
+[
+  { "user_id": 1, "keyword": "lighting" },
+  { "user_id": 1, "keyword": "led" },
+  { "user_id": 1, "keyword": "logo" },
+  { "user_id": 2, "keyword": "dialux" },
+  { "user_id": 2, "keyword": "photometric" }
+]
