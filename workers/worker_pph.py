@@ -1,18 +1,15 @@
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import asyncio
 import logging
-import os
 import json
 from platform_peopleperhour import fetch_pph_jobs
 from utils import send_job_to_user
 
 logger = logging.getLogger("worker_pph")
 
-PPH_INTERVAL = int(os.getenv("PPH_INTERVAL", "120"))
-TOKEN = (
-    os.getenv("TELEGRAM_BOT_TOKEN")
-    or os.getenv("TELEGRAM_TOKEN")
-    or os.getenv("BOT_TOKEN")
-)
+PPH_INTERVAL = int(os.getenv("PPH_INTERVAL", "300"))
 
 def load_users():
     try:

@@ -1,6 +1,8 @@
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import asyncio
 import logging
-import os
 import json
 from platform_skywalker import fetch_skywalker_jobs
 from utils import send_job_to_user
@@ -8,11 +10,6 @@ from utils import send_job_to_user
 logger = logging.getLogger("worker_skywalker")
 
 SKYWALKER_INTERVAL = int(os.getenv("SKYWALKER_INTERVAL", "300"))
-TOKEN = (
-    os.getenv("TELEGRAM_BOT_TOKEN")
-    or os.getenv("TELEGRAM_TOKEN")
-    or os.getenv("BOT_TOKEN")
-)
 
 def load_users():
     try:
