@@ -32,12 +32,12 @@ async def process_user(user, keywords):
     if not keywords:
         return
     for kw in keywords:
-        jobs = await fetch_pph_jobs(kw)
+        jobs = fetch_pph_jobs(kw)
         for job in jobs:
             await send_job_to_user(user["telegram_id"], job)
 
 async def main_loop():
-    logger.info("[PeoplePerHour Worker] Started.")
+    logger.info("[PPH Worker] Started.")
     while True:
         users = load_users()
         for user in users:

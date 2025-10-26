@@ -32,7 +32,7 @@ async def process_user(user, keywords):
     if not keywords:
         return
     for kw in keywords:
-        jobs = await fetch_freelancer_jobs(kw)
+        jobs = fetch_freelancer_jobs(kw)
         for job in jobs:
             await send_job_to_user(user["telegram_id"], job)
 
