@@ -44,7 +44,6 @@ ADMIN_ID = 5254014824
 try:
     with get_session() as s:
         conn = s.connection()
-        # Αναζήτηση πίνακα
         table = conn.execute(text("""
             SELECT table_name FROM information_schema.tables
             WHERE table_schema='public' AND table_name ILIKE 'user%';
@@ -54,17 +53,14 @@ try:
             exit()
         table = table[0]
         print(f"✅ Found user table: {table}")
-
-        # Έλεγχος ύπαρξης admin (ψάχνει σε id ή telegram_id)
         res = conn.execute(text(f"""
             SELECT id, telegram_id FROM "{table}"
             WHERE id=:id OR telegram_id=:id
         """), {"id": ADMIN_ID}).fetchone()
-
         if res:
             print(f"✅ Admin user exists: {res}")
         else:
-            print("⚠️ Admin user not found. You can run: python3 init_users.py")
+            print("⚠️ Admin user not found. Run: python3 init_users.py")
 except Exception as e:
     print(f"❌ Admin check failed: {e}")
 PYCODE
@@ -80,7 +76,6 @@ from sqlalchemy import text
 try:
     with get_session() as s:
         conn = s.connection()
-        # Ελέγχει ύπαρξη keywords
         kwcount = conn.execute(text("SELECT COUNT(*) FROM keyword;")).scalar()
         if kwcount == 0:
             print("⚠️ No keywords found in DB.")
@@ -91,35 +86,24 @@ except Exception as e:
 PYCODE
 echo
 
-# STEP 5: PLATFORM FETCH TEST
+# STEP 5: PLATFORM FETCH TEST (NO ASYNC)
 echo "👉 STEP 5: Fetch test per platform"
 echo "------------------------------------------------------"
 python3 - <<'PYCODE'
 from platform_freelancer import fetch_freelancer_jobs
 from platform_peopleperhour import fetch_pph_jobs
 from platform_skywalker import fetch_skywalker_jobs
-import asyncio
 
-async def main():
+def safe_run(func, name):
     try:
-        f = await fetch_freelancer_jobs(["logo"])
-        print(f"✅ Freelancer: {len(f)} jobs fetched")
+        results = func(["logo"])
+        print(f"✅ {name}: {len(results)} jobs fetched")
     except Exception as e:
-        print(f"⚠️ Freelancer fetch error: {e}")
+        print(f"⚠️ {name} fetch error: {e}")
 
-    try:
-        p = await fetch_pph_jobs(["logo"])
-        print(f"✅ PeoplePerHour: {len(p)} jobs fetched")
-    except Exception as e:
-        print(f"⚠️ PeoplePerHour fetch error: {e}")
-
-    try:
-        s = await fetch_skywalker_jobs(["logo"])
-        print(f"✅ Skywalker: {len(s)} jobs fetched")
-    except Exception as e:
-        print(f"⚠️ Skywalker fetch error: {e}")
-
-asyncio.run(main())
+safe_run(fetch_freelancer_jobs, "Freelancer")
+safe_run(fetch_pph_jobs, "PeoplePerHour")
+safe_run(fetch_skywalker_jobs, "Skywalker")
 PYCODE
 echo
 
