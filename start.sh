@@ -39,4 +39,5 @@ echo "------------------------------------------------------"
 
 # Start the FastAPI + Telegram bot in foreground (so Render stays active)
 echo "[Server] Starting FastAPI + Telegram bot via uvicorn..."
-exec python server.py
+exec python -m uvicorn server:app --host 0.0.0.0 --port 10000 --no-access-log
+
