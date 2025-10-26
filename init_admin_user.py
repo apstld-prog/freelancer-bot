@@ -8,36 +8,57 @@ ADMIN_USERNAME = 'admin'
 with get_session() as s:
     conn = s.connection()
     try:
-        # Ελέγχουμε αν υπάρχει η στήλη 'role' ή 'is_admin' στον πίνακα
-        check_cols = conn.execute(text("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name='user';
+        # --- Step 1: εντοπισμός του σωστού πίνακα ---
+        table_check = conn.execute(text("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_name ILIKE 'user%' AND table_schema='public';
         """)).fetchall()
-        col_names = [r[0] for r in check_cols]
+        tables = [r[0] for r in table_check]
+        print(f"🧩 Found user-related tables: {tables}")
 
-        # Διαφορετικά SQL ανάλογα με τα πεδία
-        if "role" in col_names:
-            insert_sql = """
-                INSERT INTO "user" (id, username, role, created_at)
+        if not tables:
+            print("❌ No table named user or users found. Cannot continue.")
+            exit(1)
+
+        table_name = tables[0]
+
+        # --- Step 2: εμφάνιση των στηλών ---
+        col_check = conn.execute(text(f"""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name='{table_name}';
+        """)).fetchall()
+        cols = [r[0] for r in col_check]
+        print(f"📊 Columns in table '{table_name}': {cols}")
+
+        # --- Step 3: δημιουργία admin user ανάλογα με το schema ---
+        if "role" in cols:
+            insert_sql = f"""
+                INSERT INTO "{table_name}" (id, username, role, created_at)
                 VALUES (:id, :username, 'admin', NOW() AT TIME ZONE 'UTC')
                 ON CONFLICT (id) DO NOTHING;
             """
-        elif "is_admin" in col_names:
-            insert_sql = """
-                INSERT INTO "user" (id, username, is_admin, created_at)
+        elif "is_admin" in cols:
+            insert_sql = f"""
+                INSERT INTO "{table_name}" (id, username, is_admin, created_at)
                 VALUES (:id, :username, TRUE, NOW() AT TIME ZONE 'UTC')
                 ON CONFLICT (id) DO NOTHING;
             """
-        else:
-            insert_sql = """
-                INSERT INTO "user" (id, username, created_at)
+        elif "created_at" in cols:
+            insert_sql = f"""
+                INSERT INTO "{table_name}" (id, username, created_at)
                 VALUES (:id, :username, NOW() AT TIME ZONE 'UTC')
+                ON CONFLICT (id) DO NOTHING;
+            """
+        else:
+            insert_sql = f"""
+                INSERT INTO "{table_name}" (id, username)
+                VALUES (:id, :username)
                 ON CONFLICT (id) DO NOTHING;
             """
 
         conn.execute(text(insert_sql), {"id": ADMIN_ID, "username": ADMIN_USERNAME})
         s.commit()
-        print(f"✅ Admin user {ADMIN_ID} ensured in 'user' table.")
+        print(f"✅ Admin user {ADMIN_ID} ensured in '{table_name}' table.")
 
     except Exception as e:
         print(f"❌ Failed to ensure admin user: {e}")
