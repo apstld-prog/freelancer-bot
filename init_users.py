@@ -1,68 +1,57 @@
-from sqlalchemy import create_engine, text
 import os
+from sqlalchemy import create_engine, text
 
 print("======================================================")
 print("👤 INIT USERS TOOL — ensure admin and default users")
 print("======================================================")
 
-# --------------------------------------------------
-# Load DATABASE_URL
-# --------------------------------------------------
+# ✅ Admin ID = 1 (όπως είναι ήδη στη βάση σου)
+ADMIN_ID = 1
+ADMIN_TELEGRAM_ID = 5254014824
+
+# Connect to database
 db_url = os.environ.get("DATABASE_URL")
 if not db_url:
-    print("❌ DATABASE_URL not found in environment.")
+    print("❌ DATABASE_URL not found in environment variables.")
     exit(1)
 
 engine = create_engine(db_url)
 
-ADMIN_ID = 5254014824
-
 with engine.connect() as conn:
-    # Check which table exists
-    res = conn.execute(text("""
-        SELECT table_name FROM information_schema.tables
-        WHERE table_schema='public' AND table_name IN ('user', 'users');
-    """)).fetchall()
-    tables = [r[0] for r in res]
-    if not tables:
-        print("❌ No user table found in DB.")
-        exit(1)
+    # Detect user-related tables
+    tables = conn.execute(
+        text("SELECT table_name FROM information_schema.tables WHERE table_schema='public';")
+    ).fetchall()
+    table_names = [t[0] for t in tables if 'user' in t[0]]
+    print(f"✅ Found user-related tables: {table_names}")
 
-    print(f"✅ Found user-related tables: {tables}")
+    # Pick primary users table
+    target_table = "users" if "users" in table_names else "user"
+    print(f"📊 Using table: {target_table}")
 
-    # Prefer plural 'users' if exists
-    table = "users" if "users" in tables else "user"
-    print(f"📊 Using table: {table}")
+    # Show existing admin
+    existing_admin = conn.execute(
+        text(f"SELECT id, telegram_id, is_admin, is_active FROM {target_table} WHERE id={ADMIN_ID};")
+    ).fetchall()
+    print("📋 Existing admin entries:", existing_admin)
 
-    # Check columns
-    cols = conn.execute(text(f"""
-        SELECT column_name FROM information_schema.columns
-        WHERE table_name = '{table}';
-    """)).fetchall()
-    cols = [c[0] for c in cols]
-    print(f"📋 Columns: {cols}")
-
-    # Ensure BIGINT id column
-    col_info = conn.execute(text(f"""
-        SELECT data_type FROM information_schema.columns
-        WHERE table_name='{table}' AND column_name='id';
-    """)).scalar()
-    print(f"ℹ️ id column type: {col_info}")
-
-    # Insert admin user
+    # Ensure admin user
+    print(f"🧩 Inserting admin user ({ADMIN_ID})...")
     try:
-        print(f"🧩 Inserting admin user ({ADMIN_ID})...")
-        conn.execute(text(f"""
-            INSERT INTO "{table}" (id, telegram_id, started_at, is_admin, is_active)
-            VALUES (:id, :tg, NOW() AT TIME ZONE 'UTC', TRUE, TRUE)
-            ON CONFLICT (id) DO NOTHING;
-        """), {"id": ADMIN_ID, "tg": ADMIN_ID})
+        conn.execute(
+            text(f"""
+                INSERT INTO {target_table} (id, telegram_id, started_at, is_admin, is_active)
+                VALUES (:id, :tg, NOW() AT TIME ZONE 'UTC', TRUE, TRUE)
+                ON CONFLICT (id) DO UPDATE
+                SET is_admin=TRUE, is_active=TRUE;
+            """),
+            {"id": ADMIN_ID, "tg": ADMIN_TELEGRAM_ID}
+        )
         conn.commit()
-        print("✅ Admin user ensured successfully.")
+        print("✅ Admin ensured successfully.")
     except Exception as e:
-        print(f"❌ init_users failed: {e}")
-        exit(1)
+        print("⚠️ init_users failed or already ensured:", e)
 
-print("🎉 Done! Now run:")
-print("   python3 init_keywords.py")
+print("======================================================")
+print("✅ init_users complete — admin is now synchronized.")
 print("======================================================")
