@@ -18,12 +18,25 @@ pkill -f worker_skywalker.py 2>/dev/null
 pkill -f server.py 2>/dev/null
 sleep 2
 
-# Start new workers
-echo "[Worker] Starting background processes..."
-python workers/worker_freelancer.py &
-python workers/worker_pph.py &
-python workers/worker_skywalker.py &
+# Create logs folder if it doesn’t exist
+if [ ! -d "logs" ]; then
+  mkdir logs
+  echo "[Init] Created logs directory"
+fi
 
-# Start main bot server
+# Start new workers with nohup to persist across restarts
+echo "[Worker] Starting background processes..."
+nohup python workers/worker_freelancer.py > logs/worker_freelancer.log 2>&1 &
+nohup python workers/worker_pph.py > logs/worker_pph.log 2>&1 &
+nohup python workers/worker_skywalker.py > logs/worker_skywalker.log 2>&1 &
+
+# Log monitoring info
+echo "[Monitor] Workers are now running in background:"
+echo "           - worker_freelancer.py (log: logs/worker_freelancer.log)"
+echo "           - worker_pph.py        (log: logs/worker_pph.log)"
+echo "           - worker_skywalker.py  (log: logs/worker_skywalker.log)"
+echo "------------------------------------------------------"
+
+# Start the FastAPI + Telegram bot in foreground (so Render stays active)
 echo "[Server] Starting FastAPI + Telegram bot via uvicorn..."
-python server.py
+exec python server.py
