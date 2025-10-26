@@ -69,24 +69,44 @@ def count_keywords(user_id: int) -> int:
         return int(s.execute(text("SELECT COUNT(*) FROM keyword WHERE user_id=:uid"), {"uid": user_id}).scalar() or 0)
 
 def add_keywords(user_id: int, kws: List[str]) -> int:
-    if not kws: return 0
+    """Add keywords for given user, ensuring user_id column is BIGINT-safe."""
+    if not kws:
+        return 0
     inserted = 0
     with get_session() as s:
         conn = s.connection()
+
+        # Ensure user_id column is BIGINT, not INTEGER (for large Telegram IDs)
+        try:
+            conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='keyword'
+                        AND column_name='user_id'
+                        AND data_type='integer'
+                    ) THEN
+                        ALTER TABLE keyword ALTER COLUMN user_id TYPE BIGINT USING user_id::bigint;
+                    END IF;
+                END$$;
+            """))
+        except Exception as e:
+            # Δεν σταματάμε αν αποτύχει, απλώς ενημερώνουμε το log
+            print(f"⚠️ Warning: Could not auto-convert user_id to BIGINT: {e}")
+
         has_kw, has_val = _detect_cols(conn)
         val_nn, kw_nn = _detect_nullability(conn)
         has_created, has_updated = _detect_ts_cols(conn)
 
-        # Στήλες που θα βάλουμε
+        # Columns to insert
         cols = ["user_id"]
         vals = [":uid"]
 
-        # Αν υπάρχουν και οι δύο στήλες, γράφουμε και στις δύο με την ίδια τιμή.
         if has_kw:
             cols.append("keyword"); vals.append(":kw")
         if has_val:
-            cols.append("value");   vals.append(":kw")
-
+            cols.append("value"); vals.append(":kw")
         if has_created:
             cols.append("created_at"); vals.append("NOW() AT TIME ZONE 'UTC'")
         if has_updated:
@@ -102,7 +122,8 @@ def add_keywords(user_id: int, kws: List[str]) -> int:
     return inserted
 
 def delete_keywords(user_id: int, kws: List[str]) -> int:
-    if not kws: return 0
+    if not kws: 
+        return 0
     with get_session() as s:
         conn = s.connection()
         has_kw, has_val = _detect_cols(conn)
