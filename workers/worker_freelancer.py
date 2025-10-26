@@ -1,47 +1,59 @@
-import sys, os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import asyncio
+import os
 import logging
-import json
-from platform_freelancer import fetch_freelancer_jobs
+from datetime import datetime, timezone
 from utils import send_job_to_user
+from db import get_user_list
+from platform_freelancer import fetch_freelancer_jobs
 
 logger = logging.getLogger("worker_freelancer")
 
 FREELANCER_INTERVAL = int(os.getenv("FREELANCER_INTERVAL", "60"))
 
-def load_users():
-    try:
-        with open("data/users.json", encoding="utf-8") as f:
-            return [u for u in json.load(f) if u.get("active")]
-    except Exception as e:
-        logger.error(f"[Freelancer] Failed to load users: {e}")
-        return []
-
-def load_keywords_for_user(user_id):
-    try:
-        with open("data/keywords.json", encoding="utf-8") as f:
-            data = json.load(f)
-            return [k["keyword"] for k in data if k["user_id"] == user_id]
-    except Exception as e:
-        logger.error(f"[Freelancer] Failed to load keywords: {e}")
-        return []
+def match_keyword(job, keyword):
+    return keyword.lower() in job["title"].lower() or keyword.lower() in job["description"].lower()
 
 async def process_user(user, keywords):
-    if not keywords:
-        return
-    for kw in keywords:
-        jobs = fetch_freelancer_jobs(kw)
-        for job in jobs:
-            await send_job_to_user(user["telegram_id"], job)
+    try:
+        jobs = await fetch_freelancer_jobs()
+        for kw in keywords:
+            for job in jobs:
+                if not match_keyword(job, kw):
+                    continue
+                job["keyword"] = kw
+                job["posted_ago"] = "N/A"
+                if job.get("created_at"):
+                    try:
+                        dt = datetime.fromisoformat(job["created_at"].replace("Z", "+00:00"))
+                        delta = datetime.now(timezone.utc) - dt
+                        hours = delta.total_seconds() // 3600
+                        if hours < 1:
+                            job["posted_ago"] = "just now"
+                        elif hours < 24:
+                            job["posted_ago"] = f"{int(hours)} hours ago"
+                        else:
+                            job["posted_ago"] = f"{int(hours//24)} days ago"
+                    except Exception:
+                        pass
+                budget_amount = job.get("budget_amount")
+                budget_currency = job.get("budget_currency")
+                budget_usd = job.get("budget_usd")
+                if budget_amount and budget_currency:
+                    budget_str = f"{budget_currency} {budget_amount}"
+                    if budget_usd:
+                        budget_str += f" (~${budget_usd} USD)"
+                else:
+                    budget_str = "N/A"
+                job["budget_str"] = budget_str
+                await send_job_to_user(user["id"], job)
+    except Exception as e:
+        logger.error(f"Error in process_user: {e}")
 
 async def main_loop():
-    logger.info("[Freelancer Worker] Started.")
     while True:
-        users = load_users()
+        users = get_user_list()
         for user in users:
-            keywords = load_keywords_for_user(user["user_id"])
+            keywords = user.get("keywords", [])
             await process_user(user, keywords)
         await asyncio.sleep(FREELANCER_INTERVAL)
 
