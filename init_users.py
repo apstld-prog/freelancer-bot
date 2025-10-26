@@ -1,60 +1,68 @@
-# init_users.py
-"""
-Ensures that the admin and default users exist in the current database schema.
-This version auto-detects column names and adapts to 'users' or 'user' table.
-"""
+from sqlalchemy import create_engine, text
+import os
 
-from db import get_session
-from sqlalchemy import text
+print("======================================================")
+print("👤 INIT USERS TOOL — ensure admin and default users")
+print("======================================================")
 
-ADMIN_ID = 5254014824  # Telegram ID of the admin
-DEFAULT_USERS = [
-    {"id": ADMIN_ID, "telegram_id": ADMIN_ID},
-]
+# --------------------------------------------------
+# Load DATABASE_URL
+# --------------------------------------------------
+db_url = os.environ.get("DATABASE_URL")
+if not db_url:
+    print("❌ DATABASE_URL not found in environment.")
+    exit(1)
 
-with get_session() as s:
-    conn = s.connection()
+engine = create_engine(db_url)
+
+ADMIN_ID = 5254014824
+
+with engine.connect() as conn:
+    # Check which table exists
+    res = conn.execute(text("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema='public' AND table_name IN ('user', 'users');
+    """)).fetchall()
+    tables = [r[0] for r in res]
+    if not tables:
+        print("❌ No user table found in DB.")
+        exit(1)
+
+    print(f"✅ Found user-related tables: {tables}")
+
+    # Prefer plural 'users' if exists
+    table = "users" if "users" in tables else "user"
+    print(f"📊 Using table: {table}")
+
+    # Check columns
+    cols = conn.execute(text(f"""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = '{table}';
+    """)).fetchall()
+    cols = [c[0] for c in cols]
+    print(f"📋 Columns: {cols}")
+
+    # Ensure BIGINT id column
+    col_info = conn.execute(text(f"""
+        SELECT data_type FROM information_schema.columns
+        WHERE table_name='{table}' AND column_name='id';
+    """)).scalar()
+    print(f"ℹ️ id column type: {col_info}")
+
+    # Insert admin user
     try:
-        # Εντοπίζει τον σωστό πίνακα (user ή users)
-        res = conn.execute(text("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_schema='public' AND table_name ILIKE 'user%';
-        """)).fetchall()
-
-        if not res:
-            print("❌ No user table found in database.")
-            exit(1)
-
-        table_name = res[0][0]
-        print(f"✅ Found user table: {table_name}")
-
-        # Παίρνει λίστα στηλών του πίνακα
-        cols = [r[0] for r in conn.execute(text(f"""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name=:tname;
-        """), {"tname": table_name}).fetchall()]
-
-        print(f"📊 Columns in table '{table_name}': {cols}")
-
-        # Δημιουργεί admin με τα διαθέσιμα πεδία
-        for u in DEFAULT_USERS:
-            if "telegram_id" in cols:
-                conn.execute(text(f"""
-                    INSERT INTO "{table_name}" (id, telegram_id, started_at)
-                    VALUES (:id, :telegram_id, NOW() AT TIME ZONE 'UTC')
-                    ON CONFLICT (id) DO NOTHING;
-                """), {"id": u["id"], "telegram_id": u["telegram_id"]})
-            else:
-                conn.execute(text(f"""
-                    INSERT INTO "{table_name}" (id, started_at)
-                    VALUES (:id, NOW() AT TIME ZONE 'UTC')
-                    ON CONFLICT (id) DO NOTHING;
-                """), {"id": u["id"]})
-        s.commit()
-
+        print(f"🧩 Inserting admin user ({ADMIN_ID})...")
+        conn.execute(text(f"""
+            INSERT INTO "{table}" (id, telegram_id, started_at, is_admin, is_active)
+            VALUES (:id, :tg, NOW() AT TIME ZONE 'UTC', TRUE, TRUE)
+            ON CONFLICT (id) DO NOTHING;
+        """), {"id": ADMIN_ID, "tg": ADMIN_ID})
+        conn.commit()
         print("✅ Admin user ensured successfully.")
-        count_users = conn.execute(text(f'SELECT COUNT(*) FROM "{table_name}"')).scalar()
-        print(f"👥 Total users in DB: {count_users}")
-
     except Exception as e:
         print(f"❌ init_users failed: {e}")
+        exit(1)
+
+print("🎉 Done! Now run:")
+print("   python3 init_keywords.py")
+print("======================================================")
