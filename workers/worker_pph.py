@@ -16,7 +16,8 @@ async def process_pph_jobs(app):
                 if not keywords:
                     continue
 
-                jobs = await fetch_pph_jobs(keywords)
+                # FIXED: removed await because fetch_pph_jobs is not async
+                jobs = fetch_pph_jobs(keywords)
                 logger.info(f"[PeoplePerHour] {len(jobs)} jobs fetched for {user_id}")
 
                 for job in jobs:
@@ -29,7 +30,6 @@ async def process_pph_jobs(app):
                     budget = job.get("budget", "N/A")
                     currency = job.get("currency", "")
                     usd_value = convert_to_usd(budget, currency)
-
                     posted_ago = time_ago(job.get("created_at"))
 
                     message = (
