@@ -7,105 +7,127 @@ echo "======================================================"
 echo "📅 Date: $(date -u)"
 echo
 
+# STEP 1: ENVIRONMENT SUMMARY
 echo "👉 STEP 1: Environment summary"
 echo "------------------------------------------------------"
-echo "Render Service: ${RENDER_SERVICE_NAME:-freelancer-bot}"
-python3 --version 2>/dev/null
-node --version 2>/dev/null || true
-echo "Worker intervals: FREELANCER=${FREELANCER_INTERVAL}, PPH=${PPH_INTERVAL}, GREEK=${GREEK_INTERVAL}"
-echo "Keyword filter mode: ${KEYWORD_FILTER_MODE}"
+echo "Render Service: ${RENDER_SERVICE_NAME:-freelancer-bot-ns7s}"
+echo "Python $(python3 --version 2>/dev/null || echo 'N/A')"
+echo "$(node -v 2>/dev/null || echo 'Node N/A')"
+echo "Worker intervals: FREELANCER=${FREELANCER_INTERVAL:-N/A}, PPH=${PPH_INTERVAL:-N/A}, GREEK=${GREEK_INTERVAL:-N/A}"
+echo "Keyword filter mode: ${KEYWORD_FILTER_MODE:-off}"
 echo
 
+# STEP 2: CLEANUP ZOMBIE / DEFUNCT PROCESSES
 echo "👉 STEP 2: Cleanup of zombie/defunct workers"
 echo "------------------------------------------------------"
-Z=$(ps aux | grep defunct | grep python || true)
-if [ -n "$Z" ]; then
-  echo "⚠️ Found zombie or defunct Python workers. Cleaning..."
-  pkill -f worker_freelancer.py 2>/dev/null || true
-  pkill -f worker_pph.py 2>/dev/null || true
-  pkill -f worker_skywalker.py 2>/dev/null || true
-  pkill -f uvicorn 2>/dev/null || true
-  echo "✅ Cleanup complete."
-else
+ZOMBIES=$(ps -eo stat,comm | grep 'Z' | grep python || true)
+if [ -z "$ZOMBIES" ]; then
   echo "✅ No zombie processes found."
+else
+  echo "⚠️ Found zombie processes:"
+  echo "$ZOMBIES"
+  echo "🔧 Killing them..."
+  pkill -9 -f worker_ || true
+  pkill -9 -f uvicorn || true
+  echo "✅ Cleanup done."
 fi
 echo
 
-echo "👉 STEP 3: Keyword consistency check"
+# STEP 3: ADMIN USER CHECK
+echo "👉 STEP 3: Admin user consistency"
 echo "------------------------------------------------------"
 python3 - <<'PYCODE'
-import os, sys
-sys.path.append(os.path.dirname(__file__))
+from db import get_session
+from sqlalchemy import text
 
+ADMIN_ID = 5254014824
 try:
-    from db_keywords import list_keywords, add_keywords
-    from db import get_session
-    session = get_session()
-    defaults = ["logo","lighting","dialux","relux","led","φωτισμός","luminaire"]
+    with get_session() as s:
+        conn = s.connection()
+        # Αναζήτηση πίνακα
+        table = conn.execute(text("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema='public' AND table_name ILIKE 'user%';
+        """)).fetchone()
+        if not table:
+            print("❌ No user table found in DB.")
+            exit()
+        table = table[0]
+        print(f"✅ Found user table: {table}")
 
-    # Δοκιμή για admin (user_id = 5254014824)
-    existing = []
-    try:
-        existing = list_keywords(5254014824)
-    except Exception as e:
-        print(f"⚠️ list_keywords() failed: {e}")
+        # Έλεγχος ύπαρξης admin (ψάχνει σε id ή telegram_id)
+        res = conn.execute(text(f"""
+            SELECT id, telegram_id FROM "{table}"
+            WHERE id=:id OR telegram_id=:id
+        """), {"id": ADMIN_ID}).fetchone()
 
-    if not existing:
-        print("⚠️ No keywords found for admin. Seeding defaults...")
-        try:
-            added = add_keywords(5254014824, defaults)
-            print(f"✅ Seeded {added} default keywords.")
-        except Exception as e:
-            print(f"❌ Could not seed defaults: {e}")
-    else:
-        missing = [k for k in defaults if k not in existing]
-        print(f"🗂 Found {len(existing)} keywords in DB.")
-        if missing:
-            print(f"⚠️ Missing: {missing}")
+        if res:
+            print(f"✅ Admin user exists: {res}")
         else:
-            print("✅ All default keywords present.")
+            print("⚠️ Admin user not found. You can run: python3 init_users.py")
 except Exception as e:
-    print(f"⚠️ Could not verify keywords: {e}")
+    print(f"❌ Admin check failed: {e}")
 PYCODE
 echo
 
-echo "👉 STEP 4: Fetch test per platform"
+# STEP 4: KEYWORDS CHECK
+echo "👉 STEP 4: Keyword consistency check"
 echo "------------------------------------------------------"
 python3 - <<'PYCODE'
-import asyncio, sys, os, inspect
-sys.path.append(os.path.dirname(__file__))
+from db import get_session
+from sqlalchemy import text
 
 try:
-    from platform_freelancer import fetch_freelancer_jobs
-    from platform_peopleperhour import fetch_pph_jobs
-    from platform_skywalker import fetch_skywalker_jobs
-except Exception as e:
-    print(f"⚠️ Import error in platform modules: {e}")
-    exit(0)
-
-async def try_fetch(name, func):
-    try:
-        if inspect.iscoroutinefunction(func):
-            result = await func(["test"])
+    with get_session() as s:
+        conn = s.connection()
+        # Ελέγχει ύπαρξη keywords
+        kwcount = conn.execute(text("SELECT COUNT(*) FROM keyword;")).scalar()
+        if kwcount == 0:
+            print("⚠️ No keywords found in DB.")
         else:
-            result = func(["test"])
-        print(f"✅ {name}: {len(result)} jobs fetched")
-    except Exception as e:
-        print(f"⚠️ {name} fetch error: {e}")
+            print(f"✅ Found {kwcount} total keywords in DB.")
+except Exception as e:
+    print(f"❌ Keyword check failed: {e}")
+PYCODE
+echo
+
+# STEP 5: PLATFORM FETCH TEST
+echo "👉 STEP 5: Fetch test per platform"
+echo "------------------------------------------------------"
+python3 - <<'PYCODE'
+from platform_freelancer import fetch_freelancer_jobs
+from platform_peopleperhour import fetch_pph_jobs
+from platform_skywalker import fetch_skywalker_jobs
+import asyncio
 
 async def main():
-    await try_fetch("Freelancer", fetch_freelancer_jobs)
-    await try_fetch("PeoplePerHour", fetch_pph_jobs)
-    await try_fetch("Skywalker", fetch_skywalker_jobs)
+    try:
+        f = await fetch_freelancer_jobs(["logo"])
+        print(f"✅ Freelancer: {len(f)} jobs fetched")
+    except Exception as e:
+        print(f"⚠️ Freelancer fetch error: {e}")
+
+    try:
+        p = await fetch_pph_jobs(["logo"])
+        print(f"✅ PeoplePerHour: {len(p)} jobs fetched")
+    except Exception as e:
+        print(f"⚠️ PeoplePerHour fetch error: {e}")
+
+    try:
+        s = await fetch_skywalker_jobs(["logo"])
+        print(f"✅ Skywalker: {len(s)} jobs fetched")
+    except Exception as e:
+        print(f"⚠️ Skywalker fetch error: {e}")
 
 asyncio.run(main())
 PYCODE
 echo
 
-echo "👉 STEP 5: Memory, uptime and system load"
+# STEP 6: MEMORY & SYSTEM SNAPSHOT
+echo "👉 STEP 6: Memory, uptime and system load"
 echo "------------------------------------------------------"
 uptime
-free -h || true
+free -h
 echo
 
 echo "✅ Full diagnostic complete."
