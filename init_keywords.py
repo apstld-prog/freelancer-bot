@@ -1,50 +1,70 @@
-# init_keywords.py
-from db import get_session
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+import os
 
+print("======================================================")
+print("🔑 INIT KEYWORDS TOOL — ensure default admin keywords")
+print("======================================================")
+
+# --------------------------------------------------
+# Load DATABASE_URL
+# --------------------------------------------------
+db_url = os.environ.get("DATABASE_URL")
+if not db_url:
+    print("❌ DATABASE_URL not found in environment.")
+    exit(1)
+
+engine = create_engine(db_url)
+
+ADMIN_ID = 5254014824
 DEFAULT_KEYWORDS = [
     "logo", "lighting", "dialux", "relux", "led", "φωτισμός", "luminaire"
 ]
-ADMIN_ID = 5254014824  # ίδιο με το bot admin ID
 
-with get_session() as s:
-    conn = s.connection()
-    try:
-        # Βεβαιώσου ότι υπάρχει admin στον πίνακα user ή users
-        user_exists = conn.execute(text("""
-            SELECT id FROM "user" WHERE id = :uid
-        """), {"uid": ADMIN_ID}).fetchone()
+with engine.connect() as conn:
+    # Check for 'users' table
+    res = conn.execute(text("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema='public' AND table_name IN ('user', 'users');
+    """)).fetchall()
+    tables = [r[0] for r in res]
+    if not tables:
+        print("❌ No user table found.")
+        exit(1)
 
-        if not user_exists:
-            # Αν δεν υπάρχει πίνακας 'user', ψάχνει για 'users'
-            alt_table = conn.execute(text("""
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema='public' AND table_name ILIKE 'user%';
-            """)).fetchone()
-            if alt_table:
-                table = alt_table[0]
-                user_exists = conn.execute(text(f"""
-                    SELECT id FROM "{table}" WHERE id = :uid
-                """), {"uid": ADMIN_ID}).fetchone()
-            else:
-                print("❌ No user table found, cannot seed keywords.")
-                exit(1)
+    user_table = "users" if "users" in tables else "user"
 
-        if not user_exists:
-            print("⚠️ Admin user not found, skipping keyword seeding.")
-            exit(0)
+    # Check if admin exists
+    admin = conn.execute(text(f"""
+        SELECT id, telegram_id FROM "{user_table}"
+        WHERE telegram_id = :tid AND is_admin = TRUE;
+    """), {"tid": ADMIN_ID}).fetchone()
 
-        print("✅ Admin user found, seeding default keywords...")
+    if not admin:
+        print("⚠️ Admin user not found in table:", user_table)
+        exit(0)
 
-        for kw in DEFAULT_KEYWORDS:
-            conn.execute(text("""
-                INSERT INTO keyword (user_id, keyword, value, created_at, updated_at)
-                VALUES (:uid, :kw, :kw, NOW() AT TIME ZONE 'UTC', NOW() AT TIME ZONE 'UTC')
-                ON CONFLICT DO NOTHING;
-            """), {"uid": ADMIN_ID, "kw": kw})
+    print(f"✅ Admin user found in '{user_table}': {admin}")
 
-        s.commit()
-        print(f"✅ Seeded {len(DEFAULT_KEYWORDS)} default keywords for admin ({ADMIN_ID}).")
+    # Check keyword table
+    res = conn.execute(text("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema='public' AND table_name='keyword';
+    """)).fetchone()
 
-    except Exception as e:
-        print(f"❌ Keyword seeding failed: {e}")
+    if not res:
+        print("❌ No 'keyword' table found.")
+        exit(1)
+
+    # Seed defaults
+    print("🧩 Seeding default keywords for admin...")
+    for kw in DEFAULT_KEYWORDS:
+        conn.execute(text("""
+            INSERT INTO keyword (user_id, keyword, value, created_at, updated_at)
+            VALUES (:uid, :kw, :kw, NOW() AT TIME ZONE 'UTC', NOW() AT TIME ZONE 'UTC')
+            ON CONFLICT DO NOTHING;
+        """), {"uid": ADMIN_ID, "kw": kw})
+    conn.commit()
+    print(f"✅ Inserted defaults for user {ADMIN_ID}: {', '.join(DEFAULT_KEYWORDS)}")
+
+print("🎉 Keyword initialization complete.")
+print("======================================================")
