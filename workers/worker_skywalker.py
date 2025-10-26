@@ -1,3 +1,7 @@
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -16,7 +20,6 @@ async def process_skywalker_jobs(app):
                 if not keywords:
                     continue
 
-                # FIXED: removed await because fetch_skywalker_jobs is not async
                 jobs = fetch_skywalker_jobs(keywords)
                 logger.info(f"[Skywalker] {len(jobs)} jobs fetched for {user_id}")
 
