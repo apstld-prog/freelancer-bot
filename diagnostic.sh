@@ -37,43 +37,42 @@ python3 - <<'PYCODE'
 import os, sys
 sys.path.append(os.path.dirname(__file__))
 
-session = None
 try:
-    from db import session
-except ImportError:
+    from db_keywords import list_keywords, add_keywords
+    from db import get_session
+    session = get_session()
+    defaults = ["logo","lighting","dialux","relux","led","φωτισμός","luminaire"]
+
+    # Δοκιμή για admin (user_id = 5254014824)
+    existing = []
     try:
-        from db import SessionLocal
-        session = SessionLocal()
-    except ImportError:
+        existing = list_keywords(5254014824)
+    except Exception as e:
+        print(f"⚠️ list_keywords() failed: {e}")
+
+    if not existing:
+        print("⚠️ No keywords found for admin. Seeding defaults...")
         try:
-            from db import get_session
-            session = get_session()
-        except Exception:
-            session = None
-
-if not session:
-    print("❌ No valid DB session found in db.py (session, SessionLocal, or get_session missing).")
-else:
-    try:
-        from db_keywords import Keyword
-        defaults = ["logo","lighting","dialux","relux","led","φωτισμός","luminaire"]
-        existing = [k.keyword for k in session.query(Keyword).all()]
+            added = add_keywords(5254014824, defaults)
+            print(f"✅ Seeded {added} default keywords.")
+        except Exception as e:
+            print(f"❌ Could not seed defaults: {e}")
+    else:
         missing = [k for k in defaults if k not in existing]
-
         print(f"🗂 Found {len(existing)} keywords in DB.")
         if missing:
             print(f"⚠️ Missing: {missing}")
         else:
             print("✅ All default keywords present.")
-    except Exception as e:
-        print(f"⚠️ Could not verify keywords: {e}")
+except Exception as e:
+    print(f"⚠️ Could not verify keywords: {e}")
 PYCODE
 echo
 
 echo "👉 STEP 4: Fetch test per platform"
 echo "------------------------------------------------------"
 python3 - <<'PYCODE'
-import asyncio, sys, os
+import asyncio, sys, os, inspect
 sys.path.append(os.path.dirname(__file__))
 
 try:
@@ -84,24 +83,22 @@ except Exception as e:
     print(f"⚠️ Import error in platform modules: {e}")
     exit(0)
 
-async def run():
+async def try_fetch(name, func):
     try:
-        f = await fetch_freelancer_jobs(["test"])
-        print(f"✅ Freelancer: {len(f)} jobs fetched")
+        if inspect.iscoroutinefunction(func):
+            result = await func(["test"])
+        else:
+            result = func(["test"])
+        print(f"✅ {name}: {len(result)} jobs fetched")
     except Exception as e:
-        print(f"⚠️ Freelancer fetch error: {e}")
-    try:
-        p = await fetch_pph_jobs(["test"])
-        print(f"✅ PeoplePerHour: {len(p)} jobs fetched")
-    except Exception as e:
-        print(f"⚠️ PeoplePerHour fetch error: {e}")
-    try:
-        s = await fetch_skywalker_jobs(["test"])
-        print(f"✅ Skywalker: {len(s)} jobs fetched")
-    except Exception as e:
-        print(f"⚠️ Skywalker fetch error: {e}")
+        print(f"⚠️ {name} fetch error: {e}")
 
-asyncio.run(run())
+async def main():
+    await try_fetch("Freelancer", fetch_freelancer_jobs)
+    await try_fetch("PeoplePerHour", fetch_pph_jobs)
+    await try_fetch("Skywalker", fetch_skywalker_jobs)
+
+asyncio.run(main())
 PYCODE
 echo
 
