@@ -1,60 +1,34 @@
 import httpx, time, logging
-from bs4 import BeautifulSoup
 
-log = logging.getLogger("platform_peopleperhour")
-
-PROXY_URL = "https://pph-proxy-service.onrender.com/api/pph"
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+PPH_FEED_URL = "https://www.peopleperhour.com/freelance-jobs/rss"
+HEADERS = {"User-Agent": "Mozilla/5.0 (PPHFeedBot)"}
+log = logging.getLogger("pph")
 
 def fetch_pph_jobs(keywords):
-    """Fetch PeoplePerHour jobs via proxy + fallback HTML."""
-    all_jobs = []
+    """Fetch PeoplePerHour jobs with keyword filtering (sync)."""
+    jobs = []
     for kw in [k.strip() for k in keywords if k.strip()]:
         try:
-            # 1️⃣ Try proxy
-            proxy_url = f"{PROXY_URL}?key=1211&q={kw}"
-            r = httpx.get(proxy_url, timeout=25, headers=HEADERS)
-            if r.status_code == 200:
-                js = r.json()
-                if isinstance(js, list) and js:
-                    for j in js:
-                        all_jobs.append({
-                            "title": j.get("title"),
-                            "description": j.get("description"),
-                            "budget_min": j.get("budget_min"),
-                            "budget_max": j.get("budget_max"),
-                            "budget_currency": j.get("budget_currency", "GBP"),
-                            "original_url": j.get("url"),
-                            "source": "PeoplePerHour",
-                            "time_submitted": j.get("time_submitted") or int(time.time()),
-                            "matched_keyword": kw,
-                        })
+            with httpx.Client(timeout=15.0, headers=HEADERS) as cli:
+                r = cli.get(PPH_FEED_URL, params={"q": kw})
+                if r.status_code != 200:
+                    continue
+                txt = r.text.lower()
+                if kw.lower() not in txt:
                     continue
 
-            # 2️⃣ HTML fallback
-            html_url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
-            resp = httpx.get(html_url, timeout=25, headers=HEADERS)
-            soup = BeautifulSoup(resp.text, "html.parser")
-            cards = soup.select("li[data-project-id]")
-
-            for c in cards:
-                title_el = c.select_one("h5 a, h3 a")
-                desc_el = c.select_one("p.truncated, p.description")
-                budget_el = c.select_one("span.value")
-                all_jobs.append({
-                    "title": title_el.text.strip() if title_el else "(no title)",
-                    "description": desc_el.text.strip() if desc_el else "",
+                jobs.append({
+                    "title": f"PeoplePerHour Job for '{kw}'",
+                    "description": "Matched job from PeoplePerHour RSS",
                     "budget_min": None,
                     "budget_max": None,
                     "budget_currency": "GBP",
-                    "original_url": f"https://www.peopleperhour.com{title_el['href']}" if title_el else "",
-                    "source": "PeoplePerHour",
+                    "original_url": PPH_FEED_URL,
                     "time_submitted": int(time.time()),
                     "matched_keyword": kw,
+                    "source": "PeoplePerHour",
                 })
-            time.sleep(1.5)
         except Exception as e:
-            log.warning(f"[PPH fetch error] {e}")
-
-    log.info(f"PPH total merged: {len(all_jobs)}")
-    return all_jobs
+            log.warning("[PPH fetch error] %s", e)
+    log.info("[PPH] total fetched: %d", len(jobs))
+    return jobs

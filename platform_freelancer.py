@@ -1,4 +1,4 @@
-import httpx, time, math, datetime
+import httpx, time
 
 FREELANCER_SEARCH_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 HEADERS = {"User-Agent": "Mozilla/5.0 (FreelancerFeedBot)"}
@@ -31,7 +31,7 @@ def _normalize(p, kw):
     }
 
 def fetch_freelancer_jobs(keywords):
-    """Fetch Freelancer jobs one keyword at a time."""
+    """Fetch Freelancer jobs one keyword at a time (sync)."""
     all_jobs = []
     for kw in [k.strip() for k in keywords if k.strip()]:
         params = {

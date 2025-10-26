@@ -5,7 +5,7 @@ log = logging.getLogger("skywalker")
 FEED_URL = "https://www.skywalker.gr/jobs/feed"
 
 def fetch_skywalker_jobs(keywords):
-    """Fetch Skywalker RSS feed with keyword filtering."""
+    """Fetch Skywalker RSS feed with keyword filtering (sync)."""
     try:
         url = FEED_URL[0] if isinstance(FEED_URL, list) else FEED_URL
         txt = httpx.get(url, timeout=25, headers={"User-Agent": "Mozilla/5.0"}).text
