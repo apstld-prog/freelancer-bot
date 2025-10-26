@@ -1,31 +1,24 @@
-#!/bin/bash
-echo "======================================================"
-echo "🔍 FREELANCER BOT DIAGNOSTIC TOOL"
-echo "======================================================"
-echo "📅 Date: $(date)"
 echo ""
-
-echo "👉 STEP 1: Active processes"
+echo "👉 STEP 5: Check running Python processes (Render watchdog)"
 echo "------------------------------------------------------"
-ps aux | grep -E "worker_runner|server.py" | grep -v grep
-echo ""
+ps -ef | grep python | grep -v grep
 
-echo "👉 STEP 2: worker_runner.py (first 20 lines)"
+echo ""
+echo "👉 STEP 6: Last exit codes of background workers"
 echo "------------------------------------------------------"
-head -n 20 worker_runner.py
-echo ""
+jobs -l
 
-echo "👉 STEP 3: Running worker test..."
+echo ""
+echo "👉 STEP 7: Render service uptime and memory usage"
 echo "------------------------------------------------------"
-pkill -f worker_runner.py 2>/dev/null
-python -u worker_runner.py &
-sleep 6
-echo ""
+uptime
+free -m
 
-echo "👉 STEP 4: Last 40 log lines"
+echo ""
+echo "👉 STEP 8: Render environment check (active Python files)"
 echo "------------------------------------------------------"
-tail -n 40 logs || echo "(no logs found)"
-echo ""
+find /opt/render/project/src -maxdepth 1 -type f -name "*.py" -printf "%f\n"
 
-echo "✅ Diagnostic complete."
+echo ""
+echo "✅ Extended diagnostic complete."
 echo "======================================================"
