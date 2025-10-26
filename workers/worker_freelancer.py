@@ -16,6 +16,7 @@ def match_keyword(job, keyword):
 async def process_user(user, keywords):
     try:
         jobs = await fetch_freelancer_jobs()
+        logger.info(f"[Freelancer] {len(jobs)} jobs fetched for user {user['id']}")
         for kw in keywords:
             for job in jobs:
                 if not match_keyword(job, kw):
@@ -52,6 +53,7 @@ async def process_user(user, keywords):
 async def main_loop():
     while True:
         users = get_user_list()
+        logger.info(f"[Freelancer] Processing {len(users)} users...")
         for user in users:
             keywords = user.get("keywords", [])
             await process_user(user, keywords)
