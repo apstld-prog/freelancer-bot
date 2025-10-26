@@ -170,3 +170,34 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
     if to_insert:
         db.commit()
     return len(to_insert)
+
+# ------------------------- NEW FUNCTION -------------------------
+
+def get_user_keywords():
+    """
+    Επιστρέφει λεξικό {user_id: [keywords]} για όλους τους ενεργούς χρήστες.
+    Χρησιμοποιείται από τους workers (freelancer, pph, skywalker).
+    """
+    from sqlalchemy import text
+
+    keywords_by_user = {}
+    with engine.begin() as conn:
+        try:
+            result = conn.execute(text("""
+                SELECT user_id, value
+                FROM keyword
+                WHERE value IS NOT NULL AND value <> ''
+                ORDER BY user_id;
+            """))
+            for row in result:
+                uid, kw = row
+                kw = kw.strip()
+                if not kw:
+                    continue
+                if uid not in keywords_by_user:
+                    keywords_by_user[uid] = []
+                if kw not in keywords_by_user[uid]:
+                    keywords_by_user[uid].append(kw)
+        except Exception as e:
+            log.error(f"[DB] get_user_keywords failed: {e}")
+    return keywords_by_user
