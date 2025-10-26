@@ -29,6 +29,31 @@ def _uid_field() -> Literal["telegram_id"]:
 
 
 # ------------------------
+# Time utility — added back
+# ------------------------
+def time_ago(dt) -> str:
+    """Υπολογίζει φιλική μορφή χρόνου (π.χ. '2 hours ago')."""
+    if not dt:
+        return "N/A"
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except Exception:
+            return "N/A"
+    now = datetime.now(timezone.utc)
+    diff = now - dt
+    seconds = diff.total_seconds()
+    if seconds < 60:
+        return f"{int(seconds)} seconds ago"
+    elif seconds < 3600:
+        return f"{int(seconds // 60)} minutes ago"
+    elif seconds < 86400:
+        return f"{int(seconds // 3600)} hours ago"
+    else:
+        return f"{int(seconds // 86400)} days ago"
+
+
+# ------------------------
 # Telegram bot send utility
 # ------------------------
 logger = logging.getLogger("utils")
@@ -57,7 +82,6 @@ async def send_job_to_user(chat_id: int, job: dict):
         budget = job.get("budget", "N/A")
         keyword = job.get("keyword", "")
 
-        # Δημιουργία κύριου μηνύματος
         text = f"🧩 <b>{platform}</b>\n\n" \
                f"<b>{title}</b>\n" \
                f"{desc}\n\n" \
@@ -66,7 +90,6 @@ async def send_job_to_user(chat_id: int, job: dict):
         if keyword:
             text += f"🔑 <b>Keyword:</b> {keyword}\n"
 
-        # Inline buttons
         url = job.get("affiliate_url") or job.get("url") or job.get("original_url")
         buttons = []
         if url:
