@@ -6,7 +6,8 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from platform_peopleperhour import fetch_pph_jobs
-from utils import send_job_to_user, convert_to_usd, time_ago
+from utils import send_job_to_user, time_ago
+from currency_usd import convert_to_usd
 from db import get_user_keywords
 
 logger = logging.getLogger("worker_pph")
@@ -19,7 +20,6 @@ async def process_pph_jobs(app):
             for user_id, keywords in user_keywords.items():
                 if not keywords:
                     continue
-
                 jobs = fetch_pph_jobs(keywords)
                 logger.info(f"[PeoplePerHour] {len(jobs)} jobs fetched for {user_id}")
 
