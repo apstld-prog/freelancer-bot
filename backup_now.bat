@@ -1,73 +1,38 @@
 @echo off
-setlocal ENABLEDELAYEDEXPANSION
+REM ======================================================
+REM 🚀 FREELANCER BOT BACKUP SCRIPT (Full folders + files)
+REM ======================================================
 
-:: --------------------------------------------
-:: Freelancer Alert Bot - One-click Backup
-:: Φτιάχνει ZIP με timestamp & ΟΛΑ τα αρχεία
-:: (περιλαμβάνει .git, εξαιρεί .venv, __pycache__, backups)
-:: --------------------------------------------
+setlocal enabledelayedexpansion
 
-:: 1) Timestamp YYYYMMDD-HHMMSS (ανεκτικό σε τοπικές ρυθμίσεις)
-for /f "tokens=1-3 delims=/- " %%a in ("%date%") do (
-  set D1=%%a& set D2=%%b& set D3=%%c
-)
-:: Προσπαθούμε να ανιχνεύσουμε ποιο είναι το έτος
-if !D1! gtr 31 ( set YY=!D1!& set MM=!D2!& set DD=!D3! ) else (
-  if !D3! gtr 31 ( set YY=!D3!& set MM=!D1!& set DD=!D2! ) else (
-    set YY=!D2!& set MM=!D1!& set DD=!D3!
-  )
-)
-for /f "tokens=1-3 delims=:.," %%h in ("%time%") do ( set HH=%%h& set MI=%%i& set SS=%%j )
-if 1!HH! LSS 110 set HH=0!HH!
-set TS=%YY%%MM%%DD%-%HH%%MI%%SS%
+REM === Ρυθμίσεις φακέλων ===
+set PROJECT_DIR=%~dp0
+set BACKUP_DIR=%PROJECT_DIR%backups
+set BACKUP_NAME=backup_%date:~10,4%-%date:~4,2%-%date:~7,2%_%time:~0,2%-%time:~3,2%-%time:~6,2%.zip
 
-:: 2) Paths
-set SRC=%CD%
-set BACKUP_DIR=%SRC%\backups
-set STAGE=%TEMP%\fab_stage_%RANDOM%
-set ZIP_NAME=freelancer-bot_%TS%.zip
-set ZIP_PATH=%BACKUP_DIR%\%ZIP_NAME%
+REM === Αφαίρεση κενών από ώρα (π.χ. 09 -> 9) ===
+set BACKUP_NAME=%BACKUP_NAME: =0%
 
-:: 3) Ensure backup dir
-if not exist "%BACKUP_DIR%" mkdir "%BACKUP_DIR%"
-
-:: 4) Δημιουργία staging αντιγράφου (χωρίς .venv, __pycache__, backups)
-echo [+] Staging files...
-robocopy "%SRC%" "%STAGE%" /MIR ^
-/XD ".venv" "__pycache__" "backups" ".pytest_cache" ".mypy_cache" ".idea" ".vscode" ^
-/XF "*.pyc" "*.pyo" "*.log" >nul
-
-if errorlevel 8 (
-  echo [!] ROBOCOPY returned error. Aborting.
-  exit /b 1
+REM === Δημιουργία φακέλου backup εάν δεν υπάρχει ===
+if not exist "%BACKUP_DIR%" (
+    mkdir "%BACKUP_DIR%"
 )
 
-:: 5) Manifest με πληροφορίες Git & ώρα backup
-echo Project backup created at %date% %time%> "%STAGE%\BACKUP_MANIFEST.txt"
-git rev-parse --is-inside-work-tree >nul 2>&1
-if %errorlevel%==0 (
-  for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set GIT_BRANCH=%%b
-  for /f "delims=" %%c in ('git rev-parse HEAD') do set GIT_COMMIT=%%c
-  echo Git branch: %GIT_BRANCH%>> "%STAGE%\BACKUP_MANIFEST.txt"
-  echo Git commit: %GIT_COMMIT%>> "%STAGE%\BACKUP_MANIFEST.txt"
-  echo Untracked/modified files at time of backup:>> "%STAGE%\BACKUP_MANIFEST.txt"
-  git status --porcelain >> "%STAGE%\BACKUP_MANIFEST.txt"
-) else (
-  echo (No git repository detected)>> "%STAGE%\BACKUP_MANIFEST.txt"
-)
+echo =====================================================
+echo 📦 Δημιουργία πλήρους backup του project:
+echo Από: %PROJECT_DIR%
+echo Προς: %BACKUP_DIR%\%BACKUP_NAME%
+echo =====================================================
 
-:: 6) Συμπίεση σε ZIP (PowerShell Compress-Archive)
-echo [+] Creating ZIP: %ZIP_PATH%
-powershell -NoProfile -Command "Compress-Archive -Path '%STAGE%\*' -DestinationPath '%ZIP_PATH%' -Force" || (
-  echo [!] Compress-Archive failed. Aborting.
-  rmdir /s /q "%STAGE%"
-  exit /b 1
-)
+REM === Εξαιρέσεις (π.χ. venv, cache, __pycache__) ===
+set EXCLUDES=-xr!venv -xr!__pycache__ -xr!.git -xr!backups
 
-:: 7) Καθαρισμός staging
-rmdir /s /q "%STAGE%"
+REM === Εκτέλεση backup (περιλαμβάνει φακέλους) ===
+cd /d "%PROJECT_DIR%"
+if exist "%BACKUP_DIR%\%BACKUP_NAME%" del "%BACKUP_DIR%\%BACKUP_NAME%"
+powershell -Command "Compress-Archive -Path * -DestinationPath '%BACKUP_DIR%\%BACKUP_NAME%' -Force"
 
-echo [✓] Backup ready: %ZIP_PATH%
-echo Πατήστε οποιοδήποτε πλήκτρο για έξοδο...
-pause >nul
-endlocal
+echo ✅ Backup ολοκληρώθηκε επιτυχώς!
+echo 📁 Αποθηκεύτηκε ως: %BACKUP_DIR%\%BACKUP_NAME%
+
+pause
