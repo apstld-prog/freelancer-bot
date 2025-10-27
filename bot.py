@@ -16,6 +16,8 @@ try:
 except Exception:
     JobQueue = None  # type: ignore
 
+from sqlalchemy import text
+
 # ---------- Imports from your actual files ----------
 from db import ensure_schema, get_session, get_or_create_user_by_tid
 from config import ADMIN_IDS, TRIAL_DAYS, STATS_WINDOW_HOURS
@@ -28,7 +30,6 @@ from db_keywords import (
     delete_keywords,
     clear_keywords,
 )
-from utils import format_budget, format_currency, format_time_ago
 
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
