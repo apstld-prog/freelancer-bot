@@ -398,7 +398,7 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
         try:
             await context.bot.send_message(
                 chat_id=aid,
-                text=f✉️ Message from <code>{uid}</code>:\n\n{msg}",
+                text=f"✉️ Message from <code>{uid}</code>:\n\n{msg}",
                 parse_mode=ParseMode.HTML
             )
         except Exception:
