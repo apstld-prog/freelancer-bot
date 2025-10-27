@@ -25,7 +25,7 @@ from sqlalchemy import text
 
 from db import get_session, ensure_schema
 from utils import (
-    get_or_create_user_by_tid, add_keywords, list_keywords, delete_keywords,
+    add_keywords, list_keywords, delete_keywords,
     count_keywords, ensure_feed_events_schema, record_event,
     is_admin_user, all_admin_ids, help_footer, HELP_EN, STATS_WINDOW_HOURS
 )
