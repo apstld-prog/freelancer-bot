@@ -4,11 +4,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from telegram import (
-    Update, InlineKeyboardMarkup, InlineKeyboardButton, ParseMode
+    Update, InlineKeyboardMarkup, InlineKeyboardButton
 )
-from telegram.ext import (
+from telegram.constants import (
     Application, ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters, JobQueue
+    CallbackQueryHandler, ContextTypes, filters, ParseMode, JobQueue
 )
 from sqlalchemy import text
 
