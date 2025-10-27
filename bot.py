@@ -24,7 +24,7 @@ from telegram.ext import (
 from sqlalchemy import text
 
 from db import get_session, ensure_schema
-from utils import (
+from db_keywords import (
     add_keywords, list_keywords, delete_keywords,
     count_keywords, ensure_feed_events_schema, record_event,
     is_admin_user, all_admin_ids, help_footer, HELP_EN, STATS_WINDOW_HOURS
