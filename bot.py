@@ -45,7 +45,7 @@ def get_db_admin_ids() -> Set[int]:
     try:
         with get_session() as s:
             ids = [r[0] for r in s.execute(
-                "SELECT telegram_id FROM users WHERE is_admin=TRUE"
+                "SELECT telegram_id FROM user WHERE is_admin=TRUE"
             ).fetchall()]
         return {int(x) for x in ids if x}
     except Exception:
@@ -88,7 +88,7 @@ def help_footer(hours: int) -> str:
         "• Global: Freelancer.com (affiliate), PeoplePerHour, Malt, Workana, Guru, 99designs, "
         "Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
         "• Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
-        "<b>👑 Admin:</b> <code>/users</code> <code>/grant &lt;id&gt; &lt;days&gt;</code> "
+        "<b>👑 Admin:</b> <code>/user</code> <code>/grant &lt;id&gt; &lt;days&gt;</code> "
         "<code>/block &lt;id&gt;</code> <code>/unblock &lt;id&gt;</code> <code>/broadcast &lt;text&gt;</code> "
         "<code>/feedstatus</code>\n"
         "<i>Link previews are disabled for this message.</i>\n"
@@ -174,15 +174,15 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
+       s.execute(text(
+    "UPDATE user SET started_at=COALESCE(started_at, NOW() AT TIME ZONE 'UTC') WHERE id=:id"
+), {"id": u.id})
+
         s.execute(
-            "UPDATE users SET started_at=COALESCE(started_at, NOW() AT TIME ZONE 'UTC') WHERE id=:id",
+            "UPDATE user SET trial_until=COALESCE(trial_until, (NOW() AT TIME ZONE 'UTC') + INTERVAL ':days days') WHERE id=:id".replace(":days", str(TRIAL_DAYS)),
             {"id": u.id},
         )
-        s.execute(
-            "UPDATE users SET trial_until=COALESCE(trial_until, (NOW() AT TIME ZONE 'UTC') + INTERVAL ':days days') WHERE id=:id".replace(":days", str(TRIAL_DAYS)),
-            {"id": u.id},
-        )
-        expiry = s.execute("SELECT COALESCE(access_until, trial_until) FROM users WHERE id=:id", {"id": u.id}).scalar()
+        expiry = s.execute("SELECT COALESCE(access_until, trial_until) FROM user WHERE id=:id", {"id": u.id}).scalar()
         s.commit()
     await update.effective_chat.send_message(
         welcome_text(expiry if isinstance(expiry, datetime) else None),
@@ -200,7 +200,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         kws = list_keywords(u.id)
         row = s.execute(
-            "SELECT countries, proposal_template, started_at, trial_until, access_until, is_active, is_blocked FROM users WHERE id=:id",
+            "SELECT countries, proposal_template, started_at, trial_until, access_until, is_active, is_blocked FROM user WHERE id=:id",
             {"id": u.id},
         ).fetchone()
     await update.message.reply_text(
@@ -263,15 +263,15 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ---------- Admin ----------
-async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
         await update.message.reply_text("You are not an admin.")
         return
     with get_session() as s:
         rows = s.execute(
-            "SELECT id, telegram_id, trial_until, access_until, is_active, is_blocked FROM users ORDER BY id DESC LIMIT 200"
+            "SELECT id, telegram_id, trial_until, access_until, is_active, is_blocked FROM user ORDER BY id DESC LIMIT 200"
         ).fetchall()
-    lines = ["<b>Users</b>"]
+    lines = ["<b>User</b>"]
     for uid, tid, trial_end, lic, act, blk in rows:
         kwc = count_keywords(uid)
         lines.append(
@@ -306,7 +306,7 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days = int(context.args[1])
     until = datetime.now(timezone.utc) + timedelta(days=days)
     with get_session() as s:
-        s.execute("UPDATE users SET access_until=:dt WHERE telegram_id=:tid", {"dt": until, "tid": tid})
+        s.execute("UPDATE user SET access_until=:dt WHERE telegram_id=:tid", {"dt": until, "tid": tid})
         s.commit()
     await update.effective_chat.send_message(f"✅ Granted until {until.isoformat()} for {tid}.")
     try:
@@ -328,7 +328,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ids = [
             r[0]
             for r in s.execute(
-                "SELECT telegram_id FROM users WHERE is_active=TRUE AND is_blocked=FALSE"
+                "SELECT telegram_id FROM user WHERE is_active=TRUE AND is_blocked=FALSE"
             ).fetchall()
         ]
     for tid in ids:
@@ -336,7 +336,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=tid, text=txt, parse_mode=ParseMode.HTML)
         except Exception:
             pass
-    await update.effective_chat.send_message(f"📣 Broadcast sent to {len(ids)} users.")
+    await update.effective_chat.send_message(f"📣 Broadcast sent to {len(ids)} user.")
 
 # ---------- Scheduler + Build ----------
 async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
@@ -345,7 +345,7 @@ async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         rows = s.execute(text("""
             SELECT telegram_id, COALESCE(access_until, trial_until)
-            FROM users
+            FROM user
             WHERE is_active=TRUE AND is_blocked=FALSE
         """)).fetchall()
     for tid, expiry in rows:
@@ -387,7 +387,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
-    app.add_handler(CommandHandler("users", users_cmd))
+    app.add_handler(CommandHandler("user", user_cmd))
     app.add_handler(CommandHandler("grant", grant_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
