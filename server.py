@@ -6,16 +6,15 @@ from telegram.ext import Application
 from sqlalchemy import text
 from db import get_session
 
-from bot import build_application  # do not change bot.py structure per your request
+from bot import build_application
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("server")
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777").strip()
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()  # e.g. https://freelancer-bot-ns7s.onrender.com
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()
 
 app = FastAPI()
-
 application: Application = build_application()
 
 _is_initialized = False
@@ -23,31 +22,39 @@ _is_started = False
 
 
 def ensure_admin_user():
-    """Ensure admin exists in both user tables with correct telegram_id."""
+    """Ensure admin exists in both user tables with all required columns set."""
     try:
         with get_session() as s:
-            # Update or insert admin in 'users'
+            # Ensure admin in 'users'
             s.execute(text("""
-                INSERT INTO users (id, telegram_id, is_admin, is_active, started_at, created_at)
-                VALUES (1, 5254014824, TRUE, TRUE, NOW() AT TIME ZONE 'UTC', NOW() AT TIME ZONE 'UTC')
+                INSERT INTO users (id, telegram_id, is_admin, is_active, is_blocked, started_at, created_at)
+                VALUES (1, 5254014824, TRUE, TRUE, FALSE, NOW() AT TIME ZONE 'UTC', NOW() AT TIME ZONE 'UTC')
                 ON CONFLICT (id) DO UPDATE SET
                     telegram_id = EXCLUDED.telegram_id,
                     is_admin = TRUE,
-                    is_active = TRUE;
+                    is_active = TRUE,
+                    is_blocked = FALSE;
             """))
 
-            # Update or insert admin in 'user'
+            # Ensure admin in 'user'
             s.execute(text("""
-                INSERT INTO "user" (id, telegram_id, username, is_admin, is_active, created_at)
-                VALUES (5254014824, 5254014824, 'admin', TRUE, TRUE, NOW() AT TIME ZONE 'UTC')
+                INSERT INTO "user" (
+                    id, telegram_id, username, is_admin, is_active, is_blocked, created_at
+                )
+                VALUES (
+                    5254014824, 5254014824, 'admin', TRUE, TRUE, FALSE, NOW() AT TIME ZONE 'UTC'
+                )
                 ON CONFLICT (id) DO UPDATE SET
                     telegram_id = EXCLUDED.telegram_id,
                     username = EXCLUDED.username,
                     is_admin = TRUE,
-                    is_active = TRUE;
+                    is_active = TRUE,
+                    is_blocked = FALSE;
             """))
+
             s.commit()
-            log.info("✅ Admin user ensured in both tables.")
+            log.info("✅ Admin user ensured in both tables (with is_blocked=FALSE).")
+
     except Exception as e:
         log.exception("Failed to ensure admin user: %s", e)
 
@@ -55,13 +62,10 @@ def ensure_admin_user():
 @app.on_event("startup")
 async def on_startup():
     global _is_initialized, _is_started
-
     try:
-        # Run init scripts explicitly before Telegram startup
         os.system("python3 init_users.py")
         os.system("python3 init_keywords.py")
 
-        # Ensure admin presence before startup (prevents null telegram_id)
         ensure_admin_user()
 
         if not _is_initialized:
