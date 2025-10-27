@@ -8,6 +8,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 log = logging.getLogger("db")
+logging.basicConfig(level=logging.INFO)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -34,7 +35,7 @@ class User(Base):
     countries = Column(Text, nullable=True)
     proposal_template = Column(Text, nullable=True)
 
-    # new fields for compatibility with bot.py
+    # fields required by bot.py
     started_at = Column(TIMESTAMP(timezone=True), nullable=True)
     trial_until = Column(TIMESTAMP(timezone=True), nullable=True)
     access_until = Column(TIMESTAMP(timezone=True), nullable=True)
@@ -43,7 +44,6 @@ class User(Base):
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
     keywords = relationship("Keyword", back_populates="user", cascade="all, delete-orphan")
-
 
 class Keyword(Base):
     __tablename__ = "keyword"
@@ -57,6 +57,22 @@ class Keyword(Base):
     __table_args__ = (UniqueConstraint("user_id", "value", name="uq_keyword_user_value"),)
 
 # ------------------------- HELPERS -------------------------
+
+def ensure_schema():
+    """Ensure DB schema (tables) exists."""
+    try:
+        log.info("Ensuring database schema (users + keyword)...")
+        Base.metadata.create_all(engine)
+        with engine.begin() as conn:
+            # Ensure admin always exists if not present
+            conn.execute(text("""
+                INSERT INTO users (telegram_id, is_admin, is_active)
+                VALUES (5254014824, TRUE, TRUE)
+                ON CONFLICT (telegram_id) DO NOTHING;
+            """))
+        log.info("✅ Schema ensured successfully.")
+    except Exception as e:
+        log.exception("Failed to ensure schema: %s", e)
 
 def get_session():
     return SessionLocal()
