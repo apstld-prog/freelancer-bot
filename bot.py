@@ -37,7 +37,7 @@ def welcome_text(expiry):
 def main_menu_kb(is_admin=False):
     buttons = [
         [InlineKeyboardButton("➕ Add Keyword", callback_data="act:addkw")],
-        [InlineKeyboardButton(⚙️ Settings", callback_data="act:settings"),
+        [InlineKeyboardButton("⚙️ Settings", callback_data="act:settings"),
          InlineKeyboardButton("ℹ️ Help", callback_data="act:help")],
         [InlineKeyboardButton("📬 Contact", callback_data="act:contact")]
     ]
