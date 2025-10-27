@@ -5,7 +5,6 @@ from telegram import Update
 from telegram.ext import Application
 from sqlalchemy import text
 from db import get_session
-
 from bot import build_application
 
 logging.basicConfig(level=logging.INFO)
@@ -22,38 +21,49 @@ _is_started = False
 
 
 def ensure_admin_user():
-    """Ensure admin exists in both user tables with all required columns set."""
+    """Ensure admin exists in both user tables with all required fields set."""
     try:
         with get_session() as s:
-            # Ensure admin in 'users'
+            # USERS table
             s.execute(text("""
-                INSERT INTO users (id, telegram_id, is_admin, is_active, is_blocked, started_at, created_at)
-                VALUES (1, 5254014824, TRUE, TRUE, FALSE, NOW() AT TIME ZONE 'UTC', NOW() AT TIME ZONE 'UTC')
+                INSERT INTO users (
+                    id, telegram_id, is_admin, is_active, is_blocked, started_at, created_at, updated_at
+                )
+                VALUES (
+                    1, 5254014824, TRUE, TRUE, FALSE,
+                    NOW() AT TIME ZONE 'UTC',
+                    NOW() AT TIME ZONE 'UTC',
+                    NOW() AT TIME ZONE 'UTC'
+                )
                 ON CONFLICT (id) DO UPDATE SET
                     telegram_id = EXCLUDED.telegram_id,
                     is_admin = TRUE,
                     is_active = TRUE,
-                    is_blocked = FALSE;
+                    is_blocked = FALSE,
+                    updated_at = NOW() AT TIME ZONE 'UTC';
             """))
 
-            # Ensure admin in 'user'
+            # USER table
             s.execute(text("""
                 INSERT INTO "user" (
-                    id, telegram_id, username, is_admin, is_active, is_blocked, created_at
+                    id, telegram_id, username, is_admin, is_active, is_blocked, created_at, updated_at
                 )
                 VALUES (
-                    5254014824, 5254014824, 'admin', TRUE, TRUE, FALSE, NOW() AT TIME ZONE 'UTC'
+                    5254014824, 5254014824, 'admin', TRUE, TRUE, FALSE,
+                    NOW() AT TIME ZONE 'UTC',
+                    NOW() AT TIME ZONE 'UTC'
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     telegram_id = EXCLUDED.telegram_id,
                     username = EXCLUDED.username,
                     is_admin = TRUE,
                     is_active = TRUE,
-                    is_blocked = FALSE;
+                    is_blocked = FALSE,
+                    updated_at = NOW() AT TIME ZONE 'UTC';
             """))
 
             s.commit()
-            log.info("✅ Admin user ensured in both tables (with is_blocked=FALSE).")
+            log.info("✅ Admin user ensured in both tables (created_at & updated_at handled).")
 
     except Exception as e:
         log.exception("Failed to ensure admin user: %s", e)
