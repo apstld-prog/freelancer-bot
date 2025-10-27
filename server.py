@@ -21,13 +21,34 @@ _is_started = False
 
 
 def ensure_admin_user():
-    """Ensure admin exists in both user tables with all required fields set."""
+    """Ensure admin exists in both user tables and constraints are safe."""
     try:
         with get_session() as s:
-            # USERS table
+            # 🧱 Ensure 'user' table has at least a PK or unique constraint on id
+            s.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'user_id_unique'
+                    ) THEN
+                        BEGIN
+                            ALTER TABLE "user"
+                            ADD CONSTRAINT user_id_unique UNIQUE (id);
+                        EXCEPTION WHEN duplicate_table THEN
+                            NULL;
+                        END;
+                    END IF;
+                END
+                $$;
+            """))
+
+            # USERS TABLE
             s.execute(text("""
                 INSERT INTO users (
-                    id, telegram_id, is_admin, is_active, is_blocked, started_at, created_at, updated_at
+                    id, telegram_id, is_admin, is_active, is_blocked,
+                    started_at, created_at, updated_at
                 )
                 VALUES (
                     1, 5254014824, TRUE, TRUE, FALSE,
@@ -43,17 +64,18 @@ def ensure_admin_user():
                     updated_at = NOW() AT TIME ZONE 'UTC';
             """))
 
-            # USER table (fixes duplicate key problem on telegram_id)
+            # USER TABLE
             s.execute(text("""
                 INSERT INTO "user" (
-                    id, telegram_id, username, is_admin, is_active, is_blocked, created_at, updated_at
+                    id, telegram_id, username, is_admin, is_active, is_blocked,
+                    created_at, updated_at
                 )
                 VALUES (
                     5254014824, 5254014824, 'admin', TRUE, TRUE, FALSE,
                     NOW() AT TIME ZONE 'UTC',
                     NOW() AT TIME ZONE 'UTC'
                 )
-                ON CONFLICT (id, telegram_id) DO UPDATE SET
+                ON CONFLICT (id) DO UPDATE SET
                     username = EXCLUDED.username,
                     is_admin = TRUE,
                     is_active = TRUE,
@@ -62,7 +84,7 @@ def ensure_admin_user():
             """))
 
             s.commit()
-            log.info("✅ Admin user ensured in both tables (id + telegram_id unique constraint handled).")
+            log.info("✅ Admin ensured and unique constraint verified successfully.")
 
     except Exception as e:
         log.exception("Failed to ensure admin user: %s", e)
