@@ -343,9 +343,11 @@ async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc)
     soon = now + timedelta(hours=24)
     with get_session() as s:
-        rows = s.execute(
-            "SELECT telegram_id, COALESCE(access_until, trial_until) FROM users WHERE is_active=TRUE AND is_blocked=FALSE"
-        ).fetchall()
+        rows = s.execute(text("""
+            SELECT telegram_id, COALESCE(access_until, trial_until)
+            FROM users
+            WHERE is_active=TRUE AND is_blocked=FALSE
+        """)).fetchall()
     for tid, expiry in rows:
         if not expiry:
             continue
