@@ -34,16 +34,18 @@ def welcome_text(expiry):
         "Then you’ll start receiving job alerts instantly."
     )
 
-def main_menu_kb(is_admin=False):
-    buttons = [
-        [InlineKeyboardButton("➕ Add Keyword", callback_data="act:addkw")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="act:settings"),
-         InlineKeyboardButton("ℹ️ Help", callback_data="act:help")],
-        [InlineKeyboardButton("📬 Contact", callback_data="act:contact")]
+def main_menu_kb(is_admin: bool=False) -> InlineKeyboardMarkup:
+    kb = [
+        [InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
+        [InlineKeyboardButton("🆘 Help", callback_data="act:help"),
+         InlineKeyboardButton("💾 Saved", callback_data="act:saved")],
+        [InlineKeyboardButton("📨 Contact", callback_data="act:contact")],
     ]
     if is_admin:
-        buttons.append([InlineKeyboardButton("🛠 Admin", callback_data="act:admin")])
-    return InlineKeyboardMarkup(buttons)
+        kb.append([InlineKeyboardButton("🔥 Admin", callback_data="act:admin")])
+    return InlineKeyboardMarkup(kb)
+
 
 # ---------- SAFE PATCHED start_cmd ----------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -104,7 +106,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = get_or_create_user_by_tid(s, update.effective_user.id)
     added = add_keywords(u.id, kws)
     all_kws = list_keywords(u.id)
-    msg = f"✅ Added {added} new keyword(s)." if added else ℹ️ No new keywords added."
+    msg = f"✅ Added {added} new keyword(s)." if added else "No new keywords added."
     await update.message.reply_text(
         msg + "\n\nCurrent keywords:\n• " + (", ".join(all_kws) if all_kws else "—"),
         parse_mode=ParseMode.HTML
