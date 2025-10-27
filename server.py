@@ -43,7 +43,7 @@ def ensure_admin_user():
                     updated_at = NOW() AT TIME ZONE 'UTC';
             """))
 
-            # USER table
+            # USER table (fixes duplicate key problem on telegram_id)
             s.execute(text("""
                 INSERT INTO "user" (
                     id, telegram_id, username, is_admin, is_active, is_blocked, created_at, updated_at
@@ -53,8 +53,7 @@ def ensure_admin_user():
                     NOW() AT TIME ZONE 'UTC',
                     NOW() AT TIME ZONE 'UTC'
                 )
-                ON CONFLICT (id) DO UPDATE SET
-                    telegram_id = EXCLUDED.telegram_id,
+                ON CONFLICT (id, telegram_id) DO UPDATE SET
                     username = EXCLUDED.username,
                     is_admin = TRUE,
                     is_active = TRUE,
@@ -63,7 +62,7 @@ def ensure_admin_user():
             """))
 
             s.commit()
-            log.info("✅ Admin user ensured in both tables (created_at & updated_at handled).")
+            log.info("✅ Admin user ensured in both tables (id + telegram_id unique constraint handled).")
 
     except Exception as e:
         log.exception("Failed to ensure admin user: %s", e)
