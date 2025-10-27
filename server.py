@@ -14,20 +14,21 @@ WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()  # e.g. https://fre
 
 app = FastAPI()
 
-# Build a single global Application instance
 application: Application = build_application()
 
-# Flags to avoid double init/stop in case of multiple lifecycle events
 _is_initialized = False
 _is_started = False
 
 
 @app.on_event("startup")
 async def on_startup():
-    """Initialize and start the Telegram Application, then set webhook."""
     global _is_initialized, _is_started
 
     try:
+        # Run init scripts explicitly before Telegram startup
+        os.system("python3 init_users.py")
+        os.system("python3 init_keywords.py")
+
         if not _is_initialized:
             await application.initialize()
             _is_initialized = True
@@ -55,7 +56,6 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    """Stop and shutdown the Telegram Application."""
     global _is_initialized, _is_started
     try:
         if _is_started:
@@ -78,7 +78,6 @@ async def root():
 
 @app.post("/webhook/{secret}")
 async def tg_webhook(secret: str, request: Request):
-    """Telegram webhook endpoint."""
     if secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
 
@@ -88,7 +87,6 @@ async def tg_webhook(secret: str, request: Request):
         log.exception("Invalid JSON body on webhook")
         return Response(status_code=200)
 
-    # Light logging for diagnostics (do not log PII)
     try:
         if "message" in data:
             msg = data["message"]
@@ -104,7 +102,6 @@ async def tg_webhook(secret: str, request: Request):
         pass
 
     try:
-        # Make sure app is initialized/started (idempotent)
         global _is_initialized, _is_started
         if not _is_initialized:
             await application.initialize()
