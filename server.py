@@ -73,13 +73,6 @@ def ensure_admin_user() -> None:
             return
 
         # Δεν υπάρχει: κάνε πλήρες INSERT με όλα τα κρίσιμα πεδία.
-        # Προσοχή: Ορισμένα schemas έχουν παρακάτω στήλες (όλες nullable εκτός μερικών):
-        # id (BIGINT, PK), telegram_id (BIGINT, NOT NULL, UNIQUE),
-        # is_blocked (BOOL NOT NULL), is_active (BOOL), is_admin (BOOL),
-        # created_at (NOT NULL), updated_at (NOT NULL),
-        # trial_until, access_until, trial_start, trial_end, license_until, trial_reminder_sent,
-        # started_at, countries, proposal_template, name, username, keywords
-        #
         # Για να μην σκάνε NOT NULL: γεμίζουμε is_blocked, is_active, is_admin, created_at, updated_at.
         s.execute(
             text(
@@ -122,17 +115,19 @@ async def root() -> str:
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    # ΜΗΝ αγγίξεις schema εδώ — το κάνει ήδη το bot/db όπου χρειάζεται.
-    # Κάνε μόνο το πρακτικό ensure του admin στον πίνακα "user".
+    """
+    Εκτελείται κατά την εκκίνηση του FastAPI server.
+    Εξασφαλίζει ότι υπάρχει admin στον πίνακα 'user'
+    και προετοιμάζει το Telegram webhook.
+    """
     try:
         ensure_admin_user()
         log.info("✅ Admin ensured successfully in table \"user\".")
     except Exception as e:
         log.exception("Failed to ensure admin user in table \"user\": %s", e)
 
-    # Συνδέουμε το Telegram webhook route σε FastAPI
+    # Προετοιμασία Telegram bot
     try:
-        # Στήσε webhook (η setWebhook καλείται μέσα στο bot κατά την εκκίνηση)
         log.info("Application.initialize() done")
     except Exception as e:
         log.exception("Failed during Telegram app init: %s", e)
@@ -159,7 +154,7 @@ async def telegram_webhook(req: Request) -> Response:
 
     log.info("Incoming message: chat=%s text=%s", chat, text_msg)
 
-    # Προωθούμε ωμά το JSON update στο PTB app
+    # Προώθηση του update στην ουρά PTB
     try:
         await app_tg.update_queue.put(payload)
     except Exception as e:
@@ -167,7 +162,7 @@ async def telegram_webhook(req: Request) -> Response:
 
     return Response(status_code=200)
 
-# Health endpoint
 @app.get("/healthz", response_class=PlainTextResponse)
 async def health() -> str:
+    """Health check endpoint."""
     return "ok"
