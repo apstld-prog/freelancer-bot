@@ -21,30 +21,10 @@ _is_started = False
 
 
 def ensure_admin_user():
-    """Ensure admin exists in both user tables and constraints are safe."""
+    """Ensure admin exists in both user tables with correct fields."""
     try:
         with get_session() as s:
-            # 🧱 Ensure 'user' table has at least a PK or unique constraint on id
-            s.execute(text("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1
-                        FROM pg_constraint
-                        WHERE conname = 'user_id_unique'
-                    ) THEN
-                        BEGIN
-                            ALTER TABLE "user"
-                            ADD CONSTRAINT user_id_unique UNIQUE (id);
-                        EXCEPTION WHEN duplicate_table THEN
-                            NULL;
-                        END;
-                    END IF;
-                END
-                $$;
-            """))
-
-            # USERS TABLE
+            # USERS table (the app's main one)
             s.execute(text("""
                 INSERT INTO users (
                     id, telegram_id, is_admin, is_active, is_blocked,
@@ -64,27 +44,37 @@ def ensure_admin_user():
                     updated_at = NOW() AT TIME ZONE 'UTC';
             """))
 
-            # USER TABLE
+            # USER table (legacy / parallel)
+            # If exists -> update; else -> insert
             s.execute(text("""
-                INSERT INTO "user" (
-                    id, telegram_id, username, is_admin, is_active, is_blocked,
-                    created_at, updated_at
-                )
-                VALUES (
-                    5254014824, 5254014824, 'admin', TRUE, TRUE, FALSE,
-                    NOW() AT TIME ZONE 'UTC',
-                    NOW() AT TIME ZONE 'UTC'
-                )
-                ON CONFLICT (id) DO UPDATE SET
-                    username = EXCLUDED.username,
-                    is_admin = TRUE,
-                    is_active = TRUE,
-                    is_blocked = FALSE,
-                    updated_at = NOW() AT TIME ZONE 'UTC';
+                DO $$
+                BEGIN
+                    IF EXISTS (SELECT 1 FROM "user" WHERE telegram_id = 5254014824) THEN
+                        UPDATE "user"
+                        SET
+                            username = 'admin',
+                            is_admin = TRUE,
+                            is_active = TRUE,
+                            is_blocked = FALSE,
+                            updated_at = NOW() AT TIME ZONE 'UTC'
+                        WHERE telegram_id = 5254014824;
+                    ELSE
+                        INSERT INTO "user" (
+                            id, telegram_id, username, is_admin, is_active, is_blocked,
+                            created_at, updated_at
+                        )
+                        VALUES (
+                            5254014824, 5254014824, 'admin', TRUE, TRUE, FALSE,
+                            NOW() AT TIME ZONE 'UTC',
+                            NOW() AT TIME ZONE 'UTC'
+                        );
+                    END IF;
+                END
+                $$;
             """))
 
             s.commit()
-            log.info("✅ Admin ensured and unique constraint verified successfully.")
+            log.info("✅ Admin ensured successfully in both tables.")
 
     except Exception as e:
         log.exception("Failed to ensure admin user: %s", e)
