@@ -223,7 +223,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = get_or_create_user_by_tid(s, update.effective_user.id)
     inserted = add_keywords(u.id, kws)
     current = list_keywords(u.id)
-    msg = f"✅ Added {inserted} new keyword(s)." if inserted > 0 else ℹ️ Those keywords already exist (no changes)."
+    msg = f"✅ Added {inserted} new keyword(s)." if inserted > 0 else "ℹ️ Those keywords already exist (no changes)."
     await update.message.reply_text(
         msg + "\n\nCurrent keywords:\n• " + (", ".join(current) if current else "—"),
         parse_mode=ParseMode.HTML,
