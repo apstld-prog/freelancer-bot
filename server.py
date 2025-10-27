@@ -4,15 +4,22 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from telegram import Update
 from telegram.ext import Application
 from sqlalchemy import text
+
 from db import get_session
-from bot import build_application
+from bot import build_application  # δεν πειράζω bot.py/στήσιμο
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("server")
 
+# --------- Config / ENV ----------
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777").strip()
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()
 
+# Admin (προαιρετικά από ENV, αλλιώς τα δικά σου defaults)
+ADMIN_TG_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "5254014824"))
+ADMIN_USERS_ID = int(os.getenv("ADMIN_USERS_ID", "1"))
+
+# --------- FastAPI & Telegram Application ----------
 app = FastAPI()
 application: Application = build_application()
 
@@ -21,17 +28,24 @@ _is_started = False
 
 
 def ensure_admin_user():
-    """Ensure admin exists in both user tables with correct fields."""
+    """
+    Εξασφαλίζει ότι υπάρχει admin και στα δύο tables:
+      - users (το «νέο»/κύριο)
+      - "user" (legacy/παράλληλο)
+    Χωρίς conflicts/unique violations, χωρίς nulls.
+    """
     try:
         with get_session() as s:
-            # USERS table (the app's main one)
+            # === 1) USERS table (κύριο) ===
+            # Upsert με conflict στο PRIM KEY id (ADMIN_USERS_ID).
+            # Γεμίζουμε και created_at/updated_at για να μην έχουμε NOT NULL.
             s.execute(text("""
                 INSERT INTO users (
                     id, telegram_id, is_admin, is_active, is_blocked,
                     started_at, created_at, updated_at
                 )
                 VALUES (
-                    1, 5254014824, TRUE, TRUE, FALSE,
+                    :id, :tg, TRUE, TRUE, FALSE,
                     NOW() AT TIME ZONE 'UTC',
                     NOW() AT TIME ZONE 'UTC',
                     NOW() AT TIME ZONE 'UTC'
@@ -42,40 +56,32 @@ def ensure_admin_user():
                     is_active = TRUE,
                     is_blocked = FALSE,
                     updated_at = NOW() AT TIME ZONE 'UTC';
-            """))
+            """), {"id": ADMIN_USERS_ID, "tg": ADMIN_TG_ID})
 
-            # USER table (legacy / parallel)
-            # If exists -> update; else -> insert
+            # === 2) "user" table (legacy) ===
+            # Εδώ χρησιμοποιούμε ON CONFLICT (telegram_id) για να μην «τρακάρει»
+            # στο μοναδικό index ix_user_telegram_id που έχεις.
+            # Βάζουμε και updated_at για να μην χτυπάει NOT NULL.
             s.execute(text("""
-                DO $$
-                BEGIN
-                    IF EXISTS (SELECT 1 FROM "user" WHERE telegram_id = 5254014824) THEN
-                        UPDATE "user"
-                        SET
-                            username = 'admin',
-                            is_admin = TRUE,
-                            is_active = TRUE,
-                            is_blocked = FALSE,
-                            updated_at = NOW() AT TIME ZONE 'UTC'
-                        WHERE telegram_id = 5254014824;
-                    ELSE
-                        INSERT INTO "user" (
-                            id, telegram_id, username, is_admin, is_active, is_blocked,
-                            created_at, updated_at
-                        )
-                        VALUES (
-                            5254014824, 5254014824, 'admin', TRUE, TRUE, FALSE,
-                            NOW() AT TIME ZONE 'UTC',
-                            NOW() AT TIME ZONE 'UTC'
-                        );
-                    END IF;
-                END
-                $$;
-            """))
+                INSERT INTO "user" (
+                    id, telegram_id, username, is_admin, is_active, is_blocked,
+                    created_at, updated_at
+                )
+                VALUES (
+                    :tg, :tg, 'admin', TRUE, TRUE, FALSE,
+                    NOW() AT TIME ZONE 'UTC',
+                    NOW() AT TIME ZONE 'UTC'
+                )
+                ON CONFLICT (telegram_id) DO UPDATE SET
+                    username  = EXCLUDED.username,
+                    is_admin  = TRUE,
+                    is_active = TRUE,
+                    is_blocked= FALSE,
+                    updated_at= NOW() AT TIME ZONE 'UTC';
+            """), {"tg": ADMIN_TG_ID})
 
             s.commit()
             log.info("✅ Admin ensured successfully in both tables.")
-
     except Exception as e:
         log.exception("Failed to ensure admin user: %s", e)
 
@@ -84,9 +90,11 @@ def ensure_admin_user():
 async def on_startup():
     global _is_initialized, _is_started
     try:
+        # Δεν αλλάζω το flow σου — παραμένει όπως το έχεις
         os.system("python3 init_users.py")
         os.system("python3 init_keywords.py")
 
+        # Ασφάλεια admin μετά τα init scripts
         ensure_admin_user()
 
         if not _is_initialized:
@@ -109,7 +117,6 @@ async def on_startup():
             log.info("Webhook set to %s", url)
 
         log.info("✅ Bot started via FastAPI")
-
     except Exception:
         log.exception("Startup failed")
 
