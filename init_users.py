@@ -36,58 +36,30 @@ with engine.begin() as conn:
         WHERE table_name='{target_table}';
     """)).fetchall()
     col_names = [c[0] for c in cols]
-    print(f"📋 Columns: {col_names}")
+    print(f"📋 Columns in table '{target_table}': {col_names}")
 
-    # Build common insert/update logic
-    print(f"🧩 Inserting or updating admin user ({ADMIN_ID})...")
+    # Build correct insert/update ensuring telegram_id is NOT NULL
+    print(f"🧩 Ensuring admin user (id={ADMIN_ID}, telegram_id={ADMIN_TELEGRAM_ID})...")
 
-    if target_table == "users":
-        conn.execute(text("""
-            INSERT INTO users (
-                id, telegram_id, is_admin, is_active, is_blocked,
-                started_at, created_at, updated_at
+    if "telegram_id" not in col_names:
+        print("⚠️ Column 'telegram_id' not found — skipping admin creation for safety.")
+    else:
+        conn.execute(text(f"""
+            INSERT INTO "{target_table}" (
+                id, telegram_id, username, is_admin, is_active, is_blocked,
+                created_at, updated_at
             )
             VALUES (
-                :id, :tg, TRUE, TRUE, FALSE,
-                NOW() AT TIME ZONE 'UTC',
+                :id, :tg, :un, TRUE, TRUE, FALSE,
                 NOW() AT TIME ZONE 'UTC',
                 NOW() AT TIME ZONE 'UTC'
             )
-            ON CONFLICT (id) DO UPDATE SET
-                telegram_id = EXCLUDED.telegram_id,
-                is_admin = TRUE,
-                is_active = TRUE,
-                is_blocked = FALSE,
-                updated_at = NOW() AT TIME ZONE 'UTC';
-        """), {"id": ADMIN_ID, "tg": ADMIN_TELEGRAM_ID})
-
-    else:
-        # If "user" table, handle manually (older schema)
-        conn.execute(text("""
-            DO $$
-            BEGIN
-                IF EXISTS (SELECT 1 FROM "user" WHERE telegram_id = :tg) THEN
-                    UPDATE "user"
-                    SET
-                        username = :un,
-                        is_admin = TRUE,
-                        is_active = TRUE,
-                        is_blocked = FALSE,
-                        updated_at = NOW() AT TIME ZONE 'UTC'
-                    WHERE telegram_id = :tg;
-                ELSE
-                    INSERT INTO "user" (
-                        id, telegram_id, username, is_admin, is_active, is_blocked,
-                        created_at, updated_at
-                    )
-                    VALUES (
-                        :id, :tg, :un, TRUE, TRUE, FALSE,
-                        NOW() AT TIME ZONE 'UTC',
-                        NOW() AT TIME ZONE 'UTC'
-                    );
-                END IF;
-            END
-            $$;
+            ON CONFLICT (telegram_id) DO UPDATE
+                SET username = EXCLUDED.username,
+                    is_admin = TRUE,
+                    is_active = TRUE,
+                    is_blocked = FALSE,
+                    updated_at = NOW() AT TIME ZONE 'UTC';
         """), {"id": ADMIN_ID, "tg": ADMIN_TELEGRAM_ID, "un": ADMIN_USERNAME})
 
     print("✅ Admin ensured successfully.")
