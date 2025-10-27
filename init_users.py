@@ -26,11 +26,18 @@ with engine.begin() as conn:
     table_names = [t[0] for t in tables]
     print(f"✅ Found user-related tables: {table_names}")
 
-    # Prefer "users" if exists, else fallback to "user"
-    target_table = "users" if "users" in table_names else "user"
+    # Prefer table 'user' if exists (it’s the complete one)
+    if "user" in table_names:
+        target_table = "user"
+    elif "users" in table_names:
+        target_table = "users"
+    else:
+        print("❌ No suitable user table found. Exiting.")
+        exit(1)
+
     print(f"📊 Using table: {target_table}")
 
-    # Detect columns
+    # Detect available columns
     cols = conn.execute(text(f"""
         SELECT column_name FROM information_schema.columns
         WHERE table_name='{target_table}';
@@ -38,29 +45,36 @@ with engine.begin() as conn:
     col_names = [c[0] for c in cols]
     print(f"📋 Columns in table '{target_table}': {col_names}")
 
-    # Build correct insert/update ensuring telegram_id is NOT NULL
+    # Base insert
+    sql_cols = ["id", "telegram_id", "is_admin", "is_active", "is_blocked", "created_at", "updated_at"]
+    sql_vals = [":id", ":tg", "TRUE", "TRUE", "FALSE", "NOW() AT TIME ZONE 'UTC'", "NOW() AT TIME ZONE 'UTC'"]
+
+    # Add username column only if it exists
+    if "username" in col_names:
+        sql_cols.insert(2, "username")
+        sql_vals.insert(2, ":un")
+
+    sql = f"""
+        INSERT INTO "{target_table}" ({', '.join(sql_cols)})
+        VALUES ({', '.join(sql_vals)})
+        ON CONFLICT (telegram_id) DO UPDATE
+        SET is_admin = TRUE,
+            is_active = TRUE,
+            is_blocked = FALSE,
+            updated_at = NOW() AT TIME ZONE 'UTC'
+    """
+
+    if "username" in col_names:
+        sql += ", username = EXCLUDED.username"
+
+    sql += ";"
+
     print(f"🧩 Ensuring admin user (id={ADMIN_ID}, telegram_id={ADMIN_TELEGRAM_ID})...")
 
-    if "telegram_id" not in col_names:
-        print("⚠️ Column 'telegram_id' not found — skipping admin creation for safety.")
-    else:
-        conn.execute(text(f"""
-            INSERT INTO "{target_table}" (
-                id, telegram_id, username, is_admin, is_active, is_blocked,
-                created_at, updated_at
-            )
-            VALUES (
-                :id, :tg, :un, TRUE, TRUE, FALSE,
-                NOW() AT TIME ZONE 'UTC',
-                NOW() AT TIME ZONE 'UTC'
-            )
-            ON CONFLICT (telegram_id) DO UPDATE
-                SET username = EXCLUDED.username,
-                    is_admin = TRUE,
-                    is_active = TRUE,
-                    is_blocked = FALSE,
-                    updated_at = NOW() AT TIME ZONE 'UTC';
-        """), {"id": ADMIN_ID, "tg": ADMIN_TELEGRAM_ID, "un": ADMIN_USERNAME})
+    conn.execute(
+        text(sql),
+        {"id": ADMIN_ID, "tg": ADMIN_TELEGRAM_ID, "un": ADMIN_USERNAME},
+    )
 
     print("✅ Admin ensured successfully.")
 
