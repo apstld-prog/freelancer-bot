@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 from sqlalchemy import text
 
-from db import get_session, ensure_schema, ensure_feed_events_schema, ensure_keyword_unique
+from db import get_session, ensure_schema, ensure_keyword_unique
 from utils import (
     get_or_create_user_by_tid, add_keywords, list_keywords, delete_keywords,
     count_keywords, ensure_feed_events_schema, record_event,
