@@ -60,7 +60,7 @@ def is_admin_user(tid: int) -> bool:
 def main_menu_kb(is_admin: bool=False) -> InlineKeyboardMarkup:
     kb = [
         [InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
-         InlineKeyboardButton(⚙️ Settings", callback_data="act:settings")],
+         InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
         [InlineKeyboardButton("🆘 Help", callback_data="act:help"),
          InlineKeyboardButton("💾 Saved", callback_data="act:saved")],
         [InlineKeyboardButton("📨 Contact", callback_data="act:contact")],
