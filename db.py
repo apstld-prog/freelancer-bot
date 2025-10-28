@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import datetime, timezone
+
 from sqlalchemy import (
     create_engine, Column, Integer, BigInteger, Text, Boolean,
     TIMESTAMP, ForeignKey, text, UniqueConstraint
@@ -8,9 +9,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 log = logging.getLogger("db")
-logging.basicConfig(level=logging.INFO)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgres://user:pass@host/db
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL env var is required")
 
@@ -24,21 +24,17 @@ def now_utc():
 # ------------------------- MODELS -------------------------
 
 class User(Base):
-    __tablename__ = "users"
-    id = Column(BigInteger, primary_key=True)
+    __tablename__ = "user"
+    id = Column(Integer, primary_key=True)
     telegram_id = Column(BigInteger, unique=True, nullable=False)
 
+    # minimal fields we actually use
     is_admin = Column(Boolean, nullable=False, server_default=text("false"))
     is_active = Column(Boolean, nullable=False, server_default=text("true"))
     is_blocked = Column(Boolean, nullable=False, server_default=text("false"))
 
     countries = Column(Text, nullable=True)
     proposal_template = Column(Text, nullable=True)
-
-    # fields required by bot.py
-    started_at = Column(TIMESTAMP(timezone=True), nullable=True)
-    trial_until = Column(TIMESTAMP(timezone=True), nullable=True)
-    access_until = Column(TIMESTAMP(timezone=True), nullable=True)
 
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
@@ -47,32 +43,83 @@ class User(Base):
 
 class Keyword(Base):
     __tablename__ = "keyword"
-    id = Column(BigInteger, primary_key=True)
-    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    # always use VALUE as the single source of truth
     value = Column(Text, nullable=False)
+
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
     user = relationship("User", back_populates="keywords")
     __table_args__ = (UniqueConstraint("user_id", "value", name="uq_keyword_user_value"),)
 
-# ------------------------- HELPERS -------------------------
+# ------------------------- SCHEMA / MIGRATIONS -------------------------
+
+def _safe_exec(session, sql: str):
+    try:
+        session.execute(text(sql))
+        session.commit()
+        return True
+    except Exception as e:
+        session.rollback()
+        log.warning("migrate skip: %s", e)
+        return False
 
 def ensure_schema():
-    """Ensure DB schema (tables) exists."""
-    try:
-        log.info("Ensuring database schema (users + keyword)...")
-        Base.metadata.create_all(engine)
-        with engine.begin() as conn:
-            # Ensure admin always exists if not present
-            conn.execute(text("""
-                INSERT INTO users (telegram_id, is_admin, is_active)
-                VALUES (5254014824, TRUE, TRUE)
-                ON CONFLICT (telegram_id) DO NOTHING;
-            """))
-        log.info("✅ Schema ensured successfully.")
-    except Exception as e:
-        log.exception("Failed to ensure schema: %s", e)
+    Base.metadata.create_all(bind=engine)
+
+    # Migrate “value” column if table exists with legacy columns
+    with SessionLocal() as s:
+        _safe_exec(s, """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='keyword' AND column_name='value'
+            ) THEN
+                ALTER TABLE keyword ADD COLUMN value TEXT NULL;
+            END IF;
+
+            -- backfill from legacy columns if they exist
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='keyword' AND column_name='keyword'
+            ) THEN
+                UPDATE keyword SET value = COALESCE(value, keyword) WHERE value IS NULL OR value='';
+            END IF;
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='keyword' AND column_name='name'
+            ) THEN
+                UPDATE keyword SET value = COALESCE(value, name) WHERE value IS NULL OR value='';
+            END IF;
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='keyword' AND column_name='term'
+            ) THEN
+                UPDATE keyword SET value = COALESCE(value, term) WHERE value IS NULL OR value='';
+            END IF;
+
+            UPDATE keyword SET value = '' WHERE value IS NULL;
+            ALTER TABLE keyword ALTER COLUMN value SET NOT NULL;
+        END $$;
+        """)
+
+        _safe_exec(s, """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_indexes
+                WHERE schemaname = 'public' AND indexname = 'uq_keyword_user_value'
+            ) THEN
+                CREATE UNIQUE INDEX uq_keyword_user_value
+                    ON keyword(user_id, value);
+            END IF;
+        END $$;
+        """)
+
+# ------------------------- HELPERS -------------------------
 
 def get_session():
     return SessionLocal()
@@ -92,8 +139,10 @@ def list_user_keywords(db, user_id: int) -> list[str]:
     return [r.value for r in rows]
 
 def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
+    """Insert unique keywords (case-insensitive). Returns how many were inserted."""
     if not keywords:
         return 0
+    # normalize: strip, lower, dedupe
     normalized = []
     seen = set()
     for k in keywords:
@@ -121,27 +170,3 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
     if to_insert:
         db.commit()
     return len(to_insert)
-
-def get_user_keywords():
-    from sqlalchemy import text
-    keywords_by_user = {}
-    with engine.begin() as conn:
-        try:
-            result = conn.execute(text("""
-                SELECT user_id, value
-                FROM keyword
-                WHERE value IS NOT NULL AND value <> ''
-                ORDER BY user_id;
-            """))
-            for row in result:
-                uid, kw = row
-                kw = kw.strip()
-                if not kw:
-                    continue
-                if uid not in keywords_by_user:
-                    keywords_by_user[uid] = []
-                if kw not in keywords_by_user[uid]:
-                    keywords_by_user[uid].append(kw)
-        except Exception as e:
-            log.error(f"[DB] get_user_keywords failed: {e}")
-    return keywords_by_user

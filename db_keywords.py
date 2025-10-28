@@ -5,27 +5,22 @@ from db import get_session
 
 _CACHE: Dict[str, Any] = {"cols": None, "nulls": None, "has_created": None, "has_updated": None}
 
-
-# =====================================================
-# INTERNAL DETECTION HELPERS
-# =====================================================
 def _detect_cols(conn) -> Tuple[bool, bool]:
     """Return (has_keyword, has_value) for table keyword."""
     if _CACHE["cols"] is not None:
-        return _CACHE["cols"]
+        return _CACHE["cols"]  # type: ignore
     rows = conn.execute(text("""
         SELECT column_name FROM information_schema.columns
         WHERE table_name='keyword' AND column_name IN ('keyword','value')
     """)).fetchall()
     names = {r[0] for r in rows}
     _CACHE["cols"] = ("keyword" in names, "value" in names)
-    return _CACHE["cols"]
-
+    return _CACHE["cols"]  # type: ignore
 
 def _detect_nullability(conn) -> Tuple[bool, bool]:
     """Return (value_not_null, keyword_not_null)."""
     if _CACHE["nulls"] is not None:
-        return _CACHE["nulls"]
+        return _CACHE["nulls"]  # type: ignore
     rows = conn.execute(text("""
         SELECT column_name, is_nullable
         FROM information_schema.columns
@@ -33,8 +28,7 @@ def _detect_nullability(conn) -> Tuple[bool, bool]:
     """)).fetchall()
     nn = {r[0]: (r[1] == "NO") for r in rows}
     _CACHE["nulls"] = (nn.get("value", False), nn.get("keyword", False))
-    return _CACHE["nulls"]
-
+    return _CACHE["nulls"]  # type: ignore
 
 def _detect_ts_cols(conn):
     if _CACHE["has_created"] is not None:
@@ -48,10 +42,6 @@ def _detect_ts_cols(conn):
     _CACHE["has_updated"] = "updated_at" in names
     return _CACHE["has_created"], _CACHE["has_updated"]
 
-
-# =====================================================
-# UNIQUE INDEX MANAGEMENT
-# =====================================================
 def ensure_keyword_unique():
     with get_session() as s:
         conn = s.connection()
@@ -62,10 +52,6 @@ def ensure_keyword_unique():
             s.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_keyword_user_value   ON keyword (user_id, value)"))
         s.commit()
 
-
-# =====================================================
-# PUBLIC OPERATIONS
-# =====================================================
 def list_keywords(user_id: int) -> List[str]:
     with get_session() as s:
         has_kw, has_val = _detect_cols(s.connection())
@@ -78,11 +64,9 @@ def list_keywords(user_id: int) -> List[str]:
         rows = s.execute(text(q), {"uid": user_id}).fetchall()
         return [r[0] for r in rows]
 
-
 def count_keywords(user_id: int) -> int:
     with get_session() as s:
         return int(s.execute(text("SELECT COUNT(*) FROM keyword WHERE user_id=:uid"), {"uid": user_id}).scalar() or 0)
-
 
 def add_keywords(user_id: int, kws: List[str]) -> int:
     """Add keywords for given user, ensuring user_id column is BIGINT-safe."""
@@ -92,6 +76,7 @@ def add_keywords(user_id: int, kws: List[str]) -> int:
     with get_session() as s:
         conn = s.connection()
 
+        # Ensure user_id column is BIGINT, not INTEGER (for large Telegram IDs)
         try:
             conn.execute(text("""
                 DO $$
@@ -107,12 +92,14 @@ def add_keywords(user_id: int, kws: List[str]) -> int:
                 END$$;
             """))
         except Exception as e:
+            # Δεν σταματάμε αν αποτύχει, απλώς ενημερώνουμε το log
             print(f"⚠️ Warning: Could not auto-convert user_id to BIGINT: {e}")
 
         has_kw, has_val = _detect_cols(conn)
         val_nn, kw_nn = _detect_nullability(conn)
         has_created, has_updated = _detect_ts_cols(conn)
 
+        # Columns to insert
         cols = ["user_id"]
         vals = [":uid"]
 
@@ -134,9 +121,8 @@ def add_keywords(user_id: int, kws: List[str]) -> int:
         s.commit()
     return inserted
 
-
 def delete_keywords(user_id: int, kws: List[str]) -> int:
-    if not kws:
+    if not kws: 
         return 0
     with get_session() as s:
         conn = s.connection()
@@ -151,42 +137,8 @@ def delete_keywords(user_id: int, kws: List[str]) -> int:
         s.commit()
         return int(getattr(res, "rowcount", 0))
 
-
 def clear_keywords(user_id: int) -> int:
     with get_session() as s:
         res = s.execute(text("DELETE FROM keyword WHERE user_id=:uid"), {"uid": user_id})
         s.commit()
         return int(getattr(res, "rowcount", 0))
-
-
-# =====================================================
-# NEW: AUTO INITIALIZER
-# =====================================================
-def ensure_keywords():
-    """
-    Ensures that default keywords exist for the admin user (id=1).
-    Compatible with bot.py startup.
-    """
-    DEFAULTS = ["logo", "lighting", "led", "dialux", "relux", "photometric"]
-    ADMIN_ID = 1
-
-    with get_session() as s:
-        existing = s.execute(text("SELECT COUNT(*) FROM keyword WHERE user_id=:uid"), {"uid": ADMIN_ID}).scalar() or 0
-        if existing == 0:
-            print("🧩 Seeding default keywords for admin (auto)...")
-            for kw in DEFAULTS:
-                try:
-                    s.execute(
-                        text("""
-                            INSERT INTO keyword (user_id, keyword, value, created_at, updated_at)
-                            VALUES (:uid, :kw, :kw, NOW() AT TIME ZONE 'UTC', NOW() AT TIME ZONE 'UTC')
-                            ON CONFLICT DO NOTHING;
-                        """),
-                        {"uid": ADMIN_ID, "kw": kw}
-                    )
-                except Exception as e:
-                    print(f"⚠️ Keyword '{kw}' insert failed:", e)
-            s.commit()
-            print("✅ Default keywords ensured successfully.")
-        else:
-            print(f"✅ Admin already has {existing} keywords — skipping.")

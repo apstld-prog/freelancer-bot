@@ -35,20 +35,25 @@ if [ ! -d "data" ]; then
 fi
 
 # ------------------------------------------------------
-# STEP 1: (removed old init scripts)
+# STEP 1: Ensure base users (admin + defaults)
 # ------------------------------------------------------
-echo "[Init] Skipping old admin initialization scripts (handled by server.py)"
-# python3 init_users.py || echo "⚠️  init_users failed or already ensured."
-# python3 init_admin_user.py || echo "⚠️  Admin user init failed or already exists."
+echo "[Init] Ensuring users (admin & defaults)..."
+python3 init_users.py || echo "⚠️  init_users failed or already ensured."
 
 # ------------------------------------------------------
-# STEP 2: Ensure default keywords
+# STEP 2: Ensure admin user (legacy support)
+# ------------------------------------------------------
+echo "[Init] Ensuring admin user..."
+python3 init_admin_user.py || echo "⚠️  Admin user init failed or already exists."
+
+# ------------------------------------------------------
+# STEP 3: Ensure default keywords
 # ------------------------------------------------------
 echo "[Init] Ensuring default keywords..."
 python3 init_keywords.py || echo "⚠️  Keyword seeding skipped or already done."
 
 # ------------------------------------------------------
-# STEP 3: Start background workers
+# STEP 4: Start background workers
 # ------------------------------------------------------
 echo "[Worker] Starting background processes..."
 python3 workers/worker_freelancer.py > logs/worker_freelancer.log 2>&1 &
@@ -63,7 +68,7 @@ echo "           - worker_skywalker.py"
 echo "------------------------------------------------------"
 
 # ------------------------------------------------------
-# STEP 4: Start FastAPI server
+# STEP 5: Start FastAPI server
 # ------------------------------------------------------
 echo "[Server] Starting FastAPI + Telegram bot via uvicorn..."
 python3 -m uvicorn server:app --host 0.0.0.0 --port 10000
