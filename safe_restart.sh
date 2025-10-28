@@ -32,9 +32,9 @@ echo
 
 # Step 3 — restart all workers cleanly
 echo "👉 Restarting workers..."
-nohup python -u worker_freelancer.py > logs/worker_freelancer.log 2>&1 &
-nohup python -u worker_pph.py > logs/worker_pph.log 2>&1 &
-nohup python -u worker_skywalker.py > logs/worker_skywalker.log 2>&1 &
+nohup python -u workers/worker_freelancer.py > logs/worker_freelancer.log 2>&1 &
+nohup python -u workers/worker_pph.py > logs/worker_pph.log 2>&1 &
+nohup python -u workers/worker_skywalker.py > logs/worker_skywalker.log 2>&1 &
 sleep 2
 
 # Step 4 — verify processes are up
