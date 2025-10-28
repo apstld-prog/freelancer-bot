@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Literal
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from utils_fx import to_usd
 
 # ------------------------
 # Trial settings
