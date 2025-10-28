@@ -1,7 +1,6 @@
 import os
 import logging
 from datetime import datetime, timezone
-
 from sqlalchemy import (
     create_engine, Column, Integer, BigInteger, Text, Boolean,
     TIMESTAMP, ForeignKey, text, UniqueConstraint
@@ -10,7 +9,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 log = logging.getLogger("db")
 
-DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgres://user:pass@host/db
+DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL env var is required")
 
@@ -21,40 +20,36 @@ Base = declarative_base()
 def now_utc():
     return datetime.now(timezone.utc)
 
-# ------------------------- MODELS -------------------------
+# ======================================================
+# MODELS
+# ======================================================
 
 class User(Base):
     __tablename__ = "user"
     id = Column(Integer, primary_key=True)
     telegram_id = Column(BigInteger, unique=True, nullable=False)
-
-    # minimal fields we actually use
     is_admin = Column(Boolean, nullable=False, server_default=text("false"))
     is_active = Column(Boolean, nullable=False, server_default=text("true"))
     is_blocked = Column(Boolean, nullable=False, server_default=text("false"))
-
     countries = Column(Text, nullable=True)
     proposal_template = Column(Text, nullable=True)
-
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
-
     keywords = relationship("Keyword", back_populates="user", cascade="all, delete-orphan")
 
 class Keyword(Base):
     __tablename__ = "keyword"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
-    # always use VALUE as the single source of truth
     value = Column(Text, nullable=False)
-
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
-
     user = relationship("User", back_populates="keywords")
     __table_args__ = (UniqueConstraint("user_id", "value", name="uq_keyword_user_value"),)
 
-# ------------------------- SCHEMA / MIGRATIONS -------------------------
+# ======================================================
+# SCHEMA / MIGRATIONS
+# ======================================================
 
 def _safe_exec(session, sql: str):
     try:
@@ -68,8 +63,6 @@ def _safe_exec(session, sql: str):
 
 def ensure_schema():
     Base.metadata.create_all(bind=engine)
-
-    # Migrate “value” column if table exists with legacy columns
     with SessionLocal() as s:
         _safe_exec(s, """
         DO $$
@@ -81,7 +74,6 @@ def ensure_schema():
                 ALTER TABLE keyword ADD COLUMN value TEXT NULL;
             END IF;
 
-            -- backfill from legacy columns if they exist
             IF EXISTS (
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name='keyword' AND column_name='keyword'
@@ -105,7 +97,6 @@ def ensure_schema():
             ALTER TABLE keyword ALTER COLUMN value SET NOT NULL;
         END $$;
         """)
-
         _safe_exec(s, """
         DO $$
         BEGIN
@@ -119,7 +110,9 @@ def ensure_schema():
         END $$;
         """)
 
-# ------------------------- HELPERS -------------------------
+# ======================================================
+# HELPERS
+# ======================================================
 
 def get_session():
     return SessionLocal()
@@ -139,68 +132,53 @@ def list_user_keywords(db, user_id: int) -> list[str]:
     return [r.value for r in rows]
 
 def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
-    """Insert unique keywords (case-insensitive). Returns how many were inserted."""
     if not keywords:
         return 0
-    # normalize: strip, lower, dedupe
-    normalized = []
-    seen = set()
+    normalized, seen = [], set()
     for k in keywords:
-        v = (k or "").strip()
-        if not v:
-            continue
-        v = v.lower()
-        if v in seen:
+        v = (k or "").strip().lower()
+        if not v or v in seen:
             continue
         seen.add(v)
         normalized.append(v)
-
-    if not normalized:
-        return 0
-
     existing = {k.value for k in db.query(Keyword).filter(
         Keyword.user_id == user_id,
         Keyword.value.in_(normalized)
     ).all()}
-
     to_insert = [v for v in normalized if v not in existing]
     for v in to_insert:
         db.add(Keyword(user_id=user_id, value=v))
-
     if to_insert:
         db.commit()
     return len(to_insert)
-# ======================================================
-# get_user_keywords — fetch all keywords per user
-# ======================================================
-from sqlalchemy import text
 
+# ======================================================
+# get_user_keywords — fixed for “value” column
+# ======================================================
 def get_user_keywords():
-    """Return {telegram_id: [keywords]} for all active users."""
+    """Return {telegram_id: [keywords]} for all active users (reads value column)."""
     result = {}
     try:
         with get_session() as s:
-            # Auto-detect correct table name
             tables = [r[0] for r in s.execute(
                 text("SELECT table_name FROM information_schema.tables WHERE table_schema='public';")
             ).fetchall()]
             table = "users" if "users" in tables else "user"
-
-            # Join keywords with users table
-            rows = s.execute(text(f"""
-                SELECT u.telegram_id, k.keyword
+            sql = f"""
+                SELECT u.telegram_id, k.value
                 FROM {table} AS u
                 LEFT JOIN keyword AS k ON k.user_id = u.id
                 WHERE u.is_active = TRUE OR u.is_admin = TRUE
                 ORDER BY u.telegram_id
-            """)).fetchall()
-
+            """
+            rows = s.execute(text(sql)).fetchall()
             for tid, kw in rows:
                 if not tid:
                     continue
                 result.setdefault(int(tid), [])
                 if kw and kw not in result[tid]:
                     result[tid].append(kw)
+        print(f"[get_user_keywords] ✅ Loaded keywords for {len(result)} users")
     except Exception as e:
-        print(f"[get_user_keywords] error: {e}")
+        print(f"[get_user_keywords] ❌ Error: {e}")
     return result
