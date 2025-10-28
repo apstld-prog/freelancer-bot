@@ -1,73 +1,45 @@
-# ============================
-# 🚀 FREELANCER BOT GITIGNORE
-# ============================
+# ===============================
+# FREELANCER BOT - GITIGNORE FILE
+# ===============================
 
-# 🧠 Python build artifacts
+# Virtual environments
+.venv/
+venv/
+
+# Cache and compiled files
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-*.so
-*.egg
-*.egg-info/
-.eggs/
+*$py.class
 
-# ⚙️ Virtual environment
-.venv/
-env/
-venv/
-ENV/
-
-# 🧩 System files
+# System files
 .DS_Store
 Thumbs.db
-
-# 🔒 Environment & local configs
-*.env
-.env.*
-!freelancer-bot.env        # επιτρέπουμε ρητά το κύριο env αρχείο
-
-# 📦 Backup files (κρατάμε μόνο το φάκελο, όχι τα περιεχόμενα)
-backups/*
-!backups/.keep              # άδειο αρχείο για να υπάρχει ο φάκελος
-
-# 🗂 Logs
-logs/
-*.log
-nohup.out
-
-# 🌐 Cache & temporary
-*.cache
-*.tmp
 *.bak
+*.tmp
 *.swp
-*.lock
 
-# 💻 Node / web build folders (αν υπάρχουν)
-node_modules/
-dist/
+# Env and secrets
+.env
+.env.*
+
+# Logs
+logs/*
+!logs/.keep
+
+# Build and dist
 build/
+dist/
+*.egg-info/
 
-# 🧩 Render artifacts
-.render/
-*.sqlite
-*.db-journal
-
-# ============================
-# ✅ Folders to include
-# ============================
-!data/
-!feeds/
-!static/
+# ===== INCLUDE EXCEPTIONS =====
+# Ensure workers & data are always committed
 !workers/
-!pph-proxy-service/
+!workers/**
+!data/
+!data/**
 
-# ✅ Include the Render startup scripts
-!start.sh
-!diagnostic.sh
-!git_auto_push.bat
+# Keep shell scripts
+!*.sh
 
-# ============================
-# ✅ Include Python source files
-# ============================
-!*.py
+# Keep BAT files
+!*.bat
