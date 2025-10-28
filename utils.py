@@ -3,7 +3,6 @@ import os
 import httpx
 from datetime import datetime, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot
-from db import get_all_active_users
 from db_keywords import get_all_user_keywords
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -12,6 +11,10 @@ bot = Bot(token=BOT_TOKEN)
 CURRENCY_RATES = {"USD": 1.0}
 CURRENCY_API_URL = "https://api.exchangerate.host/latest?base=USD"
 
+
+# =======================================================
+# Currency and conversion
+# =======================================================
 async def update_currency_rates():
     """Update FX rates from exchangerate.host"""
     global CURRENCY_RATES
@@ -20,9 +23,10 @@ async def update_currency_rates():
             resp = await client.get(CURRENCY_API_URL)
             if resp.status_code == 200:
                 CURRENCY_RATES = resp.json().get("rates", {})
-                logging.info(f"[utils] Updated currency rates ({len(CURRENCY_RATES)} entries)")
+                logging.info(f"[utils] ✅ Updated currency rates ({len(CURRENCY_RATES)} entries)")
     except Exception as e:
-        logging.warning(f"[utils] Failed to update FX rates: {e}")
+        logging.warning(f"[utils] ⚠️ Failed to update FX rates: {e}")
+
 
 def convert_to_usd(amount, currency):
     """Convert arbitrary currency to USD"""
@@ -34,6 +38,10 @@ def convert_to_usd(amount, currency):
     except Exception:
         return amount
 
+
+# =======================================================
+# Formatting helpers
+# =======================================================
 def format_time_ago(created_at):
     """Display human readable relative time"""
     if not created_at:
@@ -49,6 +57,7 @@ def format_time_ago(created_at):
         return f"{hours} hours ago"
     minutes = (delta.seconds % 3600) // 60
     return f"{minutes} min ago"
+
 
 def build_job_message(job):
     """Compose formatted message body"""
@@ -71,6 +80,7 @@ def build_job_message(job):
         f"{desc.strip()[:500]}"
     )
 
+
 def build_job_buttons(job):
     """Unified Telegram buttons layout"""
     proposal_url = job.get("proposal_url") or job.get("affiliate_url") or "#"
@@ -89,10 +99,13 @@ def build_job_buttons(job):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-async def send_job_to_user(user_id, job):
+
+# =======================================================
+# Messaging helpers
+# =======================================================
+async def send_job_to_user(bot_instance, user_id, text, job):
     """Send job message to one user"""
     try:
-        text = build_job_message(job)
         buttons = build_job_buttons(job)
         await bot.send_message(
             chat_id=user_id,
@@ -101,21 +114,6 @@ async def send_job_to_user(user_id, job):
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-        logging.info(f"[send_job_to_user] ✅ Sent {job.get('platform')} job to {user_id} (kw={job.get('keyword')})")
+        logging.info(f"[send_job_to_user] ✅ Sent {job.get('platform')} job to {user_id}")
     except Exception as e:
         logging.error(f"[send_job_to_user] ❌ Failed to send to {user_id}: {e}")
-
-async def broadcast_jobs(jobs):
-    """Send each job to all active users filtered by keywords"""
-    users = get_all_active_users()
-    if not users:
-        logging.warning("[broadcast_jobs] No active users found.")
-        return
-    for user in users:
-        user_keywords = get_all_user_keywords(user.telegram_id)
-        for job in jobs:
-            for kw in user_keywords:
-                if kw.lower() in (job.get("title", "") + job.get("description", "")).lower():
-                    job["keyword"] = kw
-                    await send_job_to_user(user.telegram_id, job)
-                    break
