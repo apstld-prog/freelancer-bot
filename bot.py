@@ -1,222 +1,183 @@
-import os, logging, asyncio, re
-from types import SimpleNamespace
-from datetime import datetime, timedelta, timezone
-from typing import List, Set, Optional
+import asyncio
+import logging
+from datetime import datetime, timedelta
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder, Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters,
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    JobQueue,
 )
 
-try:
-    from telegram.ext import JobQueue
-except Exception:
-    JobQueue = None  # type: ignore
+from fastapi import FastAPI
+import uvicorn
 
-from sqlalchemy import text
-
-from db import ensure_schema, get_session, get_or_create_user_by_tid
-from config import ADMIN_IDS, TRIAL_DAYS, STATS_WINDOW_HOURS
-from db_events import ensure_feed_events_schema, get_platform_stats, record_event
-from db_keywords import (
-    list_keywords, add_keywords, count_keywords,
-    ensure_keyword_unique, delete_keywords, clear_keywords
+from db import get_session, ensure_schema
+from utils import (
+    get_or_create_user_by_tid,
+    is_admin_user,
+    welcome_text,
+    help_footer,
+    format_currency,
+    format_time_ago,
 )
+from db_keywords import ensure_keywords
+from handlers_start import register_start_handlers
+from handlers_help import register_help_handlers
+from handlers_jobs import register_job_handlers
+from handlers_settings import register_settings_handlers
 
 log = logging.getLogger("bot")
-logging.basicConfig(level=logging.INFO)
+app = Application.builder().token("YOUR_BOT_TOKEN_HERE").build()
+fastapi_app = FastAPI()
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
-ADMIN_ELEVATE_SECRET = os.getenv("ADMIN_ELEVATE_SECRET", "")
+TRIAL_DAYS = 10
+STATS_WINDOW_HOURS = 24
 
-
-# ---------- Admin helpers ----------
-def get_db_admin_ids() -> Set[int]:
-    """Read admins from user table."""
-    try:
-        with get_session() as s:
-            ids = [r[0] for r in s.execute(
-                text('SELECT telegram_id FROM user WHERE is_admin=TRUE')
-            ).fetchall()]
-        return {int(x) for x in ids if x}
-    except Exception:
-        return set()
-
-
-def all_admin_ids() -> Set[int]:
-    return set(int(x) for x in (ADMIN_IDS or [])) | get_db_admin_ids()
-
-
-def is_admin_user(tid: int) -> bool:
-    return tid in all_admin_ids()
-
-
-# ---------- UI ----------
-def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
-    kb = [
-        [InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
-         InlineKeyboardButton("Settings ⚙️", callback_data="act:settings")],
-        [InlineKeyboardButton("Help 🆘", callback_data="act:help"),
-         InlineKeyboardButton("Saved 💾", callback_data="act:saved")],
-        [InlineKeyboardButton("Contact 📨", callback_data="act:contact")],
+# ========== MAIN MENU KEYBOARD ==========
+def main_menu_kb(is_admin=False):
+    buttons = [
+        [InlineKeyboardButton("📰 Latest Jobs", callback_data="act:latest_jobs")],
+        [InlineKeyboardButton("🔍 Search Jobs", callback_data="act:search_jobs")],
+        [InlineKeyboardButton("⭐ Saved List", callback_data="act:saved_jobs")],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
     ]
     if is_admin:
-        kb.append([InlineKeyboardButton("Admin 🔥", callback_data="act:admin")])
-    return InlineKeyboardMarkup(kb)
-
-
-HELP_EN = (
-    "<b>🧭 Help / How it works</b>\n\n"
-    "<b>Keywords</b>\n"
-    "• Add: <code>/addkeyword logo, lighting, sales</code>\n"
-    "• Remove: <code>/delkeyword logo, sales</code>\n"
-    "• Clear all: <code>/clearkeywords</code>\n\n"
-    "<b>Other</b>\n"
-    "• Set countries: <code>/setcountry US,UK</code> or <code>ALL</code>\n"
-    "• Save proposal: <code>/setproposal &lt;text&gt;</code>\n"
-    "• Test card: <code>/selftest</code>\n"
-)
-
-def help_footer(hours: int) -> str:
-    return (
-        "\n<b>🛰 Platforms monitored:</b>\n"
-        "• Global: Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs, "
-        "Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
-        "• Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
-        "<b>👑 Admin:</b> <code>/users</code> <code>/grant &lt;id&gt; &lt;days&gt;</code> "
-        "<code>/block &lt;id&gt;</code> <code>/unblock &lt;id&gt;</code> <code>/broadcast &lt;text&gt;</code> "
-        "<code>/feedstatus</code>\n"
-        "<i>Link previews are disabled for this message.</i>\n"
-    )
-
-def welcome_text(expiry: Optional[datetime]) -> str:
-    extra = f"\n<b>Free trial/access ends:</b> {expiry.strftime('%Y-%m-%d %H:%M UTC')}" if expiry else ""
-    return (
-        "<b>👋 Welcome to Freelancer Alert Bot!</b>\n\n"
-        "🎁 You have a <b>10-day free trial</b>.\n"
-        "The bot finds matching freelance jobs from top platforms and sends instant alerts."
-        f"{extra}\n\nUse <code>/help</code> for instructions.\n"
-    )
-def settings_text(keywords: List[str], countries: str | None, proposal_template: str | None,
-                  started_at, trial_until, access_until, active: bool, blocked: bool) -> str:
-    def b(v: bool) -> str: return "✅" if v else "❌"
-    k = ", ".join(keywords) if keywords else "(none)"
-    c = countries if countries else "ALL"
-    pt = "(none)" if not proposal_template else "(saved)"
-    ts = started_at.isoformat().replace("+00:00", "Z") if started_at else "—"
-    te = trial_until.isoformat().replace("+00:00", "Z") if trial_until else "—"
-    lic = "None" if not access_until else access_until.isoformat().replace("+00:00", "Z")
-    return (
-        "<b>🛠 Your Settings</b>\n"
-        f"• <b>Keywords:</b> {k}\n"
-        f"• <b>Countries:</b> {c}\n"
-        f"• <b>Proposal template:</b> {pt}\n\n"
-        f"<b>●</b> Start date: {ts}\n"
-        f"<b>●</b> Trial ends: {te} UTC\n"
-        f"<b>🔑</b> License until: {lic}\n"
-        f"<b>✅ Active:</b> {b(active)}    <b>⛔ Blocked:</b> {b(blocked)}\n\n"
-        "<b>🛰 Platforms monitored:</b> Global & GR boards.\n"
-        "<i>For extension, contact the admin.</i>"
-    )
-
-
-# ---------- Commands ----------
-async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Your Telegram ID: <code>{update.effective_user.id}</code>", parse_mode=ParseMode.HTML)
-
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with get_session() as s:
-        u = get_or_create_user_by_tid(s, update.effective_user.id)
-
-        s.execute(text(
-            "UPDATE user SET started_at=COALESCE(started_at, NOW() AT TIME ZONE 'UTC') WHERE id=:id"
-        ), {"id": u.id})
-
-        s.execute(
-            text("UPDATE user SET trial_until=COALESCE(trial_until, (NOW() AT TIME ZONE 'UTC') + INTERVAL ':days days') WHERE id=:id")
-            .bindparams(days=TRIAL_DAYS),
-            {"id": u.id},
+        buttons.append(
+            [InlineKeyboardButton("🛠 Admin Panel", callback_data="act:admin_panel")]
         )
-
-        expiry = s.execute(text(
-            "SELECT COALESCE(access_until, trial_until) FROM user WHERE id=:id"
-        ), {"id": u.id}).scalar()
-
-        s.commit()
-
-    await update.effective_chat.send_message(
-        welcome_text(expiry if isinstance(expiry, datetime) else None),
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
-    )
-
-    await update.effective_chat.send_message(
-        HELP_EN + help_footer(STATS_WINDOW_HOURS),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
-    )
+    return InlineKeyboardMarkup(buttons)
 
 
-async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========== START COMMAND ==========
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = (update.effective_user.id if update and update.effective_user else None)
+    cid = (update.effective_chat.id if update and update.effective_chat else None)
+    log.info("start_cmd: entered for uid=%s chat=%s", uid, cid)
+    try:
+        from sqlalchemy import text as _text
+        with get_session() as s:
+            u = get_or_create_user_by_tid(s, uid)
+            log.info("start_cmd: ensured users.id=%s for tid=%s", getattr(u, "id", None), uid)
+
+            s.execute(_text(
+                "UPDATE users SET started_at=COALESCE(started_at, NOW() AT TIME ZONE 'UTC') WHERE id=:id"
+            ), {"id": u.id})
+
+            s.execute(
+                _text("UPDATE users SET trial_until=COALESCE(trial_until, (NOW() AT TIME ZONE 'UTC') + INTERVAL ':days days') WHERE id=:id")
+                .bindparams(days=TRIAL_DAYS),
+                {"id": u.id},
+            )
+
+            expiry = s.execute(_text(
+                "SELECT COALESCE(access_until, trial_until) FROM users WHERE id=:id"
+            ), {"id": u.id}).scalar()
+            s.commit()
+
+        text_welcome = welcome_text(expiry if isinstance(expiry, datetime) else None)
+        kb = main_menu_kb(is_admin=is_admin_user(uid))
+
+        if cid is not None:
+            await context.bot.send_message(chat_id=cid, text=text_welcome, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await update.effective_chat.send_message(text_welcome, parse_mode=ParseMode.HTML, reply_markup=kb)
+        log.info("start_cmd: welcome sent to uid=%s", uid)
+
+        help_msg = "Here are the available options:\n\n" + help_footer(STATS_WINDOW_HOURS)
+        if cid is not None:
+            await context.bot.send_message(chat_id=cid, text=help_msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        else:
+            await update.effective_chat.send_message(help_msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        log.info("start_cmd: help sent to uid=%s", uid)
+
+    except Exception as e:
+        log.exception("start_cmd: FAILED for uid=%s: %s", uid, e)
+        try:
+            safe_txt = "Sorry — something went wrong while starting your session. Please try again."
+            if cid is not None:
+                await context.bot.send_message(chat_id=cid, text=safe_txt)
+            elif update and update.effective_chat:
+                await update.effective_chat.send_message(safe_txt)
+        except Exception:
+            pass
+# ========== EXPIRY LOOP ==========
+async def notify_expiring_job(ctx):
+    from sqlalchemy import text as _text
     with get_session() as s:
-        u = get_or_create_user_by_tid(s, update.effective_user.id)
-        kws = list_keywords(u.id)
-        row = s.execute(text(
-            "SELECT countries, proposal_template, started_at, trial_until, access_until, is_active, is_blocked "
-            "FROM user WHERE id=:id"
-        ), {"id": u.id}).fetchone()
-    await update.message.reply_text(
-        settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6])),
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(timezone.utc)
-    soon = now + timedelta(hours=24)
-    with get_session() as s:
-        rows = s.execute(text("""
-            SELECT telegram_id, COALESCE(access_until, trial_until)
-            FROM user
-            WHERE is_active=TRUE AND is_blocked=FALSE
-        """)).fetchall()
-    for tid, expiry in rows:
-        if not expiry:
-            continue
-        if getattr(expiry, "tzinfo", None) is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-        if now < expiry <= soon:
-            try:
-                hours_left = int((expiry - now).total_seconds() // 3600)
-                await context.bot.send_message(chat_id=tid,
-                    text=f"Reminder: your access expires in about {hours_left} hours (on {expiry.strftime('%Y-%m-%d %H:%M UTC')}).")
-            except Exception:
-                pass
+        rows = s.execute(_text(
+            "SELECT telegram_id, COALESCE(access_until, trial_until) "
+            "FROM users WHERE is_active=TRUE AND is_blocked=FALSE"
+        )).fetchall()
+        for r in rows:
+            tid, exp = r
+            if exp and isinstance(exp, datetime):
+                remaining = (exp - datetime.utcnow()).total_seconds() / 3600
+                if 0 < remaining <= 24:
+                    try:
+                        await ctx.bot.send_message(
+                            chat_id=tid,
+                            text=f"⚠️ Your access expires in {int(remaining)} hours. Renew now to keep receiving alerts."
+                        )
+                    except Exception as e:
+                        log.warning("Notify failed for %s: %s", tid, e)
 
+# ========== BACKGROUND EXPIRY LOOP ==========
+async def _background_expiry_loop(ctx):
+    log.info("⏳ Background expiry loop started")
+    while True:
+        try:
+            await notify_expiring_job(ctx)
+            await asyncio.sleep(3600)
+        except Exception as e:
+            log.error("expiry loop error: %s", e)
+            await asyncio.sleep(3600)
 
-def build_application() -> Application:
+# ========== BUILD APPLICATION ==========
+def build_application():
     ensure_schema()
-    ensure_feed_events_schema()
-    ensure_keyword_unique()
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    ensure_keywords()
+    log.info("✅ Database schema and keywords ensured")
 
     app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", whoami_cmd))
-    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
+    register_start_handlers(app)
+    register_help_handlers(app)
+    register_job_handlers(app)
+    register_settings_handlers(app)
 
-    try:
-        if JobQueue is not None:
-            jq = app.job_queue or JobQueue()
-            if app.job_queue is None:
-                jq.set_application(app)
-            jq.run_repeating(notify_expiring_job, interval=3600, first=60)
-            log.info("Scheduler: JobQueue active")
-        else:
-            raise RuntimeError("no jobqueue")
-    except Exception:
-        app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(asyncio.sleep(3600))
-        log.info("Scheduler: fallback loop")
+    jq = app.job_queue or JobQueue()
+    jq.set_application(app)
+    jq.run_repeating(lambda ctx: asyncio.create_task(_background_expiry_loop(ctx)), interval=3600, first=10)
+
+    log.info("✅ Handlers and background tasks registered")
     return app
+
+# ========== FASTAPI WEBHOOK ENDPOINT ==========
+@fastapi_app.post("/webhook/hook-secret-777")
+async def telegram_webhook(update: dict):
+    update_obj = Update.de_json(update, app.bot)
+    await app.process_update(update_obj)
+    return {"ok": True}
+# ========== MAIN ENTRY ==========
+if __name__ == "__main__":
+    import sys
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s:%(name)s: %(message)s",
+        level=logging.INFO,
+        stream=sys.stdout,
+    )
+    log.info("🚀 Starting Freelancer Alert Bot")
+    ensure_schema()
+    ensure_keywords()
+    built_app = build_application()
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(_background_expiry_loop(built_app))
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=10000)
