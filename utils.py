@@ -1,97 +1,121 @@
 import logging
+import os
 import httpx
-import asyncio
-from datetime import datetime
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from datetime import datetime, timedelta
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from db import get_all_active_users
+from db_keywords import get_all_user_keywords
 
-logger = logging.getLogger("utils")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+bot = Bot(token=BOT_TOKEN)
 
-# ----------------------------------------------------------
-# Telegram message sending helper
-# ----------------------------------------------------------
+CURRENCY_RATES = {"USD": 1.0}
+CURRENCY_API_URL = "https://api.exchangerate.host/latest?base=USD"
 
-async def send_job_to_user(app, chat_id, message, job):
-    """
-    Στέλνει αγγελία στον χρήστη με inline κουμπιά.
-    Χρησιμοποιείται από όλους τους workers.
-    """
+async def update_currency_rates():
+    """Update FX rates from exchangerate.host"""
+    global CURRENCY_RATES
     try:
-        buttons = [
-            [
-                InlineKeyboardButton("🔗 View Job", url=job.get("affiliate_url") or job.get("original_url")),
-            ],
-            [
-                InlineKeyboardButton("💾 Save", callback_data=f"save_{job.get('id')}"),
-                InlineKeyboardButton("🗑️ Delete", callback_data=f"del_{job.get('id')}"),
-            ],
-        ]
-
-        reply_markup = InlineKeyboardMarkup(buttons)
-        await app.bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
-        logger.info(f"[send_job_to_user] Sent {job.get('platform')} job to {chat_id} (kw={job.get('matched_keyword')})")
-
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(CURRENCY_API_URL)
+            if resp.status_code == 200:
+                CURRENCY_RATES = resp.json().get("rates", {})
+                logging.info(f"[utils] Updated currency rates ({len(CURRENCY_RATES)} entries)")
     except Exception as e:
-        logger.error(f"[send_job_to_user] Failed to send message to {chat_id}: {e}")
+        logging.warning(f"[utils] Failed to update FX rates: {e}")
 
-
-# ----------------------------------------------------------
-# Helper functions
-# ----------------------------------------------------------
-
-def posted_ago(dt: datetime) -> str:
-    if not dt:
-        return "N/A"
-    diff = datetime.utcnow() - dt.replace(tzinfo=None)
-    seconds = diff.total_seconds()
-    if seconds < 60:
-        return f"{int(seconds)}s ago"
-    elif seconds < 3600:
-        return f"{int(seconds // 60)}m ago"
-    elif seconds < 86400:
-        return f"{int(seconds // 3600)}h ago"
-    else:
-        return f"{int(seconds // 86400)}d ago"
-
-
-def get_telegram_text(job: dict) -> str:
-    """Δημιουργεί το μήνυμα αγγελίας σε ενιαία μορφή"""
-    title = job.get("title") or "N/A"
-    desc = job.get("description") or "No description available."
-    budget = job.get("budget_amount") or "N/A"
-    currency = job.get("budget_currency") or "USD"
-    usd_val = job.get("budget_usd")
-
-    budget_line = f"💰 Budget: {budget} {currency}"
-    if usd_val:
-        budget_line += f" (~${usd_val} USD)"
-
-    platform = job.get("platform") or "Unknown"
-    kw = job.get("matched_keyword") or "N/A"
-    posted = job.get("posted_ago") or "N/A"
-
-    lines = [
-        f"💼 {title}",
-        budget_line,
-        f"🌍 Source: {platform}",
-        f"🔑 Match: {kw}",
-        f"🕒 Posted: {posted}",
-        "",
-        f"📝 {desc.strip()[:800]}",
-    ]
-    return "\n".join(lines)
-
-
-def now_utc() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
-def async_run(coro):
-    """Τρέχει coroutine με ασφάλεια χωρίς runtime conflicts"""
+def convert_to_usd(amount, currency):
+    """Convert arbitrary currency to USD"""
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            return asyncio.ensure_future(coro)
-        else:
-            return loop.run_until_complete(coro)
-    except RuntimeError:
-        asyncio.run(coro)
+        rate = CURRENCY_RATES.get(currency.upper(), 1)
+        if rate == 0:
+            return amount
+        return round(amount / rate, 2)
+    except Exception:
+        return amount
+
+def format_time_ago(created_at):
+    """Display human readable relative time"""
+    if not created_at:
+        return "N/A"
+    now = datetime.utcnow()
+    delta = now - created_at
+    if delta.days >= 2:
+        return f"{delta.days} days ago"
+    if delta.days == 1:
+        return "1 day ago"
+    hours = delta.seconds // 3600
+    if hours >= 1:
+        return f"{hours} hours ago"
+    minutes = (delta.seconds % 3600) // 60
+    return f"{minutes} min ago"
+
+def build_job_message(job):
+    """Compose formatted message body"""
+    title = job.get("title", "Untitled")
+    desc = job.get("description", "")
+    budget = job.get("budget_usd", 0)
+    original = job.get("budget_amount", 0)
+    currency = job.get("budget_currency", "USD")
+    keyword = job.get("keyword", "")
+    source = job.get("platform", "Unknown")
+    created_at = job.get("created_at")
+    ago = format_time_ago(created_at)
+
+    return (
+        f"🧾 <b>{title}</b>\n"
+        f"<b>Budget:</b> {original:.2f} {currency}  ({budget:.2f} USD)\n"
+        f"<b>Source:</b> {source}\n"
+        f"<b>Match:</b> {keyword}\n"
+        f"🕒 <i>{ago}</i>\n\n"
+        f"{desc.strip()[:500]}"
+    )
+
+def build_job_buttons(job):
+    """Unified Telegram buttons layout"""
+    proposal_url = job.get("proposal_url") or job.get("affiliate_url") or "#"
+    original_url = job.get("original_url") or job.get("url") or "#"
+    job_id = job.get("id", "0")
+
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 Proposal", url=proposal_url),
+            InlineKeyboardButton("🔗 Original", url=original_url),
+        ],
+        [
+            InlineKeyboardButton("⭐ Save", callback_data=f"save_{job_id}"),
+            InlineKeyboardButton("🗑 Delete", callback_data=f"del_{job_id}"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+async def send_job_to_user(user_id, job):
+    """Send job message to one user"""
+    try:
+        text = build_job_message(job)
+        buttons = build_job_buttons(job)
+        await bot.send_message(
+            chat_id=user_id,
+            text=text,
+            reply_markup=buttons,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        logging.info(f"[send_job_to_user] ✅ Sent {job.get('platform')} job to {user_id} (kw={job.get('keyword')})")
+    except Exception as e:
+        logging.error(f"[send_job_to_user] ❌ Failed to send to {user_id}: {e}")
+
+async def broadcast_jobs(jobs):
+    """Send each job to all active users filtered by keywords"""
+    users = get_all_active_users()
+    if not users:
+        logging.warning("[broadcast_jobs] No active users found.")
+        return
+    for user in users:
+        user_keywords = get_all_user_keywords(user.telegram_id)
+        for job in jobs:
+            for kw in user_keywords:
+                if kw.lower() in (job.get("title", "") + job.get("description", "")).lower():
+                    job["keyword"] = kw
+                    await send_job_to_user(user.telegram_id, job)
+                    break

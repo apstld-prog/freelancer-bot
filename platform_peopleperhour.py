@@ -1,54 +1,39 @@
-# ======================================================
-# platform_peopleperhour.py — Fetch jobs from PeoplePerHour RSS
-# ======================================================
 import logging
 import httpx
-import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 
-logger = logging.getLogger("platform_pph")
-
-RSS_URL = "https://www.peopleperhour.com/rss/job-listings"
-
-def fetch_pph_jobs(keywords):
-    """Fetch and parse PeoplePerHour RSS feed, filter by keywords."""
-    all_jobs = []
+def fetch_pph_jobs():
+    """Fetch jobs from PeoplePerHour"""
     try:
-        r = httpx.get(RSS_URL, timeout=20)
-        if r.status_code != 200:
-            logger.warning(f"[PPH] HTTP {r.status_code}")
-            return []
-        soup = BeautifulSoup(r.text, "xml")
-        items = soup.find_all("item")
-        for item in items:
-            title = (item.title.text or "").strip()
-            desc = (item.description.text or "").strip()
-            link = (item.link.text or "").strip()
-            pub_date = item.pubDate.text if item.pubDate else None
-
-            # Normalize
-            pub_dt = None
-            if pub_date:
-                try:
-                    pub_dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z")
-                except Exception:
-                    pass
-
-            text_all = (title + " " + desc).lower()
-            for kw in keywords:
-                if kw.lower() in text_all:
-                    all_jobs.append({
-                        "platform": "PeoplePerHour",
-                        "title": title,
-                        "description": desc,
-                        "budget": "N/A",
-                        "currency": "GBP",
-                        "created_at": pub_dt.isoformat() if pub_dt else None,
-                        "url": link,
-                        "keyword": kw
-                    })
-                    break
+        url = "https://www.peopleperhour.com/freelance-jobs"
+        jobs = []
+        with httpx.Client(timeout=25) as client:
+            r = client.get(url)
+            if r.status_code != 200:
+                logging.warning(f"[PPH] HTTP {r.status_code}")
+                return []
+            soup = BeautifulSoup(r.text, "html.parser")
+            for card in soup.select(".job-card"):
+                title = card.select_one(".job-title")
+                desc = card.select_one(".job-desc")
+                link = card.select_one("a.job-link")
+                budget = card.select_one(".job-budget")
+                if not title or not link:
+                    continue
+                created_at = datetime.utcnow()
+                jobs.append({
+                    "id": link["href"].split("/")[-1],
+                    "title": title.text.strip(),
+                    "description": desc.text.strip() if desc else "",
+                    "budget_amount": float(budget.text.replace("$", "").strip()) if budget else 0,
+                    "budget_currency": "USD",
+                    "original_url": f"https://www.peopleperhour.com{link['href']}",
+                    "platform": "PeoplePerHour",
+                    "created_at": created_at
+                })
+        logging.info(f"[PPH] ✅ Collected {len(jobs)} jobs")
+        return jobs
     except Exception as e:
-        logger.error(f"[PPH] fetch error: {e}")
-    return all_jobs
+        logging.error(f"[PPH] Exception: {e}")
+        return []
