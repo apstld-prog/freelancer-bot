@@ -108,3 +108,32 @@ async def send_job_to_user(chat_id: int, job: dict):
 
     except Exception as e:
         logger.error(f"[send_job_to_user] Error sending job to {chat_id}: {e}")
+
+# --- Add this at the END of utils.py ---
+def get_or_create_user_by_tid(s, telegram_id):
+    """
+    Compatibility helper for bot.py — ensures user exists by Telegram ID.
+    Uses existing get_or_create_user() if available.
+    """
+    try:
+        # Αν υπάρχει η κανονική συνάρτηση, τη χρησιμοποιούμε
+        return get_or_create_user(s, telegram_id)
+    except NameError:
+        # Fallback χειροκίνητης δημιουργίας, αν λείπει η get_or_create_user
+        from db import User
+        u = s.execute(
+            text("SELECT * FROM users WHERE telegram_id=:tid"),
+            {"tid": telegram_id}
+        ).fetchone()
+        if u:
+            return u
+        s.execute(
+            text("INSERT INTO users (telegram_id, created_at, is_active) "
+                 "VALUES (:tid, NOW() AT TIME ZONE 'UTC', TRUE)"),
+            {"tid": telegram_id}
+        )
+        s.commit()
+        return s.execute(
+            text("SELECT * FROM users WHERE telegram_id=:tid"),
+            {"tid": telegram_id}
+        ).fetchone()
