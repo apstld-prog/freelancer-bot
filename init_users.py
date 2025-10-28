@@ -5,9 +5,9 @@ print("======================================================")
 print("👤 INIT USERS TOOL — ensure admin and default users")
 print("======================================================")
 
-# ✅ Admin ID = 1 (όπως είναι ήδη στη βάση σου)
 ADMIN_ID = 1
 ADMIN_TELEGRAM_ID = 5254014824
+ADMIN_USERNAME = "admin"
 
 # Connect to database
 db_url = os.environ.get("DATABASE_URL")
@@ -25,33 +25,30 @@ with engine.connect() as conn:
     table_names = [t[0] for t in tables if 'user' in t[0]]
     print(f"✅ Found user-related tables: {table_names}")
 
-    # Pick primary users table
-    target_table = "users" if "users" in table_names else "user"
-    print(f"📊 Using table: {target_table}")
+    for tbl in ["user", "users"]:
+        if tbl not in table_names:
+            print(f"⚠️ Table '{tbl}' not found — skipping.")
+            continue
 
-    # Show existing admin
-    existing_admin = conn.execute(
-        text(f"SELECT id, telegram_id, is_admin, is_active FROM {target_table} WHERE id={ADMIN_ID};")
-    ).fetchall()
-    print("📋 Existing admin entries:", existing_admin)
-
-    # Ensure admin user
-    print(f"🧩 Inserting admin user ({ADMIN_ID})...")
-    try:
-        conn.execute(
-            text(f"""
-                INSERT INTO {target_table} (id, telegram_id, started_at, is_admin, is_active)
-                VALUES (:id, :tg, NOW() AT TIME ZONE 'UTC', TRUE, TRUE)
-                ON CONFLICT (id) DO UPDATE
-                SET is_admin=TRUE, is_active=TRUE;
-            """),
-            {"id": ADMIN_ID, "tg": ADMIN_TELEGRAM_ID}
-        )
-        conn.commit()
-        print("✅ Admin ensured successfully.")
-    except Exception as e:
-        print("⚠️ init_users failed or already ensured:", e)
+        print(f"📊 Ensuring admin in table: {tbl}")
+        try:
+            conn.execute(
+                text(f"""
+                    INSERT INTO {tbl} (id, telegram_id, username, is_admin, is_active, created_at)
+                    VALUES (:id, :tg, :username, TRUE, TRUE, NOW() AT TIME ZONE 'UTC')
+                    ON CONFLICT (id) DO UPDATE
+                    SET telegram_id = EXCLUDED.telegram_id,
+                        username = EXCLUDED.username,
+                        is_admin = TRUE,
+                        is_active = TRUE;
+                """),
+                {"id": ADMIN_ID, "tg": ADMIN_TELEGRAM_ID, "username": ADMIN_USERNAME}
+            )
+            conn.commit()
+            print(f"✅ Admin ensured in '{tbl}'.")
+        except Exception as e:
+            print(f"⚠️ Failed to ensure admin in '{tbl}':", e)
 
 print("======================================================")
-print("✅ init_users complete — admin is now synchronized.")
+print("✅ init_users complete — admin synchronized in all tables.")
 print("======================================================")
