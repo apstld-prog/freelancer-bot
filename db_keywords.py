@@ -5,6 +5,7 @@ from db import get_session
 
 _CACHE: Dict[str, Any] = {"cols": None, "nulls": None, "has_created": None, "has_updated": None}
 
+
 def _detect_cols(conn) -> Tuple[bool, bool]:
     """Return (has_keyword, has_value) for table keyword."""
     if _CACHE["cols"] is not None:
@@ -16,6 +17,7 @@ def _detect_cols(conn) -> Tuple[bool, bool]:
     names = {r[0] for r in rows}
     _CACHE["cols"] = ("keyword" in names, "value" in names)
     return _CACHE["cols"]  # type: ignore
+
 
 def _detect_nullability(conn) -> Tuple[bool, bool]:
     """Return (value_not_null, keyword_not_null)."""
@@ -30,6 +32,7 @@ def _detect_nullability(conn) -> Tuple[bool, bool]:
     _CACHE["nulls"] = (nn.get("value", False), nn.get("keyword", False))
     return _CACHE["nulls"]  # type: ignore
 
+
 def _detect_ts_cols(conn):
     if _CACHE["has_created"] is not None:
         return _CACHE["has_created"], _CACHE["has_updated"]
@@ -42,6 +45,7 @@ def _detect_ts_cols(conn):
     _CACHE["has_updated"] = "updated_at" in names
     return _CACHE["has_created"], _CACHE["has_updated"]
 
+
 def ensure_keyword_unique():
     with get_session() as s:
         conn = s.connection()
@@ -51,6 +55,7 @@ def ensure_keyword_unique():
         if has_val:
             s.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_keyword_user_value   ON keyword (user_id, value)"))
         s.commit()
+
 
 def list_keywords(user_id: int) -> List[str]:
     with get_session() as s:
@@ -64,9 +69,11 @@ def list_keywords(user_id: int) -> List[str]:
         rows = s.execute(text(q), {"uid": user_id}).fetchall()
         return [r[0] for r in rows]
 
+
 def count_keywords(user_id: int) -> int:
     with get_session() as s:
         return int(s.execute(text("SELECT COUNT(*) FROM keyword WHERE user_id=:uid"), {"uid": user_id}).scalar() or 0)
+
 
 def add_keywords(user_id: int, kws: List[str]) -> int:
     """Add keywords for given user, ensuring user_id column is BIGINT-safe."""
@@ -92,7 +99,6 @@ def add_keywords(user_id: int, kws: List[str]) -> int:
                 END$$;
             """))
         except Exception as e:
-            # Δεν σταματάμε αν αποτύχει, απλώς ενημερώνουμε το log
             print(f"⚠️ Warning: Could not auto-convert user_id to BIGINT: {e}")
 
         has_kw, has_val = _detect_cols(conn)
@@ -121,8 +127,9 @@ def add_keywords(user_id: int, kws: List[str]) -> int:
         s.commit()
     return inserted
 
+
 def delete_keywords(user_id: int, kws: List[str]) -> int:
-    if not kws: 
+    if not kws:
         return 0
     with get_session() as s:
         conn = s.connection()
@@ -137,8 +144,30 @@ def delete_keywords(user_id: int, kws: List[str]) -> int:
         s.commit()
         return int(getattr(res, "rowcount", 0))
 
+
 def clear_keywords(user_id: int) -> int:
     with get_session() as s:
         res = s.execute(text("DELETE FROM keyword WHERE user_id=:uid"), {"uid": user_id})
         s.commit()
         return int(getattr(res, "rowcount", 0))
+
+
+# ✅ Νέα συνάρτηση για χρήση από τους workers
+def get_all_user_keywords() -> Dict[int, List[str]]:
+    """
+    Επιστρέφει dictionary {user_id: [keyword1, keyword2, ...]} για όλους τους ενεργούς χρήστες.
+    Οι αγγελίες αναζητούνται με βάση αυτές τις λέξεις.
+    """
+    result: Dict[int, List[str]] = {}
+    with get_session() as s:
+        rows = s.execute(text("""
+            SELECT user_id, COALESCE(keyword, value) AS kw
+            FROM keyword
+            WHERE keyword IS NOT NULL OR value IS NOT NULL
+            ORDER BY user_id
+        """)).fetchall()
+        for uid, kw in rows:
+            if not kw:
+                continue
+            result.setdefault(int(uid), []).append(kw)
+    return result
