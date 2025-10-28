@@ -7,11 +7,11 @@ from db_events import record_fetched_jobs
 
 logger = logging.getLogger("worker_pph")
 
-async def process_pph_jobs(app):
+async def process_pph_jobs():
     logger.info("[PeoplePerHour Worker] Started")
     while True:
         try:
-            user_keywords = await get_user_keywords()
+            user_keywords = get_user_keywords()
             for user_id, keywords in user_keywords.items():
                 if not keywords:
                     continue
@@ -19,7 +19,6 @@ async def process_pph_jobs(app):
                 jobs = fetch_pph_jobs(keywords)
                 logger.info("[PeoplePerHour] %d jobs fetched for %s", len(jobs), user_id)
 
-                # 🔸 Καταγραφή όλων των jobs στη βάση
                 record_fetched_jobs("PeoplePerHour", jobs)
 
                 for job in jobs:
@@ -44,8 +43,12 @@ async def process_pph_jobs(app):
                         f"📝 {desc}\n\n"
                         f"🕒 Posted: {posted_ago}"
                     )
-                    await send_job_to_user(app, user_id, message, job)
+                    await send_job_to_user(None, user_id, message, job)
             await asyncio.sleep(300)
         except Exception as e:
             logger.exception("[PeoplePerHour Worker] Error: %s", e)
             await asyncio.sleep(120)
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(process_pph_jobs())

@@ -7,11 +7,11 @@ from db_events import record_fetched_jobs
 
 logger = logging.getLogger("worker_freelancer")
 
-async def process_freelancer_jobs(app):
+async def process_freelancer_jobs():
     logger.info("[Freelancer Worker] Started")
     while True:
         try:
-            user_keywords = await get_user_keywords()
+            user_keywords = get_user_keywords()
             for user_id, keywords in user_keywords.items():
                 if not keywords:
                     continue
@@ -19,7 +19,6 @@ async def process_freelancer_jobs(app):
                 jobs = fetch_freelancer_jobs(keywords)
                 logger.info("[Freelancer] %d jobs fetched for %s", len(jobs), user_id)
 
-                # 🔸 Καταγραφή όλων των jobs στη βάση
                 record_fetched_jobs("Freelancer", jobs)
 
                 for job in jobs:
@@ -44,8 +43,12 @@ async def process_freelancer_jobs(app):
                         f"📝 {desc}\n\n"
                         f"🕒 Posted: {posted_ago}"
                     )
-                    await send_job_to_user(app, user_id, message, job)
+                    await send_job_to_user(None, user_id, message, job)
             await asyncio.sleep(60)
         except Exception as e:
             logger.exception("[Freelancer Worker] Error: %s", e)
             await asyncio.sleep(120)
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(process_freelancer_jobs())
