@@ -2,117 +2,68 @@
 set -e
 
 echo "======================================================"
-echo "🔍 FREELANCER BOT ADVANCED DIAGNOSTIC TOOL"
+echo "🔍 FREELANCER BOT EXTENDED DIAGNOSTIC TOOL"
 echo "======================================================"
 echo "📅 Date: $(date -u)"
 echo
 
-# STEP 1: ENVIRONMENT SUMMARY
+# STEP 1: ENVIRONMENT
 echo "👉 STEP 1: Environment summary"
 echo "------------------------------------------------------"
-echo "Render Service: ${RENDER_SERVICE_NAME:-freelancer-bot-ns7s}"
-echo "Python $(python3 --version 2>/dev/null || echo 'N/A')"
-echo "$(node -v 2>/dev/null || echo 'Node N/A')"
-echo "Worker intervals: FREELANCER=${FREELANCER_INTERVAL:-N/A}, PPH=${PPH_INTERVAL:-N/A}, GREEK=${GREEK_INTERVAL:-N/A}"
-echo "Keyword filter mode: ${KEYWORD_FILTER_MODE:-off}"
+echo "Service: ${RENDER_SERVICE_NAME:-freelancer-bot-ns7s}"
+python3 --version || echo "Python N/A"
 echo
 
-# STEP 2: CLEANUP ZOMBIE / DEFUNCT PROCESSES
-echo "👉 STEP 2: Cleanup of zombie/defunct workers"
+# STEP 2: WORKER PROCESSES
+echo "👉 STEP 2: Worker processes"
 echo "------------------------------------------------------"
-ZOMBIES=$(ps -eo stat,comm | grep 'Z' | grep python || true)
-if [ -z "$ZOMBIES" ]; then
-  echo "✅ No zombie processes found."
-else
-  echo "⚠️ Found zombie processes:"
-  echo "$ZOMBIES"
-  echo "🔧 Killing them..."
-  pkill -9 -f worker_ || true
-  pkill -9 -f uvicorn || true
-  echo "✅ Cleanup done."
-fi
+ps aux | grep worker_ | grep -v grep || echo "⚠️ No worker processes found"
 echo
 
-# STEP 3: ADMIN USER CHECK
-echo "👉 STEP 3: Admin user consistency"
+# STEP 3: FEED EVENT STATS
+echo "👉 STEP 3: Feed event stats (last 24h)"
+echo "------------------------------------------------------"
+python3 - <<'PYCODE'
+from db_events import get_platform_stats
+try:
+    stats = get_platform_stats(24)
+    if not stats:
+        print("⚠️ No events in last 24h.")
+    else:
+        for k,v in stats.items():
+            print(f"✅ {k}: {v} jobs recorded")
+except Exception as e:
+    print("❌ Feed stats failed:", e)
+PYCODE
+echo
+
+# STEP 4: FRESHNESS CHECK
+echo "👉 STEP 4: Recent events check (1h freshness)"
 echo "------------------------------------------------------"
 python3 - <<'PYCODE'
 from db import get_session
 from sqlalchemy import text
-
-ADMIN_ID = 5254014824
+from datetime import datetime, timedelta, timezone
 try:
     with get_session() as s:
-        conn = s.connection()
-        table = conn.execute(text("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_schema='public' AND table_name ILIKE 'user%';
-        """)).fetchone()
-        if not table:
-            print("❌ No user table found in DB.")
-            exit()
-        table = table[0]
-        print(f"✅ Found user table: {table}")
-        res = conn.execute(text(f"""
-            SELECT id, telegram_id FROM "{table}"
-            WHERE id=:id OR telegram_id=:id
-        """), {"id": ADMIN_ID}).fetchone()
-        if res:
-            print(f"✅ Admin user exists: {res}")
+        ts = datetime.now(timezone.utc) - timedelta(hours=1)
+        rows = s.execute(text("SELECT source, COUNT(*) FROM feed_events WHERE ts >= :ts GROUP BY source"), {"ts": ts}).fetchall()
+        if not rows:
+            print("⚠️ No events in the last hour — workers might be idle.")
         else:
-            print("⚠️ Admin user not found. Run: python3 init_users.py")
+            for r in rows:
+                print(f"✅ Recent activity: {r[0]} => {r[1]} entries")
 except Exception as e:
-    print(f"❌ Admin check failed: {e}")
+    print("❌ Freshness check failed:", e)
 PYCODE
 echo
 
-# STEP 4: KEYWORDS CHECK
-echo "👉 STEP 4: Keyword consistency check"
-echo "------------------------------------------------------"
-python3 - <<'PYCODE'
-from db import get_session
-from sqlalchemy import text
-
-try:
-    with get_session() as s:
-        conn = s.connection()
-        kwcount = conn.execute(text("SELECT COUNT(*) FROM keyword;")).scalar()
-        if kwcount == 0:
-            print("⚠️ No keywords found in DB.")
-        else:
-            print(f"✅ Found {kwcount} total keywords in DB.")
-except Exception as e:
-    print(f"❌ Keyword check failed: {e}")
-PYCODE
-echo
-
-# STEP 5: PLATFORM FETCH TEST (NO ASYNC)
-echo "👉 STEP 5: Fetch test per platform"
-echo "------------------------------------------------------"
-python3 - <<'PYCODE'
-from platform_freelancer import fetch_freelancer_jobs
-from platform_peopleperhour import fetch_pph_jobs
-from platform_skywalker import fetch_skywalker_jobs
-
-def safe_run(func, name):
-    try:
-        results = func(["logo"])
-        print(f"✅ {name}: {len(results)} jobs fetched")
-    except Exception as e:
-        print(f"⚠️ {name} fetch error: {e}")
-
-safe_run(fetch_freelancer_jobs, "Freelancer")
-safe_run(fetch_pph_jobs, "PeoplePerHour")
-safe_run(fetch_skywalker_jobs, "Skywalker")
-PYCODE
-echo
-
-# STEP 6: MEMORY & SYSTEM SNAPSHOT
-echo "👉 STEP 6: Memory, uptime and system load"
+# STEP 5: SYSTEM SNAPSHOT
+echo "👉 STEP 5: Memory & uptime snapshot"
 echo "------------------------------------------------------"
 uptime
 free -h
 echo
 
-echo "✅ Full diagnostic complete."
+echo "✅ Extended diagnostic complete."
 echo "======================================================"

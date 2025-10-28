@@ -1,9 +1,9 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
 from platform_skywalker import fetch_skywalker_jobs
 from utils import send_job_to_user, convert_to_usd, time_ago
 from db import get_user_keywords
+from db_events import record_fetched_jobs
 
 logger = logging.getLogger("worker_skywalker")
 
@@ -16,14 +16,18 @@ async def process_skywalker_jobs(app):
                 if not keywords:
                     continue
 
-                # FIXED: removed await because fetch_skywalker_jobs is not async
                 jobs = fetch_skywalker_jobs(keywords)
-                logger.info(f"[Skywalker] {len(jobs)} jobs fetched for {user_id}")
+                logger.info("[Skywalker] %d jobs fetched for %s", len(jobs), user_id)
+
+                # 🔸 Καταγραφή όλων των jobs στη βάση
+                record_fetched_jobs("Skywalker", jobs)
 
                 for job in jobs:
                     title = job.get("title", "")
                     desc = job.get("description", "")
-                    matched_kw = next((k for k in keywords if k.lower() in (title + desc).lower()), None)
+                    matched_kw = next(
+                        (k for k in keywords if k.lower() in (title + desc).lower()), None
+                    )
                     if not matched_kw:
                         continue
 
@@ -43,5 +47,5 @@ async def process_skywalker_jobs(app):
                     await send_job_to_user(app, user_id, message, job)
             await asyncio.sleep(300)
         except Exception as e:
-            logger.exception(f"[Skywalker Worker] Error: {e}")
+            logger.exception("[Skywalker Worker] Error: %s", e)
             await asyncio.sleep(120)

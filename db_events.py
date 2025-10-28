@@ -1,10 +1,14 @@
-# db_events.py — feed events schema + stats
+# ======================================================
+# db_events.py — feed events schema + stats + logging jobs
+# ======================================================
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional
-
+from typing import Dict, Any, Optional, List
 from sqlalchemy import text
 from db import get_session
 
+# ------------------------------------------------------
+# Table DDL
+# ------------------------------------------------------
 DDL = """
 CREATE TABLE IF NOT EXISTS feed_events (
   id BIGSERIAL PRIMARY KEY,
@@ -16,14 +20,20 @@ CREATE INDEX IF NOT EXISTS idx_feed_events_ts ON feed_events (ts);
 CREATE INDEX IF NOT EXISTS idx_feed_events_source ON feed_events (source);
 """
 
+# ------------------------------------------------------
+# Ensure schema exists
+# ------------------------------------------------------
 def ensure_feed_events_schema() -> None:
     """Create feed_events table & indexes if they don't exist."""
     with get_session() as s:
         s.execute(text(DDL))
         s.commit()
 
+# ------------------------------------------------------
+# Record single event
+# ------------------------------------------------------
 def record_event(source: str, payload: Optional[dict] = None) -> None:
-    """Optional helper to insert an event (call this όταν φτάνει job από πηγή)."""
+    """Insert one event record manually."""
     with get_session() as s:
         s.execute(
             text("INSERT INTO feed_events (source, payload) VALUES (:source, :payload)"),
@@ -31,6 +41,31 @@ def record_event(source: str, payload: Optional[dict] = None) -> None:
         )
         s.commit()
 
+# ------------------------------------------------------
+# Record multiple fetched jobs
+# ------------------------------------------------------
+def record_fetched_jobs(source: str, jobs: List[dict]) -> int:
+    """Insert multiple job payloads from a source."""
+    if not jobs:
+        return 0
+    ensure_feed_events_schema()
+    count = 0
+    with get_session() as s:
+        for j in jobs:
+            try:
+                s.execute(
+                    text("INSERT INTO feed_events (source, payload) VALUES (:source, :payload)"),
+                    {"source": source, "payload": j},
+                )
+                count += 1
+            except Exception as e:
+                print(f"[record_fetched_jobs] warning: {e}")
+        s.commit()
+    return count
+
+# ------------------------------------------------------
+# Retrieve platform stats
+# ------------------------------------------------------
 def get_platform_stats(window_hours: int = 24) -> Dict[str, int]:
     """Return counts per source for last `window_hours`."""
     with get_session() as s:
