@@ -170,3 +170,37 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
     if to_insert:
         db.commit()
     return len(to_insert)
+# ======================================================
+# get_user_keywords — fetch all keywords per user
+# ======================================================
+from sqlalchemy import text
+
+def get_user_keywords():
+    """Return {telegram_id: [keywords]} for all active users."""
+    result = {}
+    try:
+        with get_session() as s:
+            # Auto-detect correct table name
+            tables = [r[0] for r in s.execute(
+                text("SELECT table_name FROM information_schema.tables WHERE table_schema='public';")
+            ).fetchall()]
+            table = "users" if "users" in tables else "user"
+
+            # Join keywords with users table
+            rows = s.execute(text(f"""
+                SELECT u.telegram_id, k.keyword
+                FROM {table} AS u
+                LEFT JOIN keyword AS k ON k.user_id = u.id
+                WHERE u.is_active = TRUE OR u.is_admin = TRUE
+                ORDER BY u.telegram_id
+            """)).fetchall()
+
+            for tid, kw in rows:
+                if not tid:
+                    continue
+                result.setdefault(int(tid), [])
+                if kw and kw not in result[tid]:
+                    result[tid].append(kw)
+    except Exception as e:
+        print(f"[get_user_keywords] error: {e}")
+    return result
