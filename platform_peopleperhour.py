@@ -1,34 +1,54 @@
-import httpx, time, logging
+# ======================================================
+# platform_peopleperhour.py — Fetch jobs from PeoplePerHour RSS
+# ======================================================
+import logging
+import httpx
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from bs4 import BeautifulSoup
 
-PPH_FEED_URL = "https://www.peopleperhour.com/freelance-jobs/rss"
-HEADERS = {"User-Agent": "Mozilla/5.0 (PPHFeedBot)"}
-log = logging.getLogger("pph")
+logger = logging.getLogger("platform_pph")
+
+RSS_URL = "https://www.peopleperhour.com/rss/job-listings"
 
 def fetch_pph_jobs(keywords):
-    """Fetch PeoplePerHour jobs with keyword filtering (sync)."""
-    jobs = []
-    for kw in [k.strip() for k in keywords if k.strip()]:
-        try:
-            with httpx.Client(timeout=15.0, headers=HEADERS) as cli:
-                r = cli.get(PPH_FEED_URL, params={"q": kw})
-                if r.status_code != 200:
-                    continue
-                txt = r.text.lower()
-                if kw.lower() not in txt:
-                    continue
+    """Fetch and parse PeoplePerHour RSS feed, filter by keywords."""
+    all_jobs = []
+    try:
+        r = httpx.get(RSS_URL, timeout=20)
+        if r.status_code != 200:
+            logger.warning(f"[PPH] HTTP {r.status_code}")
+            return []
+        soup = BeautifulSoup(r.text, "xml")
+        items = soup.find_all("item")
+        for item in items:
+            title = (item.title.text or "").strip()
+            desc = (item.description.text or "").strip()
+            link = (item.link.text or "").strip()
+            pub_date = item.pubDate.text if item.pubDate else None
 
-                jobs.append({
-                    "title": f"PeoplePerHour Job for '{kw}'",
-                    "description": "Matched job from PeoplePerHour RSS",
-                    "budget_min": None,
-                    "budget_max": None,
-                    "budget_currency": "GBP",
-                    "original_url": PPH_FEED_URL,
-                    "time_submitted": int(time.time()),
-                    "matched_keyword": kw,
-                    "source": "PeoplePerHour",
-                })
-        except Exception as e:
-            log.warning("[PPH fetch error] %s", e)
-    log.info("[PPH] total fetched: %d", len(jobs))
-    return jobs
+            # Normalize
+            pub_dt = None
+            if pub_date:
+                try:
+                    pub_dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z")
+                except Exception:
+                    pass
+
+            text_all = (title + " " + desc).lower()
+            for kw in keywords:
+                if kw.lower() in text_all:
+                    all_jobs.append({
+                        "platform": "PeoplePerHour",
+                        "title": title,
+                        "description": desc,
+                        "budget": "N/A",
+                        "currency": "GBP",
+                        "created_at": pub_dt.isoformat() if pub_dt else None,
+                        "url": link,
+                        "keyword": kw
+                    })
+                    break
+    except Exception as e:
+        logger.error(f"[PPH] fetch error: {e}")
+    return all_jobs
