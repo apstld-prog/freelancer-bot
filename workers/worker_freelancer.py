@@ -1,5 +1,12 @@
+import os
+import sys
 import asyncio
 import logging
+
+# --- CRITICAL FIX ---
+# Add project root so imports work even when script runs from /workers/
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from platform_freelancer import fetch_freelancer_jobs
 from utils import send_job_to_user, convert_to_usd, time_ago
 from db import get_user_keywords
@@ -18,15 +25,12 @@ async def process_freelancer_jobs():
 
                 jobs = fetch_freelancer_jobs(keywords)
                 logger.info("[Freelancer] %d jobs fetched for %s", len(jobs), user_id)
-
                 record_fetched_jobs("Freelancer", jobs)
 
                 for job in jobs:
                     title = job.get("title", "")
                     desc = job.get("description", "")
-                    matched_kw = next(
-                        (k for k in keywords if k.lower() in (title + desc).lower()), None
-                    )
+                    matched_kw = next((k for k in keywords if k.lower() in (title + desc).lower()), None)
                     if not matched_kw:
                         continue
 

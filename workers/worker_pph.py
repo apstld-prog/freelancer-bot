@@ -1,5 +1,11 @@
+import os
+import sys
 import asyncio
 import logging
+
+# --- CRITICAL FIX ---
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from platform_peopleperhour import fetch_pph_jobs
 from utils import send_job_to_user, convert_to_usd, time_ago
 from db import get_user_keywords
@@ -18,15 +24,12 @@ async def process_pph_jobs():
 
                 jobs = fetch_pph_jobs(keywords)
                 logger.info("[PeoplePerHour] %d jobs fetched for %s", len(jobs), user_id)
-
                 record_fetched_jobs("PeoplePerHour", jobs)
 
                 for job in jobs:
                     title = job.get("title", "")
                     desc = job.get("description", "")
-                    matched_kw = next(
-                        (k for k in keywords if k.lower() in (title + desc).lower()), None
-                    )
+                    matched_kw = next((k for k in keywords if k.lower() in (title + desc).lower()), None)
                     if not matched_kw:
                         continue
 
