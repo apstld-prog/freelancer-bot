@@ -13,11 +13,13 @@ from utils import send_job_to_user
 
 logger = logging.getLogger("worker_skywalker")
 
+
 def _short(text: str, n: int = 400) -> str:
     if not text:
         return ""
     text = text.strip()
     return text if len(text) <= n else (text[:n] + "...")
+
 
 def _build_message(job: dict) -> str:
     title = job.get("title") or "N/A"
@@ -52,6 +54,16 @@ def _build_message(job: dict) -> str:
     ]
     return "\n".join([l for l in lines if l != ""])
 
+
+def parse_dt(v):
+    if isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(v)
+    except Exception:
+        return datetime.utcnow()
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
     logger.info("[Skywalker Worker] Started")
@@ -63,7 +75,7 @@ def main():
                     continue
                 jobs = fetch_skywalker_jobs(kws)
                 now = datetime.utcnow()
-                jobs = [j for j in jobs if not j.get("created_at") or now - j["created_at"] <= timedelta(hours=48)]
+                jobs = [j for j in jobs if not j.get("created_at") or now - parse_dt(j["created_at"]) <= timedelta(hours=48)]
                 for job in jobs:
                     msg = _build_message(job)
                     import asyncio
@@ -75,6 +87,7 @@ def main():
         except Exception as e:
             logger.exception("[Skywalker Worker] Error: %s", e)
             time.sleep(120)
+
 
 if __name__ == "__main__":
     main()
