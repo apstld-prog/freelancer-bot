@@ -1,96 +1,46 @@
-# ======================================================
-# init_admin_user.py — robust admin user initializer
-# ======================================================
 from db import get_session
-from sqlalchemy import text
+import os
 
-ADMIN_ID = 5254014824
-ADMIN_USERNAME = "admin"
+def ensure_admin_user():
+    admin_tid = os.getenv("ADMIN_TELEGRAM_ID", "5254014824")
 
-print("[Init] Ensuring admin user...")
+    with get_session() as s:
+        s.execute("""
+        CREATE TABLE IF NOT EXISTS user (
+            id SERIAL PRIMARY KEY,
+            telegram_id BIGINT UNIQUE,
+            username TEXT,
+            is_admin BOOLEAN DEFAULT FALSE,
+            is_active BOOLEAN DEFAULT TRUE,
+            is_blocked BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        s.execute("SELECT * FROM user WHERE telegram_id=%s;", (admin_tid,))
+        existing = s.fetchone()
+        if not existing:
+            s.execute(
+                "INSERT INTO user (telegram_id, username, is_admin, is_active, created_at, updated_at) "
+                "VALUES (%s, 'admin', TRUE, TRUE, NOW(), NOW());",
+                (admin_tid,)
+            )
+            print("✅ Created admin user.")
+        else:
+            s.execute(
+                "UPDATE user SET is_admin=TRUE, is_active=TRUE, updated_at=NOW() WHERE telegram_id=%s;",
+                (admin_tid,)
+            )
+            print("✅ Admin user already exists and active.")
 
-with get_session() as s:
-    conn = s.connection()
-    try:
-        # Step 1 — Locate correct table
-        table_check = conn.execute(text("""
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_name ILIKE 'user%' AND table_schema='public';
-        """)).fetchall()
-        tables = [r[0] for r in table_check]
-        print(f"🧩 Found user-related tables: {tables}")
-
-        if not tables:
-            print("❌ No table named 'user' or 'users' found. Cannot continue.")
-            exit(1)
-
-        table_name = tables[0]
-
-        # Step 2 — Inspect columns
-        col_check = conn.execute(text(f"""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name='{table_name}';
-        """)).fetchall()
-        cols = [r[0] for r in col_check]
-        print(f"📊 Columns in table '{table_name}': {cols}")
-
-        # Step 3 — Build adaptive INSERT based on schema
-        fields = []
-        values = []
-        updates = []
-
-        # Always insert id, telegram_id, username
-        if "id" in cols:
-            fields.append("id")
-            values.append(":id")
-        if "telegram_id" in cols:
-            fields.append("telegram_id")
-            values.append(":tg")
-            updates.append("telegram_id = EXCLUDED.telegram_id")
-        if "username" in cols:
-            fields.append("username")
-            values.append(":username")
-            updates.append("username = EXCLUDED.username")
-
-        # Optional flags
-        if "is_admin" in cols:
-            fields.append("is_admin")
-            values.append("TRUE")
-            updates.append("is_admin = TRUE")
-        if "is_active" in cols:
-            fields.append("is_active")
-            values.append("TRUE")
-            updates.append("is_active = TRUE")
-        if "is_blocked" in cols:
-            fields.append("is_blocked")
-            values.append("FALSE")
-            updates.append("is_blocked = FALSE")
-
-        # Timestamp columns
-        if "created_at" in cols:
-            fields.append("created_at")
-            values.append("NOW() AT TIME ZONE 'UTC'")
-        if "updated_at" in cols:
-            fields.append("updated_at")
-            values.append("NOW() AT TIME ZONE 'UTC'")
-
-        # Build final SQL dynamically
-        insert_sql = f"""
-            INSERT INTO "{table_name}" ({', '.join(fields)})
-            VALUES ({', '.join(values)})
-            ON CONFLICT (id) DO UPDATE SET {', '.join(updates)};
-        """
-
-        params = {
-            "id": 1,
-            "tg": ADMIN_ID,
-            "username": ADMIN_USERNAME,
-        }
-
-        conn.execute(text(insert_sql), params)
         s.commit()
-        print(f"✅ Admin user ensured successfully in '{table_name}'.")
 
-    except Exception as e:
-        print(f"❌ Failed to ensure admin user: {e}")
+
+if __name__ == "__main__":
+    print("====================================================")
+    print("🔧 INIT ADMIN USER TOOL")
+    print("====================================================")
+    ensure_admin_user()
+    print("====================================================")
+    print("✅ ADMIN USER CREATED / UPDATED SUCCESSFULLY")
+    print("====================================================")

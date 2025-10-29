@@ -1,17 +1,19 @@
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from datetime import datetime
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+
 class PsycopgSession:
-    """Wrapper for psycopg2 connection with context manager support"""
+    """Wrapper for psycopg2 with context manager support."""
     def __init__(self):
         self.conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         self.cur = self.conn.cursor()
 
     def execute(self, query, params=None):
-        self.cur.execute(query, params or {})
+        self.cur.execute(query, params or ())
         return self.cur
 
     def fetchone(self):
@@ -38,22 +40,41 @@ class PsycopgSession:
             self.conn.commit()
         self.close()
 
+
 def get_session():
-    """Returns a new database session"""
+    """Return new DB session"""
     return PsycopgSession()
 
+
 def ensure_schema():
-    """Placeholder for schema creation if needed"""
+    """Ensures base user table exists"""
     with get_session() as s:
         s.execute("""
         CREATE TABLE IF NOT EXISTS user (
             id SERIAL PRIMARY KEY,
-            telegram_id BIGINT,
+            telegram_id BIGINT UNIQUE,
             username TEXT,
             is_admin BOOLEAN DEFAULT FALSE,
             is_active BOOLEAN DEFAULT TRUE,
+            is_blocked BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         );
         """)
         s.commit()
+
+
+def get_or_create_user_by_tid(telegram_id):
+    """Ensures a user exists in the database and returns it"""
+    with get_session() as s:
+        s.execute("SELECT * FROM user WHERE telegram_id=%s;", (telegram_id,))
+        user = s.fetchone()
+        if not user:
+            s.execute(
+                "INSERT INTO user (telegram_id, username, is_admin, is_active, created_at, updated_at) "
+                "VALUES (%s, %s, FALSE, TRUE, NOW(), NOW()) RETURNING *;",
+                (telegram_id, f"user_{telegram_id}")
+            )
+            user = s.fetchone()
+        s.commit()
+        return user
