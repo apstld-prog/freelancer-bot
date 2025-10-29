@@ -2,50 +2,51 @@ import logging
 
 logger = logging.getLogger("currency_usd")
 
-# Simple fixed-rate USD converter (extendable)
+# Αν δεν βρεθεί νόμισμα ή rate, θα επιστραφεί ίδια τιμή
+DEFAULT_RATES = {
+    "USD": 1.0,
+    "EUR": 1.08,
+    "GBP": 1.28,
+    "AUD": 0.66,
+    "CAD": 0.73,
+    "INR": 0.012,
+    "PHP": 0.017,
+}
+
+
 def convert_to_usd(amount, currency="USD"):
-    """Convert any supported currency to USD using approximate static rates."""
+    """Μετατρέπει ποσό στο ισοδύναμο USD με βάση σταθερούς συντελεστές."""
     if amount is None:
         return None
     try:
-        currency = (currency or "USD").upper()
-        if currency == "USD":
-            return float(amount)
-        elif currency == "EUR":
-            return float(amount) * 1.07
-        elif currency == "GBP":
-            return float(amount) * 1.26
-        elif currency == "AUD":
-            return float(amount) * 0.65
-        elif currency == "CAD":
-            return float(amount) * 0.73
-        elif currency == "INR":
-            return float(amount) * 0.012
-        elif currency == "PLN":
-            return float(amount) * 0.25
-        elif currency == "CHF":
-            return float(amount) * 1.10
-        elif currency == "SEK":
-            return float(amount) * 0.092
-        elif currency == "NOK":
-            return float(amount) * 0.089
-        else:
-            logger.warning(f"[convert_to_usd] Unknown currency '{currency}', keeping as-is")
-            return float(amount)
+        rate = DEFAULT_RATES.get(currency.upper(), 1.0)
+        return round(float(amount) * rate, 2)
     except Exception as e:
-        logger.error(f"[convert_to_usd] Conversion error: {e}")
+        logger.error(f"[convert_to_usd] Error: {e}")
         return amount
 
 
-# ✅ Helper line for display formatting
-def usd_line(amount, currency="USD"):
-    """Return formatted string line for Telegram message."""
+def usd_line(min_amount=None, max_amount=None, currency="USD"):
+    """
+    Δημιουργεί γραμμή π.χ. '$50 – $120 USD (≈ 100.00 USD)'
+    με σωστή μετατροπή και όμορφη μορφοποίηση.
+    """
     try:
-        if amount is None:
-            return "💲 Budget: N/A"
-        usd_value = convert_to_usd(amount, currency)
-        if usd_value is None:
-            return "💲 Budget: N/A"
-        return f"💲 Budget: {amount} {currency} ≈ {usd_value:.2f} USD"
-    except Exception:
-        return "💲 Budget: N/A"
+        if not min_amount and not max_amount:
+            return "Budget: N/A"
+
+        if min_amount and not max_amount:
+            usd = convert_to_usd(min_amount, currency)
+            return f"💰 Budget: {min_amount:.0f} {currency} (≈ ${usd:.0f} USD)"
+
+        if max_amount and not min_amount:
+            usd = convert_to_usd(max_amount, currency)
+            return f"💰 Budget: {max_amount:.0f} {currency} (≈ ${usd:.0f} USD)"
+
+        # Αν έχουμε και min και max
+        avg = (float(min_amount) + float(max_amount)) / 2
+        usd = convert_to_usd(avg, currency)
+        return f"💰 Budget: {min_amount:.0f}–{max_amount:.0f} {currency} (≈ ${usd:.0f} USD)"
+    except Exception as e:
+        logger.error(f"[usd_line] Error: {e}")
+        return "Budget: N/A"
