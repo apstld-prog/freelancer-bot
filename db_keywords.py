@@ -40,35 +40,12 @@ def get_user_keywords(user_id: int):
 
 
 # ======================================================
-# 🔹 Get keywords for all users
-# ======================================================
-def get_all_user_keywords():
-    """Return {user_id: [keywords]} for all users."""
-    users_keywords = {}
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT id, keywords FROM users WHERE keywords IS NOT NULL;")
-        for user_id, keywords_str in cur.fetchall():
-            keywords = [k.strip() for k in keywords_str.split(',') if k.strip()]
-            users_keywords[user_id] = keywords
-        return users_keywords
-    except Exception as e:
-        logger.error(f"[get_all_user_keywords] Error: {e}")
-        return {}
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
-
-# ======================================================
-# 🔹 Add new keywords for a user
+# 🔹 Add new keywords
 # ======================================================
 def add_keywords(user_id: int, new_keywords: list[str]):
-    """Add new keywords to an existing user (avoids duplicates)."""
+    """Add new keywords for a user (avoids duplicates)."""
     if not new_keywords:
         return 0
-
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -99,17 +76,15 @@ def add_keywords(user_id: int, new_keywords: list[str]):
 
 
 # ======================================================
-# 🔹 Delete one or more keywords from a user
+# 🔹 Delete specific keywords
 # ======================================================
 def delete_keywords(user_id: int, keywords_to_delete: list[str]):
-    """Remove one or more keywords from a user's list."""
+    """Remove specific keywords from a user's list."""
     if not keywords_to_delete:
         return 0
-
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         cur.execute("SELECT keywords FROM users WHERE id = %s;", (user_id,))
         row = cur.fetchone()
         if not row or not row[0]:
@@ -117,13 +92,11 @@ def delete_keywords(user_id: int, keywords_to_delete: list[str]):
 
         current = [k.strip().lower() for k in row[0].split(',') if k.strip()]
         to_remove = [k.strip().lower() for k in keywords_to_delete if k.strip()]
-
         updated = [k for k in current if k not in to_remove]
         removed_count = len(current) - len(updated)
 
         cur.execute("UPDATE users SET keywords = %s WHERE id = %s;", (",".join(updated), user_id))
         conn.commit()
-
         logger.info(f"[delete_keywords] 🗑️ Removed {removed_count} keywords from user {user_id}")
         return removed_count
     except Exception as e:
@@ -135,26 +108,39 @@ def delete_keywords(user_id: int, keywords_to_delete: list[str]):
 
 
 # ======================================================
-# 🔹 List all distinct keywords
+# 🔹 Clear all keywords for a user
 # ======================================================
-def list_keywords():
-    """Return all distinct keywords from user_keywords or users.keywords."""
+def clear_keywords(user_id: int = None):
+    """Remove all keywords for a specific user, or for all users if None."""
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'user_keywords'
-            );
-        """)
-        exists = cur.fetchone()[0]
 
-        if exists:
-            cur.execute("SELECT DISTINCT keyword FROM user_keywords;")
-            rows = cur.fetchall()
-            return [r[0] for r in rows if r[0]]
+        if user_id:
+            cur.execute("UPDATE users SET keywords = NULL WHERE id = %s;", (user_id,))
+            logger.info(f"[clear_keywords] Cleared keywords for user {user_id}")
+        else:
+            cur.execute("UPDATE users SET keywords = NULL;")
+            logger.info("[clear_keywords] Cleared keywords for ALL users")
 
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"[clear_keywords] Error: {e}")
+        return False
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+# ======================================================
+# 🔹 List all keywords
+# ======================================================
+def list_keywords():
+    """Return all distinct keywords from users table."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
         cur.execute("SELECT DISTINCT keywords FROM users WHERE keywords IS NOT NULL;")
         all_kw = set()
         for (kw_str,) in cur.fetchall():
@@ -170,26 +156,13 @@ def list_keywords():
 
 
 # ======================================================
-# 🔹 Count keywords
+# 🔹 Count total keywords
 # ======================================================
 def count_keywords():
     """Return total number of unique keywords."""
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'user_keywords'
-            );
-        """)
-        exists = cur.fetchone()[0]
-
-        if exists:
-            cur.execute("SELECT COUNT(DISTINCT keyword) FROM user_keywords;")
-            total = cur.fetchone()[0]
-            return total or 0
-
         cur.execute("SELECT keywords FROM users WHERE keywords IS NOT NULL;")
         all_kw = set()
         for (kw_str,) in cur.fetchall():
@@ -205,37 +178,26 @@ def count_keywords():
 
 
 # ======================================================
-# 🔹 Ensure unique keyword in global table
+# 🔹 Ensure keyword is globally unique
 # ======================================================
 def ensure_keyword_unique(keyword: str):
-    """Ensure keyword exists only once in user_keywords table."""
+    """Ensure keyword exists only once (used for admin seed)."""
     if not keyword:
         return False
-
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'user_keywords'
-            );
-        """)
-        exists = cur.fetchone()[0]
-
-        if not exists:
-            logger.warning("[ensure_keyword_unique] user_keywords table not found.")
-            return False
-
-        cur.execute("SELECT COUNT(*) FROM user_keywords WHERE keyword = %s;", (keyword,))
-        count = cur.fetchone()[0]
-        if count == 0:
-            cur.execute("INSERT INTO user_keywords (user_id, keyword) VALUES (1, %s);", (keyword,))
+        cur.execute("SELECT keywords FROM users WHERE id = 1;")
+        row = cur.fetchone()
+        existing = []
+        if row and row[0]:
+            existing = [k.strip().lower() for k in row[0].split(',') if k.strip()]
+        if keyword.lower() not in existing:
+            existing.append(keyword.lower())
+            cur.execute("UPDATE users SET keywords = %s WHERE id = 1;", (",".join(existing),))
             conn.commit()
-            logger.info(f"[ensure_keyword_unique] ✅ Added new keyword '{keyword}'")
+            logger.info(f"[ensure_keyword_unique] ✅ Added keyword '{keyword}'")
             return True
-
-        logger.info(f"[ensure_keyword_unique] Keyword '{keyword}' already exists")
         return False
     except Exception as e:
         logger.error(f"[ensure_keyword_unique] Error: {e}")
