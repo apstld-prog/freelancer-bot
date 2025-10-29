@@ -12,7 +12,6 @@ def get_user_keywords(user_id: int):
         conn = get_connection()
         cur = conn.cursor()
 
-        # Check if user_keywords table exists
         cur.execute("""
             SELECT EXISTS (
                 SELECT FROM information_schema.tables 
@@ -26,7 +25,6 @@ def get_user_keywords(user_id: int):
             rows = cur.fetchall()
             return [r[0] for r in rows]
 
-        # fallback to users table
         cur.execute("SELECT keywords FROM users WHERE id = %s;", (user_id,))
         row = cur.fetchone()
         if row and row[0]:
@@ -39,6 +37,7 @@ def get_user_keywords(user_id: int):
     finally:
         if 'conn' in locals():
             conn.close()
+
 
 # ======================================================
 # 🔹 Get keywords for all users
@@ -63,8 +62,9 @@ def get_all_user_keywords():
         if 'conn' in locals():
             conn.close()
 
+
 # ======================================================
-# 🔹 Add new keywords for user (used by /addkeywords command)
+# 🔹 Add new keywords for a user
 # ======================================================
 def add_keywords(user_id: int, new_keywords: list[str]):
     """Add new keywords to an existing user (avoids duplicates)."""
@@ -75,7 +75,6 @@ def add_keywords(user_id: int, new_keywords: list[str]):
         conn = get_connection()
         cur = conn.cursor()
 
-        # Fetch existing
         cur.execute("SELECT keywords FROM users WHERE id = %s;", (user_id,))
         row = cur.fetchone()
         existing = []
@@ -100,8 +99,9 @@ def add_keywords(user_id: int, new_keywords: list[str]):
         if 'conn' in locals():
             conn.close()
 
+
 # ======================================================
-# 🔹 List all distinct keywords (used by bot.py startup)
+# 🔹 List all distinct keywords
 # ======================================================
 def list_keywords():
     """Return all distinct keywords from user_keywords or users.keywords."""
@@ -135,8 +135,9 @@ def list_keywords():
         if 'conn' in locals():
             conn.close()
 
+
 # ======================================================
-# 🔹 Count keywords (used in diagnostics and bot init)
+# 🔹 Count keywords
 # ======================================================
 def count_keywords():
     """Return total number of unique keywords."""
@@ -166,6 +167,48 @@ def count_keywords():
     except Exception as e:
         logger.error(f"[count_keywords] Error: {e}")
         return 0
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+# ======================================================
+# 🔹 Ensure unique keyword in global table
+# ======================================================
+def ensure_keyword_unique(keyword: str):
+    """Ensure keyword exists only once in user_keywords table."""
+    if not keyword:
+        return False
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'user_keywords'
+            );
+        """)
+        exists = cur.fetchone()[0]
+
+        if not exists:
+            logger.warning("[ensure_keyword_unique] user_keywords table not found.")
+            return False
+
+        cur.execute("SELECT COUNT(*) FROM user_keywords WHERE keyword = %s;", (keyword,))
+        count = cur.fetchone()[0]
+        if count == 0:
+            cur.execute("INSERT INTO user_keywords (user_id, keyword) VALUES (1, %s);", (keyword,))
+            conn.commit()
+            logger.info(f"[ensure_keyword_unique] ✅ Added new keyword '{keyword}'")
+            return True
+
+        logger.info(f"[ensure_keyword_unique] Keyword '{keyword}' already exists")
+        return False
+    except Exception as e:
+        logger.error(f"[ensure_keyword_unique] Error: {e}")
+        return False
     finally:
         if 'conn' in locals():
             conn.close()
