@@ -1,52 +1,41 @@
 import logging
 
-logger = logging.getLogger("currency_usd")
+logger = logging.getLogger(__name__)
 
-# Αν δεν βρεθεί νόμισμα ή rate, θα επιστραφεί ίδια τιμή
-DEFAULT_RATES = {
+# Simple conversion table
+RATES = {
     "USD": 1.0,
     "EUR": 1.08,
-    "GBP": 1.28,
-    "AUD": 0.66,
+    "GBP": 1.26,
+    "AUD": 0.65,
     "CAD": 0.73,
     "INR": 0.012,
-    "PHP": 0.017,
+    "BRL": 0.18,
+    "TRY": 0.032,
 }
 
-
 def convert_to_usd(amount, currency="USD"):
-    """Μετατρέπει ποσό στο ισοδύναμο USD με βάση σταθερούς συντελεστές."""
+    """Converts given amount to USD based on predefined rates"""
     if amount is None:
         return None
+    if not currency:
+        currency = "USD"
+    currency = currency.upper()
+    rate = RATES.get(currency)
+    if not rate:
+        logger.warning(f"[convert_to_usd] Unknown currency: {currency}")
+        return None
     try:
-        rate = DEFAULT_RATES.get(currency.upper(), 1.0)
         return round(float(amount) * rate, 2)
     except Exception as e:
         logger.error(f"[convert_to_usd] Error: {e}")
-        return amount
+        return None
 
-
-def usd_line(min_amount=None, max_amount=None, currency="USD"):
-    """
-    Δημιουργεί γραμμή π.χ. '$50 – $120 USD (≈ 100.00 USD)'
-    με σωστή μετατροπή και όμορφη μορφοποίηση.
-    """
-    try:
-        if not min_amount and not max_amount:
-            return "Budget: N/A"
-
-        if min_amount and not max_amount:
-            usd = convert_to_usd(min_amount, currency)
-            return f"💰 Budget: {min_amount:.0f} {currency} (≈ ${usd:.0f} USD)"
-
-        if max_amount and not min_amount:
-            usd = convert_to_usd(max_amount, currency)
-            return f"💰 Budget: {max_amount:.0f} {currency} (≈ ${usd:.0f} USD)"
-
-        # Αν έχουμε και min και max
-        avg = (float(min_amount) + float(max_amount)) / 2
-        usd = convert_to_usd(avg, currency)
-        return f"💰 Budget: {min_amount:.0f}–{max_amount:.0f} {currency} (≈ ${usd:.0f} USD)"
-    except Exception as e:
-        logger.error(f"[usd_line] Error: {e}")
-        return "Budget: N/A"
+def usd_line(amount, currency="USD"):
+    """Returns formatted budget line with USD conversion in parentheses"""
+    if not amount:
+        return "N/A USD"
+    usd_value = convert_to_usd(amount, currency)
+    if usd_value:
+        return f"{amount} {currency.upper()} ({usd_value} USD)"
+    return f"{amount} {currency.upper()}"
