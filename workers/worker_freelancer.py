@@ -4,7 +4,6 @@ import time
 import logging
 from datetime import datetime, timedelta
 
-# Ensure project root in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from platform_freelancer import fetch_freelancer_jobs
@@ -14,13 +13,11 @@ from utils import send_job_to_user
 
 logger = logging.getLogger("worker_freelancer")
 
-
 def _short(text: str, n: int = 400) -> str:
     if not text:
         return ""
     text = text.strip()
     return text if len(text) <= n else (text[:n] + "...")
-
 
 def _build_message(job: dict) -> str:
     title = job.get("title") or "N/A"
@@ -55,7 +52,6 @@ def _build_message(job: dict) -> str:
     ]
     return "\n".join([l for l in lines if l != ""])
 
-
 def parse_dt(v):
     if isinstance(v, datetime):
         return v
@@ -63,7 +59,6 @@ def parse_dt(v):
         return datetime.fromisoformat(v)
     except Exception:
         return datetime.utcnow()
-
 
 def main():
     logging.basicConfig(level=logging.INFO)
@@ -76,7 +71,12 @@ def main():
                     continue
                 jobs = fetch_freelancer_jobs(kws)
                 now = datetime.utcnow()
-                jobs = [j for j in jobs if not j.get("created_at") or now - parse_dt(j["created_at"]) <= timedelta(hours=48)]
+                jobs = [
+                    j for j in jobs
+                    if not j.get("created_at") or (
+                        now.replace(tzinfo=None) - parse_dt(j["created_at"]).replace(tzinfo=None)
+                    ) <= timedelta(hours=48)
+                ]
                 for job in jobs:
                     msg = _build_message(job)
                     import asyncio
@@ -88,7 +88,6 @@ def main():
         except Exception as e:
             logger.exception("[Freelancer Worker] Error: %s", e)
             time.sleep(120)
-
 
 if __name__ == "__main__":
     main()

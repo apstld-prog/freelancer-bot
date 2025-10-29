@@ -13,19 +13,17 @@ from utils import send_job_to_user
 
 logger = logging.getLogger("worker_skywalker")
 
-
 def _short(text: str, n: int = 400) -> str:
     if not text:
         return ""
     text = text.strip()
     return text if len(text) <= n else (text[:n] + "...")
 
-
 def _build_message(job: dict) -> str:
     title = job.get("title") or "N/A"
     desc = _short(job.get("description") or "")
     kw = job.get("matched_keyword") or "N/A"
-    cur = (job.get("budget_currency") or "EUR").upper()
+    cur = (job.get("budget_currency") or "USD").upper()
     min_amt = job.get("budget_min")
     max_amt = job.get("budget_max")
     avg_amt = job.get("budget_amount")
@@ -54,7 +52,6 @@ def _build_message(job: dict) -> str:
     ]
     return "\n".join([l for l in lines if l != ""])
 
-
 def parse_dt(v):
     if isinstance(v, datetime):
         return v
@@ -62,7 +59,6 @@ def parse_dt(v):
         return datetime.fromisoformat(v)
     except Exception:
         return datetime.utcnow()
-
 
 def main():
     logging.basicConfig(level=logging.INFO)
@@ -75,7 +71,12 @@ def main():
                     continue
                 jobs = fetch_skywalker_jobs(kws)
                 now = datetime.utcnow()
-                jobs = [j for j in jobs if not j.get("created_at") or now - parse_dt(j["created_at"]) <= timedelta(hours=48)]
+                jobs = [
+                    j for j in jobs
+                    if not j.get("created_at") or (
+                        now.replace(tzinfo=None) - parse_dt(j["created_at"]).replace(tzinfo=None)
+                    ) <= timedelta(hours=48)
+                ]
                 for job in jobs:
                     msg = _build_message(job)
                     import asyncio
@@ -83,11 +84,10 @@ def main():
                         asyncio.run(send_job_to_user(None, int(user_id), msg, job))
                     except RuntimeError:
                         pass
-            time.sleep(300)
+            time.sleep(60)
         except Exception as e:
             logger.exception("[Skywalker Worker] Error: %s", e)
             time.sleep(120)
-
 
 if __name__ == "__main__":
     main()
