@@ -3,6 +3,9 @@ from db import get_connection
 
 logger = logging.getLogger(__name__)
 
+# ======================================================
+# 🔹 Get keywords for one user
+# ======================================================
 def get_user_keywords(user_id: int):
     """Return all keywords for a specific user."""
     try:
@@ -23,7 +26,7 @@ def get_user_keywords(user_id: int):
             rows = cur.fetchall()
             return [r[0] for r in rows]
 
-        # fallback to 'users' table
+        # fallback to users table
         cur.execute("SELECT keywords FROM users WHERE id = %s;", (user_id,))
         row = cur.fetchone()
         if row and row[0]:
@@ -37,7 +40,9 @@ def get_user_keywords(user_id: int):
         if 'conn' in locals():
             conn.close()
 
-
+# ======================================================
+# 🔹 Get keywords for all users
+# ======================================================
 def get_all_user_keywords():
     """Return {user_id: [keywords]} for all users."""
     users_keywords = {}
@@ -58,16 +63,71 @@ def get_all_user_keywords():
         if 'conn' in locals():
             conn.close()
 
+# ======================================================
+# 🔹 Add new keywords for user (used by /addkeywords command)
+# ======================================================
+def add_keywords(user_id: int, new_keywords: list[str]):
+    """Add new keywords to an existing user (avoids duplicates)."""
+    if not new_keywords:
+        return 0
 
-# ✅ Add missing function for bot.py compatibility
-def list_keywords():
-    """Legacy helper required by bot.py"""
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT DISTINCT keyword FROM user_keywords;")
-        rows = cur.fetchall()
-        return [r[0] for r in rows if r[0]]
+
+        # Fetch existing
+        cur.execute("SELECT keywords FROM users WHERE id = %s;", (user_id,))
+        row = cur.fetchone()
+        existing = []
+        if row and row[0]:
+            existing = [k.strip().lower() for k in row[0].split(',') if k.strip()]
+
+        added = []
+        for kw in new_keywords:
+            kw_norm = kw.strip().lower()
+            if kw_norm and kw_norm not in existing:
+                existing.append(kw_norm)
+                added.append(kw_norm)
+
+        cur.execute("UPDATE users SET keywords = %s WHERE id = %s;", (",".join(existing), user_id))
+        conn.commit()
+        logger.info(f"[add_keywords] ✅ Added {len(added)} keywords for user {user_id}")
+        return len(added)
+    except Exception as e:
+        logger.error(f"[add_keywords] Error: {e}")
+        return 0
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# ======================================================
+# 🔹 List all distinct keywords (used by bot.py startup)
+# ======================================================
+def list_keywords():
+    """Return all distinct keywords from user_keywords or users.keywords."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'user_keywords'
+            );
+        """)
+        exists = cur.fetchone()[0]
+
+        if exists:
+            cur.execute("SELECT DISTINCT keyword FROM user_keywords;")
+            rows = cur.fetchall()
+            return [r[0] for r in rows if r[0]]
+
+        cur.execute("SELECT DISTINCT keywords FROM users WHERE keywords IS NOT NULL;")
+        all_kw = set()
+        for (kw_str,) in cur.fetchall():
+            if kw_str:
+                all_kw.update([k.strip() for k in kw_str.split(',') if k.strip()])
+        return list(all_kw)
     except Exception as e:
         logger.error(f"[list_keywords] Error: {e}")
         return []
