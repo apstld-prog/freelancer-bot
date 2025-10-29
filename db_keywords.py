@@ -39,6 +39,12 @@ def add_user_keyword(user_id: int, keyword: str):
             s.commit()
 
 
+# 🔧 alias για συμβατότητα με το bot.py
+def add_keywords(user_id: int, keyword: str):
+    """Alias της add_user_keyword (για συμβατότητα)."""
+    return add_user_keyword(user_id, keyword)
+
+
 def delete_user_keyword(user_id: int, keyword: str):
     """Διαγράφει keyword χρήστη."""
     with get_session() as s:
@@ -70,7 +76,7 @@ def ensure_keywords():
 
 if __name__ == "__main__":
     print("======================================================")
-    print("🔑 INIT KEYWORDS TOOL — psycopg2 version (FINAL)")
+    print("🔑 INIT KEYWORDS TOOL — psycopg2 version (FINAL-FINAL)")
     print("======================================================")
     ensure_keyword_unique()
     ensure_keywords()
