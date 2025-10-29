@@ -16,14 +16,16 @@ def fetch_skywalker_jobs(keywords):
             if resp.status_code != 200:
                 logger.warning(f"[Skywalker] HTTP {resp.status_code}")
                 return []
-            soup = BeautifulSoup(resp.text, "xml")
+
+            # 🧩 FIX: use html.parser instead of xml
+            soup = BeautifulSoup(resp.text, "html.parser")
             items = soup.find_all("item")
 
             for item in items:
-                title = item.title.text.strip() if item.title else ""
-                desc = item.description.text.strip() if item.description else ""
-                link = item.link.text.strip() if item.link else ""
-                pub_date = item.pubDate.text.strip() if item.pubDate else ""
+                title = item.find("title").text.strip() if item.find("title") else ""
+                desc = item.find("description").text.strip() if item.find("description") else ""
+                link = item.find("link").text.strip() if item.find("link") else ""
+                pub_date = item.find("pubDate").text.strip() if item.find("pubDate") else ""
                 created_at = _parse_rss_date(pub_date)
 
                 if (datetime.utcnow() - created_at) > timedelta(hours=48):

@@ -66,7 +66,7 @@ def build_job_message(job):
     budget = job.get("budget_usd", 0)
     original = job.get("budget_amount", 0)
     currency = job.get("budget_currency", "USD")
-    keyword = job.get("keyword", "")
+    keyword = job.get("keyword") or job.get("matched_keyword", "")
     source = job.get("platform", "Unknown")
     created_at = job.get("created_at")
     ago = format_time_ago(created_at)
@@ -106,6 +106,11 @@ def build_job_buttons(job):
 async def send_job_to_user(bot_instance, user_id, text, job):
     """Send job message to one user"""
     try:
+        # ✅ Skip invalid or missing chat IDs
+        if not user_id or int(user_id) < 1000000:
+            logging.warning(f"[send_job_to_user] Skipping invalid user_id: {user_id}")
+            return
+
         buttons = build_job_buttons(job)
         await bot.send_message(
             chat_id=user_id,
