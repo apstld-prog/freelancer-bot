@@ -29,7 +29,6 @@ class PsycopgSession:
         self.cur.close()
         self.conn.close()
 
-    # Context manager support
     def __enter__(self):
         return self
 
@@ -50,7 +49,7 @@ def ensure_schema():
     """Ensures base user table exists"""
     with get_session() as s:
         s.execute("""
-        CREATE TABLE IF NOT EXISTS user (
+        CREATE TABLE IF NOT EXISTS "user" (
             id SERIAL PRIMARY KEY,
             telegram_id BIGINT UNIQUE,
             username TEXT,
@@ -58,7 +57,7 @@ def ensure_schema():
             is_active BOOLEAN DEFAULT TRUE,
             is_blocked BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
+            updated_at TIMESTAMP DEFAULT NOW() NOT NULL
         );
         """)
         s.commit()
@@ -67,12 +66,12 @@ def ensure_schema():
 def get_or_create_user_by_tid(telegram_id):
     """Ensures a user exists in the database and returns it"""
     with get_session() as s:
-        s.execute("SELECT * FROM user WHERE telegram_id=%s;", (telegram_id,))
+        s.execute('SELECT * FROM "user" WHERE telegram_id=%s;', (telegram_id,))
         user = s.fetchone()
         if not user:
             s.execute(
-                "INSERT INTO user (telegram_id, username, is_admin, is_active, created_at, updated_at) "
-                "VALUES (%s, %s, FALSE, TRUE, NOW(), NOW()) RETURNING *;",
+                'INSERT INTO "user" (telegram_id, username, is_admin, is_active, created_at, updated_at) '
+                'VALUES (%s, %s, FALSE, TRUE, NOW(), NOW()) RETURNING *;',
                 (telegram_id, f"user_{telegram_id}")
             )
             user = s.fetchone()
