@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from platform_pph import fetch_pph_jobs
+from platform_peopleperhour import fetch_pph_jobs
 from db_keywords import get_all_user_keywords
 from currency_usd import usd_line
 from utils import send_job_to_user
