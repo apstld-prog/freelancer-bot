@@ -2,39 +2,70 @@ import logging
 import httpx
 from datetime import datetime, timedelta
 
-def fetch_freelancer_jobs():
-    """Fetch and filter jobs from Freelancer API"""
+logger = logging.getLogger("platform_freelancer")
+API_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
+
+
+def fetch_freelancer_jobs(keywords):
+    """Fetch Freelancer.com jobs matching provided keywords"""
+    all_jobs = []
+    query = ",".join(keywords)
     try:
-        url = "https://www.freelancer.com/api/projects/0.1/projects/active/"
         params = {
+            "full_description": "false",
+            "job_details": "false",
             "limit": 30,
             "offset": 0,
-            "full_description": True,
             "sort_field": "time_submitted",
-            "sort_direction": "desc"
+            "sort_direction": "desc",
+            "query": query,
         }
-        jobs = []
-        with httpx.Client(timeout=25) as client:
-            r = client.get(url, params=params)
-            if r.status_code != 200:
-                logging.warning(f"[Freelancer] HTTP {r.status_code}")
-                return []
-            for j in r.json().get("result", {}).get("projects", []):
-                created_at = datetime.utcfromtimestamp(j.get("time_submitted", 0))
-                if datetime.utcnow() - created_at > timedelta(hours=48):
+        with httpx.Client(timeout=15.0) as client:
+            r = client.get(API_URL, params=params)
+            r.raise_for_status()
+            data = r.json()
+            for item in data.get("result", {}).get("projects", []):
+                title = item.get("title", "").strip()
+                desc = (item.get("preview_description") or "").strip()
+                budget = item.get("budget", {}) or {}
+                budget_min = budget.get("minimum")
+                budget_max = budget.get("maximum")
+                currency = budget.get("currency", {}).get("code", "USD")
+                time_submitted = item.get("time_submitted")
+                created_at = (
+                    datetime.utcfromtimestamp(time_submitted)
+                    if time_submitted
+                    else datetime.utcnow()
+                )
+
+                # 48-hour filter
+                if (datetime.utcnow() - created_at) > timedelta(hours=48):
                     continue
-                jobs.append({
-                    "id": j.get("id"),
-                    "title": j.get("title"),
-                    "description": j.get("preview_description", ""),
-                    "budget_amount": j.get("budget", {}).get("minimum", 0),
-                    "budget_currency": j.get("currency", {}).get("code", "USD"),
-                    "original_url": f"https://www.freelancer.com/projects/{j.get('seo_url')}",
+
+                job = {
+                    "title": title,
+                    "description": desc,
+                    "budget_min": budget_min,
+                    "budget_max": budget_max,
+                    "budget_currency": currency,
+                    "budget_amount": budget_max or budget_min or 0,
+                    "created_at": created_at,
                     "platform": "Freelancer",
-                    "created_at": created_at
-                })
-        logging.info(f"[Freelancer] ✅ Collected {len(jobs)} recent jobs")
-        return jobs
+                    "matched_keyword": _match_keyword(title, desc, keywords),
+                    "original_url": f"https://www.freelancer.com/projects/{item.get('seo_url')}",
+                }
+                all_jobs.append(job)
+
+        logger.info(f"[Freelancer] ✅ {len(all_jobs)} jobs fetched for query: {query}")
     except Exception as e:
-        logging.error(f"[Freelancer] Exception: {e}")
-        return []
+        logger.warning(f"[Freelancer] ⚠️ Error: {e}")
+
+    return all_jobs
+
+
+def _match_keyword(title, desc, keywords):
+    text = (title + " " + desc).lower()
+    for kw in keywords:
+        if kw.lower() in text:
+            return kw
+    return ""
