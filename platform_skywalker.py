@@ -1,53 +1,74 @@
-import httpx
 import logging
-from datetime import datetime, timedelta
+import httpx
 from bs4 import BeautifulSoup
-from currency_usd import convert_to_usd
+from datetime import datetime, timezone
+from currency_usd import usd_line
 
 logger = logging.getLogger("platform_skywalker")
 
-def fetch_skywalker_jobs(keywords=None):
-    logger.info("[Skywalker] Fetching latest jobs...")
-    url = "https://www.skywalker.gr/el/thesis"
-    jobs = []
+BASE_URL = "https://www.skywalker.gr/el/thesis"
+
+
+def _parse_posted_ago(date_str: str) -> str:
     try:
-        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
-            r = client.get(url)
-        if r.status_code != 200:
-            logger.warning(f"[Skywalker] HTTP {r.status_code}")
-            return []
+        if "σήμερα" in date_str:
+            return "today"
+        if "χθες" in date_str:
+            return "1 day ago"
+        return date_str.strip()
+    except Exception:
+        return "N/A"
+
+
+def fetch_skywalker_jobs(keywords: list[str]) -> list[dict]:
+    try:
+        logger.info("[Skywalker] Fetching jobs...")
+        jobs = []
+
+        with httpx.Client(timeout=30.0) as client:
+            r = client.get(BASE_URL)
+            r.raise_for_status()
 
         soup = BeautifulSoup(r.text, "html.parser")
-        items = soup.select("div.job")
-        for item in items:
-            title_tag = item.select_one("a.job-title")
-            if not title_tag:
-                continue
-            title = title_tag.get_text(strip=True)
-            link = "https://www.skywalker.gr" + title_tag["href"]
+        cards = soup.select(".job-list-item")
+        logger.info(f"[Skywalker] ✅ {len(cards)} jobs fetched")
 
-            desc = item.select_one("div.job-desc")
-            description = desc.get_text(strip=True) if desc else "N/A"
+        for card in cards:
+            title_el = card.select_one("h2 a")
+            desc_el = card.select_one(".job-desc")
+            date_el = card.select_one(".job-date")
 
-            budget_amount, budget_currency = None, "EUR"
-            budget_usd = convert_to_usd(budget_amount, budget_currency)
+            title = title_el.text.strip() if title_el else "No title"
+            desc = desc_el.text.strip() if desc_el else ""
+            posted_ago = _parse_posted_ago(date_el.text) if date_el else "N/A"
 
-            posted_time = datetime.utcnow()
-            if posted_time < datetime.utcnow() - timedelta(hours=48):
-                continue
+            usd_info = usd_line()  # No budget info on Skywalker
 
-            jobs.append({
+            matched_kw = None
+            if keywords:
+                text = f"{title} {desc}".lower()
+                for kw in keywords:
+                    if kw.lower() in text:
+                        matched_kw = kw
+                        break
+
+            job = {
                 "platform": "Skywalker",
                 "title": title,
-                "description": description,
-                "budget_amount": budget_amount,
-                "budget_currency": budget_currency,
-                "budget_usd": budget_usd,
-                "url": link,
-                "created_at": posted_time.isoformat()
-            })
-        logger.info(f"[Skywalker] ✅ {len(jobs)} jobs fetched")
+                "description": desc,
+                "budget": usd_info,
+                "currency": "EUR",
+                "min_amount": None,
+                "max_amount": None,
+                "created_at": datetime.now(timezone.utc),
+                "posted_ago": posted_ago,
+                "url": title_el["href"] if title_el and title_el.has_attr("href") else BASE_URL,
+                "keyword": matched_kw or "N/A",
+            }
+            jobs.append(job)
+
         return jobs
+
     except Exception as e:
         logger.error(f"[Skywalker] Error: {e}")
         return []
