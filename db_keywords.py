@@ -48,9 +48,7 @@ def get_all_user_keywords():
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("""
-            SELECT id, keywords FROM users WHERE keywords IS NOT NULL;
-        """)
+        cur.execute("SELECT id, keywords FROM users WHERE keywords IS NOT NULL;")
         for user_id, keywords_str in cur.fetchall():
             keywords = [k.strip() for k in keywords_str.split(',') if k.strip()]
             users_keywords[user_id] = keywords
@@ -74,9 +72,9 @@ def add_keywords(user_id: int, new_keywords: list[str]):
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         cur.execute("SELECT keywords FROM users WHERE id = %s;", (user_id,))
         row = cur.fetchone()
+
         existing = []
         if row and row[0]:
             existing = [k.strip().lower() for k in row[0].split(',') if k.strip()]
@@ -101,6 +99,42 @@ def add_keywords(user_id: int, new_keywords: list[str]):
 
 
 # ======================================================
+# 🔹 Delete one or more keywords from a user
+# ======================================================
+def delete_keywords(user_id: int, keywords_to_delete: list[str]):
+    """Remove one or more keywords from a user's list."""
+    if not keywords_to_delete:
+        return 0
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT keywords FROM users WHERE id = %s;", (user_id,))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return 0
+
+        current = [k.strip().lower() for k in row[0].split(',') if k.strip()]
+        to_remove = [k.strip().lower() for k in keywords_to_delete if k.strip()]
+
+        updated = [k for k in current if k not in to_remove]
+        removed_count = len(current) - len(updated)
+
+        cur.execute("UPDATE users SET keywords = %s WHERE id = %s;", (",".join(updated), user_id))
+        conn.commit()
+
+        logger.info(f"[delete_keywords] 🗑️ Removed {removed_count} keywords from user {user_id}")
+        return removed_count
+    except Exception as e:
+        logger.error(f"[delete_keywords] Error: {e}")
+        return 0
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+# ======================================================
 # 🔹 List all distinct keywords
 # ======================================================
 def list_keywords():
@@ -108,7 +142,6 @@ def list_keywords():
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         cur.execute("""
             SELECT EXISTS (
                 SELECT FROM information_schema.tables 
@@ -144,7 +177,6 @@ def count_keywords():
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         cur.execute("""
             SELECT EXISTS (
                 SELECT FROM information_schema.tables 
@@ -183,7 +215,6 @@ def ensure_keyword_unique(keyword: str):
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         cur.execute("""
             SELECT EXISTS (
                 SELECT FROM information_schema.tables 
