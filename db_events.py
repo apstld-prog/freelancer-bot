@@ -1,78 +1,93 @@
-# ======================================================
-# db_events.py — feed events schema + stats + logging jobs
-# ======================================================
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List
-from sqlalchemy import text
 from db import get_session
 
-# ------------------------------------------------------
-# Table DDL
-# ------------------------------------------------------
-DDL = """
-CREATE TABLE IF NOT EXISTS feed_events (
-  id BIGSERIAL PRIMARY KEY,
-  ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  source VARCHAR(120) NOT NULL,
-  payload JSONB
-);
-CREATE INDEX IF NOT EXISTS idx_feed_events_ts ON feed_events (ts);
-CREATE INDEX IF NOT EXISTS idx_feed_events_source ON feed_events (source);
-"""
 
-# ------------------------------------------------------
-# Ensure schema exists
-# ------------------------------------------------------
-def ensure_feed_events_schema() -> None:
-    """Create feed_events table & indexes if they don't exist."""
+def ensure_feed_events_schema():
+    """
+    Δημιουργεί τον πίνακα feed_event αν δεν υπάρχει ήδη.
+    Παρακολουθεί κάθε fetch από τις πλατφόρμες (Freelancer, PPH, Skywalker).
+    """
     with get_session() as s:
-        s.execute(text(DDL))
+        s.execute("""
+        CREATE TABLE IF NOT EXISTS feed_event (
+            id SERIAL PRIMARY KEY,
+            platform TEXT NOT NULL,
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+        );
+        """)
         s.commit()
 
-# ------------------------------------------------------
-# Record single event
-# ------------------------------------------------------
-def record_event(source: str, payload: Optional[dict] = None) -> None:
-    """Insert one event record manually."""
+
+def record_event(platform: str):
+    """
+    Καταγράφει νέο event στο feed_event όταν γίνεται επιτυχής fetch.
+    """
+    if not platform:
+        return
+
     with get_session() as s:
         s.execute(
-            text("INSERT INTO feed_events (source, payload) VALUES (:source, :payload)"),
-            {"source": source, "payload": payload},
+            "INSERT INTO feed_event (platform) VALUES (%s);",
+            (platform,)
         )
         s.commit()
 
-# ------------------------------------------------------
-# Record multiple fetched jobs
-# ------------------------------------------------------
-def record_fetched_jobs(source: str, jobs: List[dict]) -> int:
-    """Insert multiple job payloads from a source."""
-    if not jobs:
-        return 0
+
+def get_platform_stats(window_hours: int = 24):
+    """
+    Επιστρέφει dictionary με αριθμό events ανά πλατφόρμα
+    εντός του τελευταίου window_hours (default: 24 ώρες).
+    Παράδειγμα:
+      {'Freelancer': 120, 'PeoplePerHour': 25, 'Skywalker': 3}
+    """
+    with get_session() as s:
+        s.execute("""
+        SELECT platform, COUNT(*) AS cnt
+        FROM feed_event
+        WHERE created_at >= (NOW() AT TIME ZONE 'UTC') - (%s || ' hours')::INTERVAL
+        GROUP BY platform
+        ORDER BY cnt DESC;
+        """, (str(window_hours),))
+        rows = s.fetchall()
+
+        # Επιστρέφει σε μορφή dict
+        return {r["platform"]: r["cnt"] for r in rows}
+
+
+def get_total_stats():
+    """
+    Επιστρέφει συνολικό πλήθος events ανά πλατφόρμα από την αρχή.
+    Παράδειγμα:
+      {'Freelancer': 980, 'PeoplePerHour': 45}
+    """
+    with get_session() as s:
+        s.execute("""
+        SELECT platform, COUNT(*) AS cnt
+        FROM feed_event
+        GROUP BY platform
+        ORDER BY cnt DESC;
+        """)
+        rows = s.fetchall()
+
+        return {r["platform"]: r["cnt"] for r in rows}
+
+
+def cleanup_old_events(max_days: int = 7):
+    """
+    Διαγράφει παλιά feed events (προαιρετική συντήρηση).
+    Κρατάει μόνο τα τελευταία N days (default: 7).
+    """
+    with get_session() as s:
+        s.execute("""
+        DELETE FROM feed_event
+        WHERE created_at < (NOW() AT TIME ZONE 'UTC') - (%s || ' days')::INTERVAL;
+        """, (str(max_days),))
+        s.commit()
+
+
+if __name__ == "__main__":
+    print("======================================================")
+    print("🧩 FEED EVENTS SCHEMA INITIALIZER")
+    print("======================================================")
     ensure_feed_events_schema()
-    count = 0
-    with get_session() as s:
-        for j in jobs:
-            try:
-                s.execute(
-                    text("INSERT INTO feed_events (source, payload) VALUES (:source, :payload)"),
-                    {"source": source, "payload": j},
-                )
-                count += 1
-            except Exception as e:
-                print(f"[record_fetched_jobs] warning: {e}")
-        s.commit()
-    return count
-
-# ------------------------------------------------------
-# Retrieve platform stats
-# ------------------------------------------------------
-def get_platform_stats(window_hours: int = 24) -> Dict[str, int]:
-    """Return counts per source for last `window_hours`."""
-    with get_session() as s:
-        q = text(
-            "SELECT source, COUNT(*) FROM feed_events "
-            "WHERE ts >= :ts_from GROUP BY source ORDER BY 2 DESC"
-        )
-        ts_from = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-        rows = s.execute(q, {"ts_from": ts_from}).fetchall()
-        return {r[0]: int(r[1]) for r in rows}
+    print("✅ feed_event schema ensured successfully.")
+    print("======================================================")
