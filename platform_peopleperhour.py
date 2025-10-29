@@ -1,3 +1,27 @@
+import httpx
+import logging
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+from currency_usd import convert_to_usd
+
+logger = logging.getLogger("platform_peopleperhour")
+
+def parse_budget(raw: str):
+    """Extract numeric value and currency symbol from text like '£50', '€100', '$200'."""
+    if not raw:
+        return None, "USD"
+    try:
+        raw = raw.strip()
+        if raw.startswith("£"):
+            return float(raw.replace("£", "").replace(",", "").strip()), "GBP"
+        if raw.startswith("€"):
+            return float(raw.replace("€", "").replace(",", "").strip()), "EUR"
+        if raw.startswith("$"):
+            return float(raw.replace("$", "").replace(",", "").strip()), "USD"
+        return float(raw.replace(",", "").strip()), "USD"
+    except Exception:
+        return None, "USD"
+
 def fetch_pph_jobs(keywords=None):
     logger.info("[PPH] Fetching latest jobs...")
     url = "https://www.peopleperhour.com/freelance-jobs/"

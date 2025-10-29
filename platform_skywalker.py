@@ -1,3 +1,11 @@
+import httpx
+import logging
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+from currency_usd import convert_to_usd
+
+logger = logging.getLogger("platform_skywalker")
+
 def fetch_skywalker_jobs(keywords=None):
     logger.info("[Skywalker] Fetching latest jobs...")
     url = "https://www.skywalker.gr/el/thesis"
@@ -25,7 +33,6 @@ def fetch_skywalker_jobs(keywords=None):
             budget_usd = convert_to_usd(budget_amount, budget_currency)
 
             posted_time = datetime.utcnow()
-
             if posted_time < datetime.utcnow() - timedelta(hours=48):
                 continue
 
