@@ -35,3 +35,17 @@ def convert_to_usd(amount, currency="USD"):
     except Exception as e:
         logger.error(f"[convert_to_usd] Conversion error: {e}")
         return amount
+
+
+# ✅ Helper line for display formatting
+def usd_line(amount, currency="USD"):
+    """Return formatted string line for Telegram message."""
+    try:
+        if amount is None:
+            return "💲 Budget: N/A"
+        usd_value = convert_to_usd(amount, currency)
+        if usd_value is None:
+            return "💲 Budget: N/A"
+        return f"💲 Budget: {amount} {currency} ≈ {usd_value:.2f} USD"
+    except Exception:
+        return "💲 Budget: N/A"
