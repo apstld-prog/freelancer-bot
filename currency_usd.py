@@ -1,12 +1,7 @@
-# currency_usd.py
-# Drop-in helper for showing "~ $min–$max USD" lines.
-# Δεν έχει εξωτερικά dependencies. Rates είναι conservative,
-# με fallback σε 1:1 αν δεν βρεθεί νόμισμα (οπότε απλά δεν θα τυπώσει USD).
-# Τελευταία ενημέρωση πινάκα: 2025-10-01 (προσεγγιστικά mid-market).
+# currency_usd.py — fixed version with backward compatibility
 
 from typing import Optional, Tuple
 
-# Προσεγγιστικές ισοτιμίες -> USD
 _RATES_TO_USD = {
     "USD": 1.0,
     "EUR": 1.08,
@@ -26,13 +21,12 @@ _RATES_TO_USD = {
     "HUF": 0.0027,
     "JPY": 0.0066,
     "ZAR": 0.055,
-    # πρόσθεσε αν χρειαστείς κι άλλα
 }
 
 def to_usd_range(min_amount: Optional[float],
                  max_amount: Optional[float],
                  currency: Optional[str]) -> Optional[Tuple[float, float]]:
-    """Μετατρέπει προαιρετικό range σε USD. Επιστρέφει (min_usd, max_usd) ή None."""
+    """Convert range to USD tuple (min_usd, max_usd) or None."""
     if not currency:
         return None
     cur = currency.upper().strip()
@@ -43,7 +37,6 @@ def to_usd_range(min_amount: Optional[float],
         return round(float(x) * rate, 2) if x is not None else None
     min_usd = conv(min_amount)
     max_usd = conv(max_amount)
-    # Αν και τα δύο None, δεν τυπώνουμε τίποτα
     if min_usd is None and max_usd is None:
         return None
     return (min_usd or 0.0, max_usd or 0.0)
@@ -51,7 +44,7 @@ def to_usd_range(min_amount: Optional[float],
 def usd_line(min_amount: Optional[float],
              max_amount: Optional[float],
              currency: Optional[str]) -> Optional[str]:
-    """Επιστρέφει την έτοιμη γραμμή π.χ. '~ $100.00–$300.00 USD' ή None."""
+    """Return formatted '~ $100–$300 USD' line or None."""
     rng = to_usd_range(min_amount, max_amount, currency)
     if not rng:
         return None
@@ -63,3 +56,10 @@ def usd_line(min_amount: Optional[float],
     if hi and not lo:
         return f"~ up to ${hi:,.2f} USD"
     return None
+
+# ✅ Backward compatibility (workers expect this name)
+def convert_to_usd(min_amount: Optional[float],
+                   max_amount: Optional[float],
+                   currency: Optional[str]) -> Optional[Tuple[float, float]]:
+    """Alias for to_usd_range — kept for legacy worker imports."""
+    return to_usd_range(min_amount, max_amount, currency)
