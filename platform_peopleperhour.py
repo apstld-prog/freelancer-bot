@@ -1,73 +1,111 @@
-import httpx
 import logging
-from datetime import datetime, timedelta
+import httpx
 from bs4 import BeautifulSoup
+from datetime import datetime, timedelta, timezone
 from currency_usd import convert_to_usd
 
 logger = logging.getLogger("platform_peopleperhour")
 
-def parse_budget(raw: str):
-    """Extract numeric value and currency symbol from text like '£50', '€100', '$200'."""
-    if not raw:
-        return None, "USD"
+
+def _parse_budget(text: str):
+    """Extract min/max/avg and currency from text like '£50 – £150 GBP'."""
+    if not text:
+        return None, None, None, None
+    import re
+    clean = text.replace(",", "").replace("–", "-").strip()
+    m = re.findall(r"([£$€]?)(\d+(?:\.\d+)?)", clean)
+    if not m:
+        return None, None, None, None
+    values = [float(v[1]) for v in m]
+    currency_symbol = m[0][0]
+    cur = "GBP"
+    if currency_symbol == "$":
+        cur = "USD"
+    elif currency_symbol == "€":
+        cur = "EUR"
+    if len(values) == 1:
+        return values[0], values[0], values[0], cur
+    return values[0], values[-1], sum(values) / len(values), cur
+
+
+def _parse_relative_time(txt: str):
+    """Convert '3 hours ago' or '2 days ago' → datetime (UTC)."""
+    if not txt:
+        return datetime.now(timezone.utc)
+    txt = txt.lower()
+    now = datetime.now(timezone.utc)
+    import re
+    m = re.search(r"(\d+)\s+(minute|hour|day)", txt)
+    if not m:
+        return now
+    num = int(m.group(1))
+    unit = m.group(2)
+    if "minute" in unit:
+        return now - timedelta(minutes=num)
+    if "hour" in unit:
+        return now - timedelta(hours=num)
+    if "day" in unit:
+        return now - timedelta(days=num)
+    return now
+
+
+def fetch_pph_jobs(keywords):
+    """
+    Scrape PeoplePerHour jobs feed and return list of dicts with:
+    title, description, url, budget_min/max/avg, currency, usd, created_at, posted_ago, matched_keyword
+    """
+    results = []
+    if not keywords:
+        return results
+
     try:
-        raw = raw.strip()
-        if raw.startswith("£"):
-            return float(raw.replace("£", "").replace(",", "").strip()), "GBP"
-        if raw.startswith("€"):
-            return float(raw.replace("€", "").replace(",", "").strip()), "EUR"
-        if raw.startswith("$"):
-            return float(raw.replace("$", "").replace(",", "").strip()), "USD"
-        return float(raw.replace(",", "").strip()), "USD"
-    except Exception:
-        return None, "USD"
-
-def fetch_pph_jobs(keywords=None):
-    logger.info("[PPH] Fetching latest jobs...")
-    url = "https://www.peopleperhour.com/freelance-jobs/"
-    jobs = []
-    try:
-        with httpx.Client(timeout=20.0) as client:
-            r = client.get(url)
-        if r.status_code != 200:
-            logger.warning(f"[PPH] HTTP {r.status_code}")
-            return []
-
-        soup = BeautifulSoup(r.text, "html.parser")
-        cards = soup.select("section.job-card, div.job-card")
-        for card in cards:
-            title_tag = card.select_one("a.job-title")
-            if not title_tag:
-                continue
-            title = title_tag.get_text(strip=True)
-            link = "https://www.peopleperhour.com" + title_tag["href"]
-
-            desc = card.select_one("p.job-description")
-            description = desc.get_text(strip=True) if desc else "N/A"
-
-            budget_tag = card.select_one("span.price, span.amount")
-            budget_raw = budget_tag.get_text(strip=True) if budget_tag else "N/A"
-
-            budget_amount, budget_currency = parse_budget(budget_raw)
-            budget_usd = convert_to_usd(budget_amount, budget_currency)
-
-            posted_time = datetime.utcnow()
-
-            if posted_time < datetime.utcnow() - timedelta(hours=48):
+        for kw in keywords:
+            url = f"https://www.peopleperhour.com/freelance-jobs/search?query={kw}"
+            logger.info(f"[PPH] Fetching keyword: {kw}")
+            r = httpx.get(url, timeout=30, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code != 200:
+                logger.warning(f"[PPH] HTTP {r.status_code} for keyword {kw}")
                 continue
 
-            jobs.append({
-                "platform": "PeoplePerHour",
-                "title": title,
-                "description": description,
-                "budget_amount": budget_amount,
-                "budget_currency": budget_currency,
-                "budget_usd": budget_usd,
-                "url": link,
-                "created_at": posted_time.isoformat()
-            })
-        logger.info(f"[PPH] ✅ {len(jobs)} jobs fetched")
-        return jobs
+            soup = BeautifulSoup(r.text, "html.parser")
+            cards = soup.select("section.listing-card, div.project")
+            for card in cards:
+                title_el = card.select_one("h3, h2")
+                title = title_el.get_text(strip=True) if title_el else "(no title)"
+
+                desc_el = card.select_one("p, div.description, div.project__desc")
+                desc = desc_el.get_text(strip=True) if desc_el else ""
+
+                href = card.select_one("a[href]")
+                link = "https://www.peopleperhour.com" + href["href"] if href and href["href"].startswith("/") else (href["href"] if href else "")
+
+                budget_el = card.select_one(".listing-card__price, .project__price, .price")
+                budget_txt = budget_el.get_text(strip=True) if budget_el else ""
+                bmin, bmax, bavg, cur = _parse_budget(budget_txt)
+                usd_val = convert_to_usd(bavg, cur) if bavg else None
+
+                time_el = card.select_one(".listing-card__time, time")
+                time_txt = time_el.get_text(strip=True) if time_el else ""
+                created_at = _parse_relative_time(time_txt)
+
+                results.append({
+                    "platform": "peopleperhour",
+                    "title": title,
+                    "description": desc,
+                    "original_url": link,
+                    "budget_min": bmin,
+                    "budget_max": bmax,
+                    "budget_amount": bavg,
+                    "budget_currency": cur,
+                    "budget_usd": usd_val,
+                    "created_at": created_at,
+                    "posted_ago": time_txt or "N/A",
+                    "matched_keyword": kw,
+                })
+
+        logger.info(f"[PPH] ✅ {len(results)} jobs fetched")
+        return results
+
     except Exception as e:
-        logger.error(f"[PPH] Error: {e}")
+        logger.exception(f"[PPH] Error: {e}")
         return []
