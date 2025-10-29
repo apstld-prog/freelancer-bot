@@ -1,90 +1,101 @@
 #!/bin/bash
+# ======================================================
+# 🔍 FREELANCER BOT EXTENDED DIAGNOSTIC TOOL (v3.0)
+# ======================================================
+
 echo "======================================================"
-echo "🔍 FREELANCER BOT EXTENDED DIAGNOSTIC TOOL (v2.2)"
+echo "🔍 FREELANCER BOT EXTENDED DIAGNOSTIC TOOL (v3.0)"
 echo "======================================================"
-echo "📅 Date: $(date)"
+echo "📅 Date: $(date -u)"
 echo
 
-# STEP 1 — Environment
+# STEP 1 — Environment summary
 echo "👉 STEP 1: Environment summary"
 echo "------------------------------------------------------"
-echo "Service: freelancer-bot-ns7s"
+SERVICE_NAME=${RENDER_SERVICE_NAME:-"freelancer-bot"}
+echo "Service: ${SERVICE_NAME}"
 python3 --version
 echo
 
-# STEP 2 — Workers
+# STEP 2 — Worker processes
 echo "👉 STEP 2: Worker processes"
 echo "------------------------------------------------------"
-ps aux | grep worker_ | grep -v grep || echo "⚠️ No worker processes found"
+ps aux | grep "python3 -u workers/" | grep -v grep || echo "⚠️ No worker processes found"
 echo
 
-# STEP 3 — Feed stats
-echo "👉 STEP 3: Feed event stats (last 24h)"
+# STEP 3 — Feed event stats (last 24h and total)
+echo "👉 STEP 3: Feed event stats (last 24h + total)"
 echo "------------------------------------------------------"
-psql "$DATABASE_URL" -c "
-SELECT platform, COUNT(*) as jobs_last_24h
+psql "$DATABASE_URL" <<'SQL'
+\pset format aligned
+\pset border 2
+\pset linestyle unicode
+\pset title '📊 Jobs fetched per platform (last 24h)'
+SELECT platform, COUNT(*) AS jobs_last_24h
 FROM job_event
-WHERE created_at > NOW() - INTERVAL '24 hours'
-GROUP BY platform;
-" 2>/dev/null || echo "ℹ️ Skipped: DB not accessible"
+WHERE created_at >= NOW() - INTERVAL '24 hours'
+GROUP BY platform
+ORDER BY jobs_last_24h DESC;
+
+\pset title '📈 Total jobs stored per platform'
+SELECT platform, COUNT(*) AS total_jobs
+FROM job_event
+GROUP BY platform
+ORDER BY total_jobs DESC;
+SQL
 echo
 
-# STEP 4 — Recent events
+# STEP 4 — Recent events check (freshness within 1h)
 echo "👉 STEP 4: Recent events check (1h freshness)"
 echo "------------------------------------------------------"
 psql "$DATABASE_URL" -c "
-SELECT platform, COUNT(*) as recent_jobs
+SELECT platform, COUNT(*) AS recent_jobs
 FROM job_event
-WHERE created_at > NOW() - INTERVAL '1 hour'
+WHERE created_at >= NOW() - INTERVAL '1 hour'
 GROUP BY platform;
-" 2>/dev/null || echo "ℹ️ Skipped: DB not accessible"
+"
 echo
 
-# STEP 5 — Memory snapshot
+# STEP 5 — Memory & uptime snapshot
 echo "👉 STEP 5: Memory & uptime snapshot"
 echo "------------------------------------------------------"
 uptime
 free -h
 echo
 
-# STEP 6 — Keyword consistency
+# STEP 6 — Keyword consistency per user
 echo "👉 STEP 6: Keyword consistency per user"
 echo "------------------------------------------------------"
-python3 - <<'EOF'
-import json, os
-data_path = "data/keywords.json"
-if os.path.exists(data_path):
-    with open(data_path) as f:
-        data = json.load(f)
-    users = {}
-    for k in data:
-        users.setdefault(k["user_id"], []).append(k["keyword"])
-    for uid, kws in users.items():
-        print(f"👤 user_id={uid}: {len(kws)} keywords → {', '.join(kws)}")
-else:
-    print("⚠️ keywords.json not found")
-EOF
+psql "$DATABASE_URL" -c "
+SELECT user_id, COUNT(*) AS kw_count, STRING_AGG(keyword, ', ' ORDER BY keyword) AS keywords
+FROM user_keywords
+GROUP BY user_id;
+"
 echo
 
-# STEP 7 — get_user_keywords()
+# STEP 7 — get_user_keywords() verification
 echo "👉 STEP 7: get_user_keywords() verification"
 echo "------------------------------------------------------"
-python3 - <<'EOF'
+python3 - <<'PYCODE'
 try:
     from db_keywords import get_user_keywords
-    print("✅ get_user_keywords():", get_user_keywords(5254014824))
+    print("✅ get_user_keywords() import OK")
 except Exception as e:
-    print("❌ get_user_keywords() failed:", e)
-EOF
+    print(f"❌ get_user_keywords() failed: {e}")
+PYCODE
 echo
 
-# STEP 8 — Worker logs tail
+# STEP 8 — Recent worker log tail
 echo "👉 STEP 8: Recent worker log tail"
 echo "------------------------------------------------------"
-for f in logs/worker_*.log; do
+for f in logs/worker_freelancer.log logs/worker_pph.log logs/worker_skywalker.log; do
+  if [ -f "$f" ]; then
     echo "--- $f ---"
-    tail -n 5 "$f"
+    tail -n 15 "$f"
     echo
+  else
+    echo "⚠️ Missing: $f"
+  fi
 done
 
 echo "✅ Extended diagnostic complete."
