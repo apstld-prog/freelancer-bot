@@ -136,11 +136,19 @@ def clear_keywords(user_id: int = None):
 # ======================================================
 # 🔹 List all keywords
 # ======================================================
-def list_keywords():
-    """Return all distinct keywords from users table."""
+def list_keywords(user_id: int = None):
+    """Return all distinct keywords globally or for a specific user."""
     try:
         conn = get_connection()
         cur = conn.cursor()
+
+        if user_id:
+            cur.execute("SELECT keywords FROM users WHERE id = %s;", (user_id,))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return []
+            return [k.strip() for k in row[0].split(',') if k.strip()]
+
         cur.execute("SELECT DISTINCT keywords FROM users WHERE keywords IS NOT NULL;")
         all_kw = set()
         for (kw_str,) in cur.fetchall():
@@ -158,11 +166,20 @@ def list_keywords():
 # ======================================================
 # 🔹 Count total keywords
 # ======================================================
-def count_keywords():
-    """Return total number of unique keywords."""
+def count_keywords(user_id: int = None):
+    """Return total number of unique keywords globally or for a user."""
     try:
         conn = get_connection()
         cur = conn.cursor()
+
+        if user_id:
+            cur.execute("SELECT keywords FROM users WHERE id = %s;", (user_id,))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return 0
+            kw_list = [k.strip() for k in row[0].split(',') if k.strip()]
+            return len(set(kw_list))
+
         cur.execute("SELECT keywords FROM users WHERE keywords IS NOT NULL;")
         all_kw = set()
         for (kw_str,) in cur.fetchall():
@@ -178,27 +195,45 @@ def count_keywords():
 
 
 # ======================================================
-# 🔹 Ensure keyword is globally unique
+# 🔹 Ensure keyword is globally unique (safe for no-arg call)
 # ======================================================
-def ensure_keyword_unique(keyword: str):
-    """Ensure keyword exists only once (used for admin seed)."""
-    if not keyword:
-        return False
+def ensure_keyword_unique(keyword: str = None):
+    """
+    Ensure keyword exists only once (used for admin seed).
+    If called with no args, it simply ensures that the admin has some defaults.
+    """
     try:
         conn = get_connection()
         cur = conn.cursor()
+
+        # if called with a specific keyword
+        if keyword:
+            cur.execute("SELECT keywords FROM users WHERE id = 1;")
+            row = cur.fetchone()
+            existing = []
+            if row and row[0]:
+                existing = [k.strip().lower() for k in row[0].split(',') if k.strip()]
+            if keyword.lower() not in existing:
+                existing.append(keyword.lower())
+                cur.execute("UPDATE users SET keywords = %s WHERE id = 1;", (",".join(existing),))
+                conn.commit()
+                logger.info(f"[ensure_keyword_unique] ✅ Added keyword '{keyword}'")
+                return True
+            return False
+
+        # if called without argument (during startup)
         cur.execute("SELECT keywords FROM users WHERE id = 1;")
         row = cur.fetchone()
-        existing = []
-        if row and row[0]:
-            existing = [k.strip().lower() for k in row[0].split(',') if k.strip()]
-        if keyword.lower() not in existing:
-            existing.append(keyword.lower())
-            cur.execute("UPDATE users SET keywords = %s WHERE id = 1;", (",".join(existing),))
+        if not row or not row[0]:
+            defaults = ["logo", "lighting", "sales"]
+            cur.execute("UPDATE users SET keywords = %s WHERE id = 1;", (",".join(defaults),))
             conn.commit()
-            logger.info(f"[ensure_keyword_unique] ✅ Added keyword '{keyword}'")
+            logger.info("[ensure_keyword_unique] ✅ Added default keywords for admin")
             return True
-        return False
+
+        logger.info("[ensure_keyword_unique] Admin already has keywords, nothing added.")
+        return True
+
     except Exception as e:
         logger.error(f"[ensure_keyword_unique] Error: {e}")
         return False
