@@ -1,69 +1,54 @@
-import logging
 import httpx
-from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+from currency_usd import convert_to_usd
+import logging
 
 logger = logging.getLogger("platform_skywalker")
-RSS_URL = "https://www.skywalker.gr/rss/latestjobs"
 
-
-def fetch_skywalker_jobs(keywords):
-    """Fetch Skywalker RSS job feed"""
-    all_jobs = []
+def fetch_skywalker_jobs():
+    logger.info("[Skywalker] Fetching latest jobs...")
+    url = "https://www.skywalker.gr/el/thesis"
+    jobs = []
     try:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-            resp = client.get(RSS_URL)
-            if resp.status_code != 200:
-                logger.warning(f"[Skywalker] HTTP {resp.status_code}")
-                return []
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            r = client.get(url)
+        if r.status_code != 200:
+            logger.warning(f"[Skywalker] HTTP {r.status_code}")
+            return []
 
-            # 🧩 FIX: use html.parser instead of xml
-            soup = BeautifulSoup(resp.text, "html.parser")
-            items = soup.find_all("item")
+        soup = BeautifulSoup(r.text, "html.parser")
+        items = soup.select("div.job")
+        for item in items:
+            title_tag = item.select_one("a.job-title")
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            link = "https://www.skywalker.gr" + title_tag["href"]
 
-            for item in items:
-                title = item.find("title").text.strip() if item.find("title") else ""
-                desc = item.find("description").text.strip() if item.find("description") else ""
-                link = item.find("link").text.strip() if item.find("link") else ""
-                pub_date = item.find("pubDate").text.strip() if item.find("pubDate") else ""
-                created_at = _parse_rss_date(pub_date)
+            desc = item.select_one("div.job-desc")
+            description = desc.get_text(strip=True) if desc else "N/A"
 
-                if (datetime.utcnow() - created_at) > timedelta(hours=48):
-                    continue
+            budget_amount, budget_currency = None, "EUR"
+            budget_usd = convert_to_usd(budget_amount, budget_currency)
 
-                kw = _match_keyword(title, desc, keywords)
-                if not kw:
-                    continue
+            posted_time = datetime.utcnow()
 
-                job = {
-                    "title": title,
-                    "description": desc,
-                    "budget_amount": 0,
-                    "budget_currency": "EUR",
-                    "budget_usd": 0,
-                    "created_at": created_at,
-                    "platform": "Skywalker",
-                    "matched_keyword": kw,
-                    "original_url": link,
-                }
-                all_jobs.append(job)
+            if posted_time < datetime.utcnow() - timedelta(hours=48):
+                continue
 
-        logger.info(f"[Skywalker] ✅ {len(all_jobs)} jobs fetched")
+            jobs.append({
+                "platform": "Skywalker",
+                "title": title,
+                "description": description,
+                "budget_amount": budget_amount,
+                "budget_currency": budget_currency,
+                "budget_usd": budget_usd,
+                "url": link,
+                "created_at": posted_time.isoformat()
+            })
+        logger.info(f"[Skywalker] ✅ {len(jobs)} jobs fetched")
+        return jobs
     except Exception as e:
-        logger.warning(f"[Skywalker] ⚠️ Error: {e}")
-    return all_jobs
-
-
-def _parse_rss_date(pub_date):
-    try:
-        return datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z").replace(tzinfo=None)
-    except Exception:
-        return datetime.utcnow()
-
-
-def _match_keyword(title, desc, keywords):
-    text = (title + " " + desc).lower()
-    for kw in keywords:
-        if kw.lower() in text:
-            return kw
-    return ""
+        logger.error(f"[Skywalker] Error: {e}")
+        return []

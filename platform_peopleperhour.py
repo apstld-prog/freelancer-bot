@@ -1,67 +1,67 @@
-import logging
 import httpx
-from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+from currency_usd import convert_to_usd
+import logging
 
 logger = logging.getLogger("platform_pph")
-RSS_URL = "https://www.peopleperhour.com/rss/job-listings"
 
-
-def fetch_pph_jobs(keywords):
-    """Fetch PeoplePerHour RSS jobs"""
-    all_jobs = []
+def fetch_pph_jobs():
+    logger.info("[PPH] Fetching latest jobs...")
+    url = "https://www.peopleperhour.com/freelance-jobs/"
+    jobs = []
     try:
-        with httpx.Client(timeout=15.0) as client:
-            resp = client.get(RSS_URL)
-            if resp.status_code != 200:
-                logger.warning(f"[PPH] HTTP {resp.status_code}")
-                return []
-            soup = BeautifulSoup(resp.text, "xml")
-            items = soup.find_all("item")
+        with httpx.Client(timeout=20.0) as client:
+            r = client.get(url)
+        if r.status_code != 200:
+            logger.warning(f"[PPH] HTTP {r.status_code}")
+            return []
 
-            for item in items:
-                title = item.title.text.strip() if item.title else ""
-                desc = item.description.text.strip() if item.description else ""
-                link = item.link.text.strip() if item.link else ""
-                pub_date = item.pubDate.text.strip() if item.pubDate else ""
-                created_at = _parse_rss_date(pub_date)
+        soup = BeautifulSoup(r.text, "html.parser")
+        cards = soup.select("section.job-card, div.job-card")
+        for card in cards:
+            title_tag = card.select_one("a.job-title")
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            link = "https://www.peopleperhour.com" + title_tag["href"]
 
-                if (datetime.utcnow() - created_at) > timedelta(hours=48):
-                    continue
+            desc = card.select_one("p.job-description")
+            description = desc.get_text(strip=True) if desc else "N/A"
 
-                kw = _match_keyword(title, desc, keywords)
-                if not kw:
-                    continue
+            budget_tag = card.select_one("span.price, span.amount")
+            budget_raw = budget_tag.get_text(strip=True) if budget_tag else "N/A"
 
-                job = {
-                    "title": title,
-                    "description": desc,
-                    "budget_amount": 0,
-                    "budget_currency": "USD",
-                    "budget_usd": 0,
-                    "created_at": created_at,
-                    "platform": "PeoplePerHour",
-                    "matched_keyword": kw,
-                    "original_url": link,
-                }
-                all_jobs.append(job)
+            budget_amount, budget_currency = parse_budget(budget_raw)
+            budget_usd = convert_to_usd(budget_amount, budget_currency)
 
-        logger.info(f"[PeoplePerHour] ✅ {len(all_jobs)} jobs fetched")
+            posted_time = datetime.utcnow()
+
+            # 48-hour filter (simulate if not provided)
+            if posted_time < datetime.utcnow() - timedelta(hours=48):
+                continue
+
+            jobs.append({
+                "platform": "PeoplePerHour",
+                "title": title,
+                "description": description,
+                "budget_amount": budget_amount,
+                "budget_currency": budget_currency,
+                "budget_usd": budget_usd,
+                "url": link,
+                "created_at": posted_time.isoformat()
+            })
+        logger.info(f"[PPH] ✅ {len(jobs)} jobs fetched")
+        return jobs
     except Exception as e:
-        logger.warning(f"[PeoplePerHour] ⚠️ Error: {e}")
-    return all_jobs
+        logger.error(f"[PPH] Error: {e}")
+        return []
 
-
-def _parse_rss_date(pub_date):
+def parse_budget(budget_str):
     try:
-        return datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z").replace(tzinfo=None)
-    except Exception:
-        return datetime.utcnow()
-
-
-def _match_keyword(title, desc, keywords):
-    text = (title + " " + desc).lower()
-    for kw in keywords:
-        if kw.lower() in text:
-            return kw
-    return ""
+        parts = budget_str.replace("$","USD ").replace("£","GBP ").replace("€","EUR ").split()
+        amount = float(parts[1]) if len(parts) > 1 else None
+        currency = parts[0].upper()
+        return amount, currency
+    except:
+        return None, "USD"
