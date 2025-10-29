@@ -1,28 +1,24 @@
-import os
-import sys
-import time
-import logging
-from datetime import datetime, timedelta
+
+import os, sys, asyncio, logging
+from datetime import datetime, timedelta, timezone
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from platform_freelancer import fetch_freelancer_jobs
-from db_keywords import get_all_user_keywords
-from currency_usd import usd_line
-from utils import send_job_to_user
+from utils import send_job_to_user, time_ago, convert_to_usd
+from db import get_user_keywords
 
 logger = logging.getLogger("worker_freelancer")
 
 def _short(text: str, n: int = 400) -> str:
-    if not text:
-        return ""
+    if not text: return ""
     text = text.strip()
     return text if len(text) <= n else (text[:n] + "...")
 
 def _build_message(job: dict) -> str:
     title = job.get("title") or "N/A"
     desc = _short(job.get("description") or "")
-    kw = job.get("matched_keyword") or "N/A"
+    kw = job.get("matched_keyword") or job.get("keyword") or "N/A"
     cur = (job.get("budget_currency") or "USD").upper()
     min_amt = job.get("budget_min")
     max_amt = job.get("budget_max")
@@ -35,15 +31,13 @@ def _build_message(job: dict) -> str:
     else:
         main_budget = f"N/A {cur}"
 
-    usd = usd_line(min_amt or avg_amt, max_amt, cur)
-    budget_line = f"💰 Budget: {main_budget}"
-    if usd:
-        budget_line += f"   {usd}"
+    usd_value = convert_to_usd(min_amt or avg_amt, cur)
+    usd_line = f"   ~ ${usd_value} USD" if usd_value not in (None, "N/A") else ""
+    posted_ago = job.get("posted_ago") or time_ago(job.get("created_at"))
 
-    posted_ago = job.get("posted_ago") or "N/A"
     lines = [
         f"💼 {title}",
-        budget_line,
+        f"💰 Budget: {main_budget}{usd_line}",
         "🌍 Source: Freelancer",
         f"🔑 Match: {kw}",
         f"🕒 Posted: {posted_ago}",
@@ -52,42 +46,55 @@ def _build_message(job: dict) -> str:
     ]
     return "\n".join([l for l in lines if l != ""])
 
-def parse_dt(v):
+def _parse_dt(v):
+    if not v:
+        return None
     if isinstance(v, datetime):
         return v
     try:
-        return datetime.fromisoformat(v)
+        # accept "2025-10-29T18:10:00Z" etc.
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
     except Exception:
-        return datetime.utcnow()
+        return None
 
-def main():
+async def main():
     logging.basicConfig(level=logging.INFO)
     logger.info("[Freelancer Worker] Started")
     while True:
         try:
-            users = get_all_user_keywords()
-            for user_id, kws in users.items():
-                if not kws:
-                    continue
-                jobs = fetch_freelancer_jobs(kws)
-                now = datetime.utcnow()
-                jobs = [
-                    j for j in jobs
-                    if not j.get("created_at") or (
-                        now.replace(tzinfo=None) - parse_dt(j["created_at"]).replace(tzinfo=None)
-                    ) <= timedelta(hours=48)
-                ]
+            user_map = await get_user_keywords()  # {telegram_id: [kw,...]}
+            if not user_map:
+                await asyncio.sleep(60); continue
+
+            # Single API call per cycle based on union of all keywords
+            all_kws = sorted({k.lower() for kws in user_map.values() for k in kws})[:50]
+            jobs = fetch_freelancer_jobs(all_kws)
+
+            # freshness filter (<=48h)
+            now = datetime.now(timezone.utc)
+            fresh = []
+            for j in jobs:
+                dt = _parse_dt(j.get("created_at"))
+                if (dt is None) or ((now - dt).total_seconds() <= 48*3600):
+                    fresh.append(j)
+            jobs = fresh
+
+            # per-user match & send
+            for tid, kws in user_map.items():
+                low = [k.lower() for k in kws]
                 for job in jobs:
-                    msg = _build_message(job)
-                    import asyncio
-                    try:
-                        asyncio.run(send_job_to_user(None, int(user_id), msg, job))
-                    except RuntimeError:
-                        pass
-            time.sleep(60)
+                    text = (job.get("title","") + " " + job.get("description","")).lower()
+                    mk = next((k for k in low if k in text), None)
+                    if not mk: 
+                        continue
+                    job['matched_keyword'] = mk
+                    message = _build_message(job)
+                    await send_job_to_user(None, int(tid), message, job)
+
+            await asyncio.sleep(int(os.getenv("FREELANCER_INTERVAL", "60")))
         except Exception as e:
             logger.exception("[Freelancer Worker] Error: %s", e)
-            time.sleep(120)
+            await asyncio.sleep(120)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

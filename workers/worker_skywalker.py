@@ -1,49 +1,32 @@
-import os
-import sys
-import time
-import logging
-from datetime import datetime, timedelta
 
+import os, sys, asyncio, logging
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from platform_skywalker import fetch_skywalker_jobs
-from db_keywords import get_all_user_keywords
-from currency_usd import usd_line
-from utils import send_job_to_user
+from utils import send_job_to_user, time_ago, convert_to_usd
+from db import get_user_keywords
 
 logger = logging.getLogger("worker_skywalker")
 
 def _short(text: str, n: int = 400) -> str:
-    if not text:
-        return ""
+    if not text: return ""
     text = text.strip()
     return text if len(text) <= n else (text[:n] + "...")
 
 def _build_message(job: dict) -> str:
     title = job.get("title") or "N/A"
     desc = _short(job.get("description") or "")
-    kw = job.get("matched_keyword") or "N/A"
-    cur = (job.get("budget_currency") or "USD").upper()
-    min_amt = job.get("budget_min")
-    max_amt = job.get("budget_max")
-    avg_amt = job.get("budget_amount")
+    kw = job.get("matched_keyword") or job.get("keyword") or "N/A"
+    cur = (job.get("budget_currency") or job.get("currency") or "EUR").upper()
+    amt = job.get("budget_amount") or job.get("budget")
+    main_budget = f"{amt} {cur}" if amt else f"N/A {cur}"
+    usd_value = convert_to_usd(amt, cur)
+    usd_line = f"   ~ ${usd_value} USD" if usd_value not in (None, "N/A") else ""
+    posted_ago = job.get("posted_ago") or time_ago(job.get("created_at"))
 
-    if min_amt and max_amt:
-        main_budget = f"{min_amt}–{max_amt} {cur}"
-    elif avg_amt:
-        main_budget = f"{avg_amt} {cur}"
-    else:
-        main_budget = f"N/A {cur}"
-
-    usd = usd_line(min_amt or avg_amt, max_amt, cur)
-    budget_line = f"💰 Budget: {main_budget}"
-    if usd:
-        budget_line += f"   {usd}"
-
-    posted_ago = job.get("posted_ago") or "N/A"
     lines = [
         f"💼 {title}",
-        budget_line,
+        f"💰 Budget: {main_budget}{usd_line}",
         "🌍 Source: Skywalker",
         f"🔑 Match: {kw}",
         f"🕒 Posted: {posted_ago}",
@@ -52,42 +35,33 @@ def _build_message(job: dict) -> str:
     ]
     return "\n".join([l for l in lines if l != ""])
 
-def parse_dt(v):
-    if isinstance(v, datetime):
-        return v
-    try:
-        return datetime.fromisoformat(v)
-    except Exception:
-        return datetime.utcnow()
-
-def main():
+async def main():
     logging.basicConfig(level=logging.INFO)
     logger.info("[Skywalker Worker] Started")
     while True:
         try:
-            users = get_all_user_keywords()
-            for user_id, kws in users.items():
-                if not kws:
-                    continue
-                jobs = fetch_skywalker_jobs(kws)
-                now = datetime.utcnow()
-                jobs = [
-                    j for j in jobs
-                    if not j.get("created_at") or (
-                        now.replace(tzinfo=None) - parse_dt(j["created_at"]).replace(tzinfo=None)
-                    ) <= timedelta(hours=48)
-                ]
+            user_map = await get_user_keywords()  # {telegram_id: [kw,...]}
+            if not user_map:
+                await asyncio.sleep(300); continue
+
+            all_kws = sorted({k.lower() for kws in user_map.values() for k in kws})[:50]
+            jobs = fetch_skywalker_jobs(all_kws)
+
+            for tid, kws in user_map.items():
+                low = [k.lower() for k in kws]
                 for job in jobs:
-                    msg = _build_message(job)
-                    import asyncio
-                    try:
-                        asyncio.run(send_job_to_user(None, int(user_id), msg, job))
-                    except RuntimeError:
-                        pass
-            time.sleep(60)
+                    text = (job.get("title","") + " " + job.get("description","")).lower()
+                    mk = next((k for k in low if k in text), None)
+                    if not mk: 
+                        continue
+                    job['matched_keyword'] = mk
+                    message = _build_message(job)
+                    await send_job_to_user(None, int(tid), message, job)
+
+            await asyncio.sleep(int(os.getenv("GREEK_INTERVAL", "300")))
         except Exception as e:
             logger.exception("[Skywalker Worker] Error: %s", e)
-            time.sleep(120)
+            await asyncio.sleep(120)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
