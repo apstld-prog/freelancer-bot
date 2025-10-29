@@ -5,22 +5,53 @@ from psycopg2.extras import RealDictCursor
 from contextlib import closing
 
 logger = logging.getLogger("db")
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# ----------------------------------------------------
-# Basic connection helper
-# ----------------------------------------------------
+# ====================================================
+# Internal connection helper
+# ====================================================
 def _conn():
     return psycopg2.connect(DATABASE_URL, sslmode=os.getenv("PGSSLMODE", "require"))
 
-# ----------------------------------------------------
-# Ensure database schema (used at startup)
-# ----------------------------------------------------
+# ====================================================
+# SQLAlchemy-like wrapper (για συμβατότητα)
+# ====================================================
+class PsycopgSession:
+    def __init__(self):
+        self.conn = _conn()
+        self.cur = self.conn.cursor()
+
+    def execute(self, sql, params=None):
+        self.cur.execute(sql, params or ())
+        try:
+            return self.cur.fetchall()
+        except psycopg2.ProgrammingError:
+            # e.g. no results
+            return []
+
+    def connection(self):
+        """Return the psycopg2 connection (for legacy code)."""
+        return self.conn
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        try:
+            self.cur.close()
+        except Exception:
+            pass
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
+# ====================================================
+# Ensure database schema
+# ====================================================
 def ensure_schema():
-    """Ensure required tables exist."""
     with closing(_conn()) as conn, conn, conn.cursor() as cur:
-        logger.info("[DB] Ensuring base schema...")
+        logger.info("[DB] Ensuring schema...")
 
         cur.execute("""
         CREATE TABLE IF NOT EXISTS "user" (
@@ -60,26 +91,20 @@ def ensure_schema():
         conn.commit()
         logger.info("[DB] ✅ Schema ensured")
 
-# ----------------------------------------------------
-# SQLAlchemy-like session placeholder
-# ----------------------------------------------------
+# ====================================================
+# get_session (συμβατό με legacy scripts)
+# ====================================================
 def get_session():
-    """Provide simple psycopg2 connection for compatibility."""
-    return _conn()
+    return PsycopgSession()
 
-# ----------------------------------------------------
-# Create or update a user by Telegram ID
-# ----------------------------------------------------
+# ====================================================
+# get_or_create_user_by_tid
+# ====================================================
 def get_or_create_user_by_tid(tg_id: int, username: str = None):
-    """Ensure a user exists in the 'user' table."""
     with closing(_conn()) as conn, conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-        SELECT * FROM "user" WHERE telegram_id = %s;
-        """, (tg_id,))
+        cur.execute("""SELECT * FROM "user" WHERE telegram_id = %s;""", (tg_id,))
         row = cur.fetchone()
-
         if row:
-            # Update username if changed
             if username and row.get("username") != username:
                 cur.execute("""
                     UPDATE "user"
@@ -89,7 +114,6 @@ def get_or_create_user_by_tid(tg_id: int, username: str = None):
                 conn.commit()
             return row
 
-        # Insert new user
         cur.execute("""
             INSERT INTO "user" (telegram_id, username, is_active, is_admin, is_blocked, created_at, updated_at)
             VALUES (%s, %s, TRUE, FALSE, FALSE, NOW() AT TIME ZONE 'UTC', NOW() AT TIME ZONE 'UTC')
@@ -99,13 +123,11 @@ def get_or_create_user_by_tid(tg_id: int, username: str = None):
         conn.commit()
         return row
 
-# ----------------------------------------------------
-# Get all user keywords (for workers)
-# ----------------------------------------------------
+# ====================================================
+# get_user_keywords (used by workers)
+# ====================================================
 async def get_user_keywords():
-    """Return {telegram_id: [kw,...]} for active, non-blocked users."""
     mapping = {}
-
     with closing(_conn()) as conn, conn, conn.cursor() as cur:
         cur.execute("""
             SELECT u.telegram_id, uk.keyword
