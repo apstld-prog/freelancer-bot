@@ -2,7 +2,7 @@ from db import get_session
 
 
 def ensure_keyword_unique():
-    """Δημιουργεί πίνακα keywords (αν δεν υπάρχει) και εξασφαλίζει μοναδικότητα ονομάτων."""
+    """Δημιουργεί τον πίνακα user_keywords και αφαιρεί διπλότυπα."""
     with get_session() as s:
         s.execute("""
         CREATE TABLE IF NOT EXISTS user_keywords (
@@ -12,8 +12,6 @@ def ensure_keyword_unique():
             created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
         );
         """)
-
-        # διαγράφει διπλότυπα (κρατάει μόνο το νεότερο)
         s.execute("""
         DELETE FROM user_keywords a
         USING user_keywords b
@@ -23,7 +21,7 @@ def ensure_keyword_unique():
 
 
 def get_user_keywords(user_id: int):
-    """Επιστρέφει όλα τα keywords ενός χρήστη ως λίστα string."""
+    """Επιστρέφει όλα τα keywords ενός χρήστη ως λίστα."""
     with get_session() as s:
         s.execute("SELECT keyword FROM user_keywords WHERE user_id=%s;", (user_id,))
         rows = s.fetchall()
@@ -31,7 +29,7 @@ def get_user_keywords(user_id: int):
 
 
 def add_user_keyword(user_id: int, keyword: str):
-    """Προσθέτει νέο keyword για συγκεκριμένο χρήστη (αν δεν υπάρχει ήδη)."""
+    """Προσθέτει νέο keyword για χρήστη, αν δεν υπάρχει ήδη."""
     if not keyword:
         return
     with get_session() as s:
@@ -42,10 +40,21 @@ def add_user_keyword(user_id: int, keyword: str):
 
 
 def delete_user_keyword(user_id: int, keyword: str):
-    """Διαγράφει keyword ενός χρήστη."""
+    """Διαγράφει keyword χρήστη."""
     with get_session() as s:
         s.execute("DELETE FROM user_keywords WHERE user_id=%s AND keyword=%s;", (user_id, keyword))
         s.commit()
+
+
+def list_keywords(user_id: int = None):
+    """Λίστα όλων των keywords ή ανά χρήστη (αν δοθεί user_id)."""
+    with get_session() as s:
+        if user_id:
+            s.execute("SELECT keyword FROM user_keywords WHERE user_id=%s;", (user_id,))
+        else:
+            s.execute("SELECT DISTINCT keyword FROM user_keywords;")
+        rows = s.fetchall()
+        return [r["keyword"] for r in rows]
 
 
 def ensure_keywords():
@@ -61,7 +70,7 @@ def ensure_keywords():
 
 if __name__ == "__main__":
     print("======================================================")
-    print("🔑 INIT KEYWORDS TOOL — psycopg2 version")
+    print("🔑 INIT KEYWORDS TOOL — psycopg2 version (FINAL)")
     print("======================================================")
     ensure_keyword_unique()
     ensure_keywords()
