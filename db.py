@@ -6,6 +6,7 @@ from sqlalchemy import (
     TIMESTAMP, ForeignKey, text, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+import psycopg2  # ✅ added for direct connection fallback
 
 log = logging.getLogger("db")
 
@@ -182,3 +183,12 @@ def get_user_keywords():
     except Exception as e:
         print(f"[get_user_keywords] ❌ Error: {e}")
     return result
+
+# ======================================================
+# Direct psycopg2 connection for legacy compatibility
+# ======================================================
+def get_connection():
+    """Legacy helper for compatibility (used by db_keywords.py)."""
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = True
+    return conn
