@@ -134,3 +134,38 @@ def list_keywords():
     finally:
         if 'conn' in locals():
             conn.close()
+
+# ======================================================
+# 🔹 Count keywords (used in diagnostics and bot init)
+# ======================================================
+def count_keywords():
+    """Return total number of unique keywords."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'user_keywords'
+            );
+        """)
+        exists = cur.fetchone()[0]
+
+        if exists:
+            cur.execute("SELECT COUNT(DISTINCT keyword) FROM user_keywords;")
+            total = cur.fetchone()[0]
+            return total or 0
+
+        cur.execute("SELECT keywords FROM users WHERE keywords IS NOT NULL;")
+        all_kw = set()
+        for (kw_str,) in cur.fetchall():
+            if kw_str:
+                all_kw.update([k.strip() for k in kw_str.split(',') if k.strip()])
+        return len(all_kw)
+    except Exception as e:
+        logger.error(f"[count_keywords] Error: {e}")
+        return 0
+    finally:
+        if 'conn' in locals():
+            conn.close()
