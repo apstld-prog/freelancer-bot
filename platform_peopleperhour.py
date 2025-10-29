@@ -1,12 +1,4 @@
-import httpx
-from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
-from currency_usd import convert_to_usd
-import logging
-
-logger = logging.getLogger("platform_pph")
-
-def fetch_pph_jobs():
+def fetch_pph_jobs(keywords=None):
     logger.info("[PPH] Fetching latest jobs...")
     url = "https://www.peopleperhour.com/freelance-jobs/"
     jobs = []
@@ -37,7 +29,6 @@ def fetch_pph_jobs():
 
             posted_time = datetime.utcnow()
 
-            # 48-hour filter (simulate if not provided)
             if posted_time < datetime.utcnow() - timedelta(hours=48):
                 continue
 
@@ -56,12 +47,3 @@ def fetch_pph_jobs():
     except Exception as e:
         logger.error(f"[PPH] Error: {e}")
         return []
-
-def parse_budget(budget_str):
-    try:
-        parts = budget_str.replace("$","USD ").replace("£","GBP ").replace("€","EUR ").split()
-        amount = float(parts[1]) if len(parts) > 1 else None
-        currency = parts[0].upper()
-        return amount, currency
-    except:
-        return None, "USD"

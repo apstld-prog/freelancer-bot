@@ -5,9 +5,17 @@ from currency_usd import convert_to_usd
 
 logger = logging.getLogger("platform_freelancer")
 
-def fetch_freelancer_jobs():
+def fetch_freelancer_jobs(keywords=None):
     logger.info("[Freelancer] Fetching jobs...")
-    url = "https://www.freelancer.com/api/projects/0.1/projects/active/?limit=30&sort_field=time_submitted&sort_direction=desc"
+    query = ""
+    if keywords:
+        query = ",".join(keywords)
+    url = (
+        "https://www.freelancer.com/api/projects/0.1/projects/active/"
+        f"?limit=30&sort_field=time_submitted&sort_direction=desc"
+        f"&query={query}"
+    )
+
     jobs = []
     try:
         with httpx.Client(timeout=20.0) as client:
@@ -42,8 +50,10 @@ def fetch_freelancer_jobs():
                 "url": url_job,
                 "created_at": created_at.isoformat()
             })
+
         logger.info(f"[Freelancer] ✅ {len(jobs)} jobs fetched")
         return jobs
+
     except Exception as e:
         logger.error(f"[Freelancer] Error: {e}")
         return []

@@ -1,12 +1,4 @@
-import httpx
-from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
-from currency_usd import convert_to_usd
-import logging
-
-logger = logging.getLogger("platform_skywalker")
-
-def fetch_skywalker_jobs():
+def fetch_skywalker_jobs(keywords=None):
     logger.info("[Skywalker] Fetching latest jobs...")
     url = "https://www.skywalker.gr/el/thesis"
     jobs = []
