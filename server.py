@@ -12,12 +12,11 @@ log = logging.getLogger("server")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777").strip()
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()  # e.g. https://freelancer-bot-ns7s.onrender.com
 
-app = FastAPI()
+app = FastAPI(title="Freelancer Bot Server", version="1.0.0")
 
 # Build a single global Application instance
 application: Application = build_application()
 
-# Flags to avoid double init/stop in case of multiple lifecycle events
 _is_initialized = False
 _is_started = False
 
@@ -26,7 +25,6 @@ _is_started = False
 async def on_startup():
     """Initialize and start the Telegram Application, then set webhook."""
     global _is_initialized, _is_started
-
     try:
         if not _is_initialized:
             await application.initialize()
@@ -71,10 +69,18 @@ async def on_shutdown():
         log.exception("Shutdown failed")
 
 
+# ---------- HEALTH ROUTES ----------
+
 @app.get("/")
 async def root():
     return {"status": "ok"}
 
+@app.get("/botok")
+async def botok():
+    """Render health check endpoint."""
+    return {"ok": True, "service": "freelancer-bot", "status": "running"}
+
+# ---------- TELEGRAM WEBHOOK ----------
 
 @app.post("/webhook/{secret}")
 async def tg_webhook(secret: str, request: Request):
@@ -88,7 +94,6 @@ async def tg_webhook(secret: str, request: Request):
         log.exception("Invalid JSON body on webhook")
         return Response(status_code=200)
 
-    # Light logging for diagnostics (do not log PII)
     try:
         if "message" in data:
             msg = data["message"]
@@ -104,7 +109,6 @@ async def tg_webhook(secret: str, request: Request):
         pass
 
     try:
-        # Make sure app is initialized/started (idempotent)
         global _is_initialized, _is_started
         if not _is_initialized:
             await application.initialize()
