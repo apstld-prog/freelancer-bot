@@ -6,7 +6,6 @@ import psycopg2
 import psycopg2.extras
 from typing import Any, Iterable, Optional
 
-
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
@@ -51,21 +50,16 @@ class PsycopgSession:
 
 
 def get_session() -> PsycopgSession:
-    """Return a new PsycopgSession. Use with: `with get_session() as s:`"""
     return PsycopgSession()
 
 
 # --------------------------------------------------------------------------------------
-# SCHEMA
+# SCHEMA (must NOT reference feed_event before it exists)
 # --------------------------------------------------------------------------------------
 
 def ensure_schema() -> None:
-    """
-    Create minimal tables used across the app if missing.
-    Uses quoted "user" to avoid reserved-word issues.
-    """
     with get_session() as s:
-        # "user" table
+        # 1️⃣ Create "user" table first
         s.execute("""
         CREATE TABLE IF NOT EXISTS "user" (
             id BIGSERIAL PRIMARY KEY,
@@ -89,7 +83,8 @@ def ensure_schema() -> None:
             keywords   TEXT NULL
         );
         """)
-        # trigger to auto-update updated_at
+
+        # trigger to update updated_at
         s.execute("""
         DO $$
         BEGIN
@@ -112,7 +107,23 @@ def ensure_schema() -> None:
         END$$;
         """)
 
-        # saved_job table — fixed (now links to feed_event)
+        # 2️⃣ Ensure feed_event exists before referencing it
+        s.execute("""
+        CREATE TABLE IF NOT EXISTS feed_event (
+            id BIGSERIAL PRIMARY KEY,
+            platform TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            original_url TEXT,
+            affiliate_url TEXT,
+            budget_amount NUMERIC(12,2),
+            budget_currency TEXT,
+            budget_usd NUMERIC(12,2),
+            created_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL
+        );
+        """)
+
+        # 3️⃣ Now saved_job (can safely reference feed_event)
         s.execute("""
         CREATE TABLE IF NOT EXISTS saved_job (
             id BIGSERIAL PRIMARY KEY,
@@ -121,6 +132,8 @@ def ensure_schema() -> None:
             saved_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL
         );
         """)
+
+        # unique index
         s.execute("""
         DO $$
         BEGIN
@@ -131,18 +144,15 @@ def ensure_schema() -> None:
             END IF;
         END$$;
         """)
+
         s.commit()
 
 
 # --------------------------------------------------------------------------------------
-# HELPERS USED BY bot.py
+# HELPERS
 # --------------------------------------------------------------------------------------
 
 def get_or_create_user_by_tid(telegram_id: int, username: Optional[str] = None) -> dict:
-    """
-    Ensure a user exists for given telegram_id. Returns row dict (id, telegram_id, ...).
-    Marks is_active TRUE by default.
-    """
     with get_session() as s:
         s.execute('SELECT * FROM "user" WHERE telegram_id = %s;', (telegram_id,))
         row = s.fetchone()
