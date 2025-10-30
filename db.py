@@ -17,7 +17,6 @@ class PsycopgSession:
         self.conn = psycopg2.connect(DATABASE_URL)
         self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    # context manager
     def __enter__(self):
         return self
 
@@ -33,9 +32,7 @@ class PsycopgSession:
             finally:
                 self.conn.close()
 
-    # basic ops (accepts str or SQLAlchemy TextClause)
     def execute(self, sql, params: tuple | dict = ()):
-        # Accept both str and SQLAlchemy TextClause
         if not isinstance(sql, str):
             try:
                 sql = str(sql)
@@ -115,12 +112,12 @@ def ensure_schema() -> None:
         END$$;
         """)
 
-        # saved_job table
+        # saved_job table — fixed (now links to feed_event)
         s.execute("""
         CREATE TABLE IF NOT EXISTS saved_job (
             id BIGSERIAL PRIMARY KEY,
             user_id BIGINT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
-            job_id  BIGINT NOT NULL,
+            feed_event_id BIGINT NOT NULL REFERENCES feed_event(id) ON DELETE CASCADE,
             saved_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL
         );
         """)
@@ -128,9 +125,9 @@ def ensure_schema() -> None:
         DO $$
         BEGIN
             IF NOT EXISTS (
-                SELECT 1 FROM pg_indexes WHERE indexname='ux_saved_job_user_job'
+                SELECT 1 FROM pg_indexes WHERE indexname='ux_saved_job_user_feed'
             ) THEN
-                CREATE UNIQUE INDEX ux_saved_job_user_job ON saved_job(user_id, job_id);
+                CREATE UNIQUE INDEX ux_saved_job_user_feed ON saved_job(user_id, feed_event_id);
             END IF;
         END$$;
         """)
@@ -150,7 +147,6 @@ def get_or_create_user_by_tid(telegram_id: int, username: Optional[str] = None) 
         s.execute('SELECT * FROM "user" WHERE telegram_id = %s;', (telegram_id,))
         row = s.fetchone()
         if row:
-            # update username + ensure active
             s.execute(
                 'UPDATE "user" SET username = COALESCE(%s, username), is_active = TRUE WHERE telegram_id = %s RETURNING *;',
                 (username, telegram_id)
@@ -159,7 +155,6 @@ def get_or_create_user_by_tid(telegram_id: int, username: Optional[str] = None) 
             s.commit()
             return dict(updated)
 
-        # insert new
         s.execute(
             'INSERT INTO "user" (telegram_id, username, is_active) VALUES (%s, %s, TRUE) RETURNING *;',
             (telegram_id, username)
