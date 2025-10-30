@@ -1,21 +1,47 @@
+# db.py
+# Psycopg2-only DB helper layer + minimal schema bootstrap + helpers used by bot.py
+
 import os
 import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg2.extras
+from typing import Any, Iterable, Optional
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
 class PsycopgSession:
-    """Wrapper για psycopg2 connection με context manager."""
     def __init__(self):
         if not DATABASE_URL:
-            raise RuntimeError("DATABASE_URL not set")
-        self.conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-        self.cur = self.conn.cursor()
+            raise RuntimeError("DATABASE_URL is not set")
+        self.conn = psycopg2.connect(DATABASE_URL)
+        self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    def execute(self, query: str, params=None):
-        self.cur.execute(query, params or ())
-        return self.cur
+    # context manager
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc is None:
+                self.conn.commit()
+            else:
+                self.conn.rollback()
+        finally:
+            try:
+                self.cur.close()
+            finally:
+                self.conn.close()
+
+    # basic ops (accepts str or SQLAlchemy TextClause)
+    def execute(self, sql, params: tuple | dict = ()):
+        # Accept both str and SQLAlchemy TextClause
+        if not isinstance(sql, str):
+            try:
+                sql = str(sql)
+            except Exception:
+                sql = getattr(sql, "text", sql)
+        self.cur.execute(sql, params or ())
 
     def fetchone(self):
         return self.cur.fetchone()
@@ -26,120 +52,118 @@ class PsycopgSession:
     def commit(self):
         self.conn.commit()
 
-    def rollback(self):
-        self.conn.rollback()
-
-    def close(self):
-        try:
-            self.cur.close()
-        finally:
-            self.conn.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if exc_type:
-            self.rollback()
-        else:
-            self.commit()
-        self.close()
-
 
 def get_session() -> PsycopgSession:
+    """Return a new PsycopgSession. Use with: `with get_session() as s:`"""
     return PsycopgSession()
 
 
-def ensure_schema():
-    """Δημιουργεί ή ενημερώνει το βασικό schema της βάσης."""
+# --------------------------------------------------------------------------------------
+# SCHEMA
+# --------------------------------------------------------------------------------------
+
+def ensure_schema() -> None:
+    """
+    Create minimal tables used across the app if missing.
+    Uses quoted "user" to avoid reserved-word issues.
+    """
     with get_session() as s:
+        # "user" table
         s.execute("""
         CREATE TABLE IF NOT EXISTS "user" (
-            id SERIAL PRIMARY KEY,
+            id BIGSERIAL PRIMARY KEY,
             telegram_id BIGINT UNIQUE,
-            username TEXT,
-            is_admin BOOLEAN DEFAULT FALSE NOT NULL,
-            is_active BOOLEAN DEFAULT TRUE NOT NULL,
+            trial_until TIMESTAMPTZ NULL,
+            access_until TIMESTAMPTZ NULL,
             is_blocked BOOLEAN DEFAULT FALSE NOT NULL,
-            trial_start TIMESTAMP,
-            trial_end TIMESTAMP,
-            license_until TIMESTAMP,
-            trial_reminder_sent BOOLEAN,
-            created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
-            updated_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL,
-            started_at TIMESTAMP,
-            countries TEXT,
-            proposal_template TEXT,
-            name TEXT,
-            keywords TEXT
+            is_active  BOOLEAN DEFAULT TRUE  NOT NULL,
+            trial_start TIMESTAMPTZ NULL,
+            trial_end   TIMESTAMPTZ NULL,
+            license_until TIMESTAMPTZ NULL,
+            trial_reminder_sent BOOLEAN DEFAULT FALSE NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL,
+            updated_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL,
+            started_at TIMESTAMPTZ NULL,
+            is_admin   BOOLEAN DEFAULT FALSE NOT NULL,
+            countries  TEXT NULL,
+            proposal_template TEXT NULL,
+            name       TEXT NULL,
+            username   TEXT NULL,
+            keywords   TEXT NULL
         );
         """)
-
-        s.execute("""
-        CREATE TABLE IF NOT EXISTS saved_job (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            title TEXT NOT NULL,
-            url TEXT,
-            description TEXT,
-            saved_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
-        );
-        """)
-
-        # trigger για updated_at
-        s.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_proc WHERE proname = 'set_updated_at_user'
-            ) THEN
-                CREATE OR REPLACE FUNCTION set_updated_at_user()
-                RETURNS TRIGGER AS $f$
-                BEGIN
-                    NEW.updated_at = (NOW() AT TIME ZONE 'UTC');
-                    RETURN NEW;
-                END;
-                $f$ LANGUAGE plpgsql;
-            END IF;
-        END$$;
-        """)
-
+        # trigger to auto-update updated_at
         s.execute("""
         DO $$
         BEGIN
             IF NOT EXISTS (
                 SELECT 1 FROM pg_trigger WHERE tgname = 'trg_user_updated_at'
             ) THEN
+                CREATE OR REPLACE FUNCTION set_user_updated_at()
+                RETURNS TRIGGER AS $BODY$
+                BEGIN
+                    NEW.updated_at := NOW() AT TIME ZONE 'UTC';
+                    RETURN NEW;
+                END;
+                $BODY$ LANGUAGE plpgsql;
+
                 CREATE TRIGGER trg_user_updated_at
                 BEFORE UPDATE ON "user"
                 FOR EACH ROW
-                EXECUTE FUNCTION set_updated_at_user();
+                EXECUTE PROCEDURE set_user_updated_at();
             END IF;
         END$$;
         """)
 
+        # saved_job table
+        s.execute("""
+        CREATE TABLE IF NOT EXISTS saved_job (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+            job_id  BIGINT NOT NULL,
+            saved_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL
+        );
+        """)
+        s.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_indexes WHERE indexname='ux_saved_job_user_job'
+            ) THEN
+                CREATE UNIQUE INDEX ux_saved_job_user_job ON saved_job(user_id, job_id);
+            END IF;
+        END$$;
+        """)
+        s.commit()
 
-def get_or_create_user_by_tid(telegram_id: int, username: str = None):
+
+# --------------------------------------------------------------------------------------
+# HELPERS USED BY bot.py
+# --------------------------------------------------------------------------------------
+
+def get_or_create_user_by_tid(telegram_id: int, username: Optional[str] = None) -> dict:
     """
-    Επιστρέφει υπάρχοντα χρήστη ή δημιουργεί νέο (αν δεν υπάρχει).
-    Επιστρέφει dict με όλα τα πεδία.
+    Ensure a user exists for given telegram_id. Returns row dict (id, telegram_id, ...).
+    Marks is_active TRUE by default.
     """
     with get_session() as s:
-        s.execute('SELECT * FROM "user" WHERE telegram_id=%s;', (telegram_id,))
+        s.execute('SELECT * FROM "user" WHERE telegram_id = %s;', (telegram_id,))
         row = s.fetchone()
-
         if row:
-            # ενημέρωσε το username αν έχει αλλάξει
-            if username and username != row.get("username"):
-                s.execute('UPDATE "user" SET username=%s WHERE telegram_id=%s;', (username, telegram_id))
-                s.commit()
-            return row
+            # update username + ensure active
+            s.execute(
+                'UPDATE "user" SET username = COALESCE(%s, username), is_active = TRUE WHERE telegram_id = %s RETURNING *;',
+                (username, telegram_id)
+            )
+            updated = s.fetchone()
+            s.commit()
+            return dict(updated)
 
-        # διαφορετικά, δημιουργεί νέο
+        # insert new
         s.execute(
             'INSERT INTO "user" (telegram_id, username, is_active) VALUES (%s, %s, TRUE) RETURNING *;',
             (telegram_id, username)
         )
-        user = s.fetchone()
+        created = s.fetchone()
         s.commit()
-        return user
+        return dict(created)

@@ -1,93 +1,57 @@
+# db_events.py
+# Psycopg2-only schema/bootstrap for feed events used by workers/bot
+
 from db import get_session
 
 
-def ensure_feed_events_schema():
-    """
-    Δημιουργεί τον πίνακα feed_event αν δεν υπάρχει ήδη.
-    Παρακολουθεί κάθε fetch από τις πλατφόρμες (Freelancer, PPH, Skywalker).
-    """
+def ensure_feed_events_schema() -> None:
     with get_session() as s:
+        # feed_event: unified stash of fetched jobs
         s.execute("""
         CREATE TABLE IF NOT EXISTS feed_event (
-            id SERIAL PRIMARY KEY,
-            platform TEXT NOT NULL,
-            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+            id BIGSERIAL PRIMARY KEY,
+            platform TEXT NOT NULL,            -- 'Freelancer', 'PeoplePerHour', 'Skywalker', etc.
+            title TEXT,
+            description TEXT,
+            affiliate_url TEXT,
+            original_url  TEXT,
+            budget_amount NUMERIC(18,2) NULL,
+            budget_currency TEXT NULL,
+            budget_usd NUMERIC(18,2) NULL,
+            created_at TIMESTAMPTZ NULL,       -- remote job "posted at" if present
+            fetched_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL,
+            dedup_key TEXT NULL
         );
         """)
-        s.commit()
-
-
-def record_event(platform: str):
-    """
-    Καταγράφει νέο event στο feed_event όταν γίνεται επιτυχής fetch.
-    """
-    if not platform:
-        return
-
-    with get_session() as s:
-        s.execute(
-            "INSERT INTO feed_event (platform) VALUES (%s);",
-            (platform,)
-        )
-        s.commit()
-
-
-def get_platform_stats(window_hours: int = 24):
-    """
-    Επιστρέφει dictionary με αριθμό events ανά πλατφόρμα
-    εντός του τελευταίου window_hours (default: 24 ώρες).
-    Παράδειγμα:
-      {'Freelancer': 120, 'PeoplePerHour': 25, 'Skywalker': 3}
-    """
-    with get_session() as s:
         s.execute("""
-        SELECT platform, COUNT(*) AS cnt
-        FROM feed_event
-        WHERE created_at >= (NOW() AT TIME ZONE 'UTC') - (%s || ' hours')::INTERVAL
-        GROUP BY platform
-        ORDER BY cnt DESC;
-        """, (str(window_hours),))
-        rows = s.fetchall()
-
-        # Επιστρέφει σε μορφή dict
-        return {r["platform"]: r["cnt"] for r in rows}
-
-
-def get_total_stats():
-    """
-    Επιστρέφει συνολικό πλήθος events ανά πλατφόρμα από την αρχή.
-    Παράδειγμα:
-      {'Freelancer': 980, 'PeoplePerHour': 45}
-    """
-    with get_session() as s:
-        s.execute("""
-        SELECT platform, COUNT(*) AS cnt
-        FROM feed_event
-        GROUP BY platform
-        ORDER BY cnt DESC;
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_indexes WHERE indexname='ux_feed_event_dedup_key'
+            ) THEN
+                CREATE UNIQUE INDEX ux_feed_event_dedup_key ON feed_event(dedup_key);
+            END IF;
+        END$$;
         """)
-        rows = s.fetchall()
 
-        return {r["platform"]: r["cnt"] for r in rows}
-
-
-def cleanup_old_events(max_days: int = 7):
-    """
-    Διαγράφει παλιά feed events (προαιρετική συντήρηση).
-    Κρατάει μόνο τα τελευταία N days (default: 7).
-    """
-    with get_session() as s:
+        # Optional helper table for "sent" state (idempotency)
         s.execute("""
-        DELETE FROM feed_event
-        WHERE created_at < (NOW() AT TIME ZONE 'UTC') - (%s || ' days')::INTERVAL;
-        """, (str(max_days),))
+        CREATE TABLE IF NOT EXISTS job_sent (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+            feed_event_id BIGINT NOT NULL REFERENCES feed_event(id) ON DELETE CASCADE,
+            sent_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL
+        );
+        """)
+        s.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_indexes WHERE indexname='ux_job_sent_user_event'
+            ) THEN
+                CREATE UNIQUE INDEX ux_job_sent_user_event ON job_sent(user_id, feed_event_id);
+            END IF;
+        END$$;
+        """)
+
         s.commit()
-
-
-if __name__ == "__main__":
-    print("======================================================")
-    print("🧩 FEED EVENTS SCHEMA INITIALIZER")
-    print("======================================================")
-    ensure_feed_events_schema()
-    print("✅ feed_event schema ensured successfully.")
-    print("======================================================")
