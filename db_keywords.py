@@ -1,6 +1,6 @@
 # db_keywords.py
-# Psycopg2-only, complete API expected by bot.py & workers
-# Includes delete_keywords() alias for delete_user_keyword()
+# Psycopg2-only, full version compatible with bot.py & workers
+# Includes delete_keywords() and clear_keywords() aliases
 
 from typing import Dict, List, Iterable, Optional
 from db import get_session
@@ -50,7 +50,6 @@ def ensure_keyword_unique() -> None:
             END IF;
         END$$;
         """)
-        # de-dup legacy
         s.execute("""
         DELETE FROM user_keywords a
         USING user_keywords b
@@ -86,9 +85,8 @@ def delete_user_keyword(user_id: int, keyword: str) -> None:
         s.commit()
 
 
-# 🔧 new alias required by bot.py
 def delete_keywords(user_id: int, keywords: str | Iterable[str]) -> None:
-    """Alias for delete_user_keyword() — used by bot.py"""
+    """Alias for delete_user_keyword() — required by bot.py"""
     delete_user_keyword(user_id, keywords)
 
 
@@ -96,6 +94,11 @@ def clear_user_keywords(user_id: int) -> None:
     with get_session() as s:
         s.execute("DELETE FROM user_keywords WHERE user_id=%s;", (user_id,))
         s.commit()
+
+
+def clear_keywords(user_id: int) -> None:
+    """Alias for clear_user_keywords() — required by bot.py"""
+    clear_user_keywords(user_id)
 
 
 def get_user_keywords(user_id: int) -> List[str]:
