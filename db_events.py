@@ -1,5 +1,6 @@
 # db_events.py
 # Psycopg2-only schema/bootstrap for feed events used by workers/bot
+# Includes get_platform_stats() for admin stats
 
 from db import get_session
 
@@ -53,5 +54,40 @@ def ensure_feed_events_schema() -> None:
             END IF;
         END$$;
         """)
-
         s.commit()
+
+
+def get_platform_stats() -> dict:
+    """
+    Return dictionary with total jobs per platform and latest fetched timestamp.
+    Example:
+        {
+            "Freelancer": {"count": 1234, "latest": "2025-10-30T06:20:00Z"},
+            "PeoplePerHour": {"count": 200, "latest": "2025-10-30T06:10:00Z"},
+            "Skywalker": {"count": 99, "latest": "2025-10-30T06:18:00Z"}
+        }
+    """
+    with get_session() as s:
+        s.execute("""
+        SELECT platform, COUNT(*) AS count, MAX(fetched_at) AS latest
+        FROM feed_event
+        GROUP BY platform
+        ORDER BY platform;
+        """)
+        rows = s.fetchall()
+    stats = {}
+    for r in rows:
+        stats[r["platform"]] = {
+            "count": int(r["count"]),
+            "latest": str(r["latest"]) if r["latest"] else None,
+        }
+    return stats
+
+
+if __name__ == "__main__":
+    print("======================================================")
+    print("📊 INIT FEED EVENTS TOOL — psycopg2 version (FINAL)")
+    print("======================================================")
+    ensure_feed_events_schema()
+    print("✅ feed_event + job_sent tables ensured successfully.")
+    print("======================================================")
