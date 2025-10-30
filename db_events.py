@@ -1,7 +1,8 @@
 # db_events.py
 # Psycopg2-only schema/bootstrap for feed events used by workers/bot
-# Includes get_platform_stats() for admin stats
+# Includes get_platform_stats() and record_event()
 
+from typing import Optional
 from db import get_session
 
 
@@ -55,6 +56,56 @@ def ensure_feed_events_schema() -> None:
         END$$;
         """)
         s.commit()
+
+
+def record_event(
+    platform: str,
+    title: str,
+    description: Optional[str],
+    affiliate_url: str,
+    original_url: str,
+    budget_amount: Optional[float],
+    budget_currency: Optional[str],
+    budget_usd: Optional[float],
+    created_at: Optional[str],
+    dedup_key: Optional[str],
+) -> Optional[int]:
+    """
+    Insert one feed_event safely (ignore duplicates by dedup_key).
+    Returns inserted id or None if duplicate.
+    """
+    with get_session() as s:
+        try:
+            s.execute(
+                """
+                INSERT INTO feed_event (
+                    platform, title, description, affiliate_url, original_url,
+                    budget_amount, budget_currency, budget_usd, created_at, dedup_key
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (dedup_key) DO NOTHING
+                RETURNING id;
+                """,
+                (
+                    platform,
+                    title,
+                    description,
+                    affiliate_url,
+                    original_url,
+                    budget_amount,
+                    budget_currency,
+                    budget_usd,
+                    created_at,
+                    dedup_key,
+                ),
+            )
+            row = s.fetchone()
+            s.commit()
+            return row["id"] if row else None
+        except Exception as e:
+            print(f"[record_event] ERROR: {e}")
+            s.conn.rollback()
+            return None
 
 
 def get_platform_stats() -> dict:
