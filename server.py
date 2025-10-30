@@ -1,124 +1,75 @@
-import os
 import logging
-from fastapi import FastAPI, Request, Response, HTTPException
+import os
+import asyncio
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from telegram import Update
 from telegram.ext import Application
+from bot import build_application
 
-from bot import build_application  # do not change bot.py structure per your request
-
+# ------------------------------------------------------
+# Logging setup
+# ------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("server")
+logger = logging.getLogger("server")
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777").strip()
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()  # e.g. https://freelancer-bot-ns7s.onrender.com
-
+# ------------------------------------------------------
+# FastAPI setup
+# ------------------------------------------------------
 app = FastAPI()
 
-# Build a single global Application instance
 application: Application = build_application()
 
-# Flags to avoid double init/stop in case of multiple lifecycle events
-_is_initialized = False
-_is_started = False
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
+WEBHOOK_URL = f"{os.getenv('RENDER_EXTERNAL_URL', 'https://freelancer-bot-ns7s.onrender.com')}/webhook/{WEBHOOK_SECRET}"
 
-
+# ------------------------------------------------------
+# Startup event
+# ------------------------------------------------------
 @app.on_event("startup")
-async def on_startup():
-    """Initialize and start the Telegram Application, then set webhook."""
-    global _is_initialized, _is_started
+async def startup_event():
+    logger.info("Application.initialize() starting")
+    await application.initialize()
+    await application.start()
+    await application.bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook set to {WEBHOOK_URL}")
+    logger.info("✅ Bot started via FastAPI")
 
-    try:
-        if not _is_initialized:
-            await application.initialize()
-            _is_initialized = True
-            log.info("Application.initialize() done")
-
-        if not _is_started:
-            await application.start()
-            _is_started = True
-            log.info("Application.start() done")
-
-        if WEBHOOK_BASE_URL:
-            url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook/{WEBHOOK_SECRET}"
-            await application.bot.set_webhook(
-                url=url,
-                drop_pending_updates=True,
-                allowed_updates=["message", "callback_query"],
-            )
-            log.info("Webhook set to %s", url)
-
-        log.info("✅ Bot started via FastAPI")
-
-    except Exception:
-        log.exception("Startup failed")
-
-
+# ------------------------------------------------------
+# Shutdown event
+# ------------------------------------------------------
 @app.on_event("shutdown")
-async def on_shutdown():
-    """Stop and shutdown the Telegram Application."""
-    global _is_initialized, _is_started
-    try:
-        if _is_started:
-            await application.stop()
-            _is_started = False
-            log.info("Application.stop() done")
+async def shutdown_event():
+    logger.info("Application.shutdown() starting")
+    await application.stop()
+    await application.shutdown()
+    logger.info("Application.shutdown() done")
 
-        if _is_initialized:
-            await application.shutdown()
-            _is_initialized = False
-            log.info("Application.shutdown() done")
-    except Exception:
-        log.exception("Shutdown failed")
-
-
-@app.get("/")
-async def root():
-    return {"status": "ok"}
-
-
-@app.post("/webhook/{secret}")
-async def tg_webhook(secret: str, request: Request):
-    """Telegram webhook endpoint."""
-    if secret != WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="forbidden")
-
+# ------------------------------------------------------
+# Webhook endpoint
+# ------------------------------------------------------
+@app.post(f"/webhook/{WEBHOOK_SECRET}")
+async def tg_webhook(request: Request):
     try:
         data = await request.json()
-    except Exception:
-        log.exception("Invalid JSON body on webhook")
-        return Response(status_code=200)
-
-    # Light logging for diagnostics (do not log PII)
-    try:
-        if "message" in data:
-            msg = data["message"]
-            log.info("Incoming message: chat=%s text=%s",
-                     msg.get("chat", {}).get("id"),
-                     msg.get("text"))
-        if "callback_query" in data:
-            cq = data["callback_query"]
-            log.info("Incoming callback: from=%s data=%s",
-                     cq.get("from", {}).get("id"),
-                     cq.get("data"))
-    except Exception:
-        pass
-
-    try:
-        # Make sure app is initialized/started (idempotent)
-        global _is_initialized, _is_started
-        if not _is_initialized:
-            await application.initialize()
-            _is_initialized = True
-            log.info("Re-initialize Application in webhook")
-        if not _is_started:
-            await application.start()
-            _is_started = True
-            log.info("Re-start Application in webhook")
-
-        update = Update.de_json(data=data, bot=application.bot)
+        update = Update.de_json(data, application.bot)
         await application.process_update(update)
-    except Exception:
-        log.exception("Failed to process update")
-        return Response(status_code=200)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        logger.error(f"Failed to process update: {e}", exc_info=True)
+        return JSONResponse({"ok": False, "error": str(e)})
 
-    return Response(status_code=200)
+# ------------------------------------------------------
+# Health check endpoint
+# ------------------------------------------------------
+@app.get("/")
+async def health_check():
+    return {"status": "ok", "message": "Freelancer Bot server running"}
+
+# ------------------------------------------------------
+# Main entrypoint (Render fix)
+# ------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    logger.info("Starting Uvicorn server (Render mode)")
+    uvicorn.run("server:app", host="0.0.0.0", port=10000, reload=False)
