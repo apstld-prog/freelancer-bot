@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==========================================================
-# 🚀 SAFE RESTART SCRIPT — FIXED PORT LOCK ISSUE
+# 🚀 SAFE RESTART SCRIPT — UNIVERSAL FIX (no fuser)
 # ==========================================================
 
 set -e
@@ -10,23 +10,24 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/restart_$(date +'%Y-%m-%d_%H%M').log"
 
 echo "=========================================================="
-echo "🚀 SAFE RESTART — FREELANCER BOT (Render, Port Fix)"
+echo "🚀 SAFE RESTART — FREELANCER BOT (Universal Port Fix)"
 echo "=========================================================="
 echo "$(date)"
 echo
 
 # ----------------------------------------------------------
-# Stop any existing uvicorn or workers cleanly
+# Kill previous processes cleanly
 # ----------------------------------------------------------
-echo "👉 Stopping running python processes on port 10000..."
-fuser -k 10000/tcp || true
-pkill -f "python3 -u workers/" || true
+echo "👉 Stopping previous python processes..."
+pkill -f "server.py" || true
+pkill -f "uvicorn" || true
+pkill -f "workers/worker_" || true
 sleep 2
-echo "✅ Port 10000 freed and workers stopped."
+echo "✅ Previous processes terminated."
 echo
 
 # ----------------------------------------------------------
-# Start server.py
+# Start server
 # ----------------------------------------------------------
 echo "👉 Starting server.py..."
 nohup python3 -u server.py >> "$LOG_FILE" 2>&1 &
