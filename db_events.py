@@ -4,6 +4,9 @@
 
 from typing import Optional
 from db import get_session
+import logging
+
+logger = logging.getLogger("db_events")
 
 
 def ensure_feed_events_schema() -> None:
@@ -103,21 +106,13 @@ def record_event(
             s.commit()
             return row["id"] if row else None
         except Exception as e:
-            print(f"[record_event] ERROR: {e}")
+            logger.error(f"[record_event] ERROR: {e}", exc_info=True)
             s.conn.rollback()
             return None
 
 
 def get_platform_stats() -> dict:
-    """
-    Return dictionary with total jobs per platform and latest fetched timestamp.
-    Example:
-        {
-            "Freelancer": {"count": 1234, "latest": "2025-10-30T06:20:00Z"},
-            "PeoplePerHour": {"count": 200, "latest": "2025-10-30T06:10:00Z"},
-            "Skywalker": {"count": 99, "latest": "2025-10-30T06:18:00Z"}
-        }
-    """
+    """Return dictionary with total jobs per platform and latest fetched timestamp."""
     with get_session() as s:
         s.execute("""
         SELECT platform, COUNT(*) AS count, MAX(fetched_at) AS latest
@@ -133,6 +128,31 @@ def get_platform_stats() -> dict:
             "latest": str(r["latest"]) if r["latest"] else None,
         }
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Compatibility wrapper for legacy workers (save_feed_event)
+# ---------------------------------------------------------------------------
+def save_feed_event(platform, title, description, original_url, budget, currency):
+    """
+    Backward-compatible wrapper used by worker_* scripts.
+    Calls record_event() internally with simplified arguments.
+    """
+    try:
+        record_event(
+            platform=platform,
+            title=title,
+            description=description,
+            affiliate_url=None,
+            original_url=original_url,
+            budget_amount=budget,
+            budget_currency=currency,
+            budget_usd=None,
+            created_at=None,
+            dedup_key=f"{platform}:{original_url}",
+        )
+    except Exception as e:
+        logger.error(f"[save_feed_event] {e}", exc_info=True)
 
 
 if __name__ == "__main__":
