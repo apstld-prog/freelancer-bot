@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==========================================================
-# 🚀 SAFE RESTART SCRIPT — UNIVERSAL FIX (no fuser)
+# 🚀 SAFE RESTART — RENDER-SAFE VERSION (no kill of main)
 # ==========================================================
 
 set -e
@@ -10,32 +10,22 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/restart_$(date +'%Y-%m-%d_%H%M').log"
 
 echo "=========================================================="
-echo "🚀 SAFE RESTART — FREELANCER BOT (Universal Port Fix)"
+echo "🚀 SAFE RESTART — FREELANCER BOT (Render-Safe)"
 echo "=========================================================="
 echo "$(date)"
 echo
 
 # ----------------------------------------------------------
-# Kill previous processes cleanly
+# Kill only worker processes (NOT the main FastAPI server)
 # ----------------------------------------------------------
-echo "👉 Stopping previous python processes..."
-pkill -f "server.py" || true
-pkill -f "uvicorn" || true
+echo "👉 Stopping existing worker processes..."
 pkill -f "workers/worker_" || true
 sleep 2
-echo "✅ Previous processes terminated."
+echo "✅ Workers stopped."
 echo
 
 # ----------------------------------------------------------
-# Start server
-# ----------------------------------------------------------
-echo "👉 Starting server.py..."
-nohup python3 -u server.py >> "$LOG_FILE" 2>&1 &
-disown
-sleep 5
-
-# ----------------------------------------------------------
-# Start workers
+# Start workers again (server.py left untouched)
 # ----------------------------------------------------------
 echo "👉 Starting workers..."
 nohup python3 -u workers/worker_freelancer.py >> "$LOG_FILE" 2>&1 &
@@ -49,12 +39,11 @@ disown
 sleep 2
 
 # ----------------------------------------------------------
-# Verify
+# Verify processes
 # ----------------------------------------------------------
 echo "👉 Checking running processes..."
-ps -ef | grep "python3 -u" | grep -v grep
+ps -ef | grep "python3 -u workers" | grep -v grep
 echo
-
-echo "✅ SAFE RESTART COMPLETE — all components relaunched."
+echo "✅ SAFE RESTART COMPLETE — Workers relaunched safely."
 echo "Logs saved at $LOG_FILE"
 echo "=========================================================="
