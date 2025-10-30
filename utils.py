@@ -21,6 +21,17 @@ async def fetch_json(url: str) -> dict:
         logger.error(f"[fetch_json] {e}")
         return {}
 
+async def fetch_html(url: str) -> str:
+    """Fetch raw HTML text asynchronously from URL (used by Skywalker)."""
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            return r.text
+    except Exception as e:
+        logger.error(f"[fetch_html] {e}")
+        return ""
+
 # -------------------------------------------------------------------
 # Telegram user utilities
 # -------------------------------------------------------------------
@@ -71,7 +82,7 @@ def _build_message(job):
         f"{source_line}\n"
         f"{match_line}\n"
         f"{posted_line}\n\n"
-        f"✏️ {desc}\n\n"
+        f✏️ {desc}\n\n"
         f"📝 Requirements:\n{reqs}"
     )
 
