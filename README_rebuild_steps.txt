@@ -1,19 +1,54 @@
-======================================================
-🚀 FREELANCER BOT CLEAN SCHEMA REBUILD — INSTRUCTIONS
-======================================================
+@echo off
+title FREELANCER BOT - FULL SCHEMA REBUILD
+echo ======================================================
+echo 🚀 FREELANCER BOT — FULL SCHEMA REBUILD (Windows)
+echo ======================================================
 
-1️⃣ DROP OLD STRUCTURE
-   psql "$DATABASE_URL" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+REM === 1️⃣ Load DATABASE_URL from environment ===
+IF "%DATABASE_URL%"=="" (
+    echo ❌ ERROR: DATABASE_URL is not set.
+    echo ------------------------------------------------------
+    echo Please set it manually before running this script.
+    echo Example:
+    echo    set DATABASE_URL=postgres://user:pass@host:5432/dbname
+    echo ------------------------------------------------------
+    pause
+    exit /b
+)
 
-2️⃣ REBUILD CLEAN SCHEMA
-   psql "$DATABASE_URL" -f rebuild_schema.sql
+REM === 2️⃣ Confirm rebuild ===
+echo This will completely DROP and REBUILD your Render database schema.
+echo Press CTRL+C to cancel or any key to continue...
+pause >nul
 
-3️⃣ DEPLOY
-   - push to Render
-   - service will boot cleanly (no undefined columns)
-   - workers will auto-create missing indexes if needed
+REM === 3️⃣ Drop and recreate schema ===
+echo ------------------------------------------------------
+echo 🧹 Dropping and recreating schema "public" ...
+echo ------------------------------------------------------
+psql "%DATABASE_URL%" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+IF ERRORLEVEL 1 (
+    echo ❌ Failed to drop/create schema.
+    pause
+    exit /b
+)
 
-======================================================
-💡 TIP: You can test locally before Render:
-   python db.py && python db_events.py && python db_keywords.py
-======================================================
+REM === 4️⃣ Apply rebuild_schema.sql ===
+echo ------------------------------------------------------
+echo 🛠️  Applying rebuild_schema.sql ...
+echo ------------------------------------------------------
+psql "%DATABASE_URL%" -f rebuild_schema.sql
+IF ERRORLEVEL 1 (
+    echo ❌ Schema rebuild failed.
+    pause
+    exit /b
+)
+
+REM === 5️⃣ Done! ===
+echo ======================================================
+echo ✅ Database schema rebuilt successfully!
+echo ======================================================
+echo.
+echo 🔁 You can now redeploy or restart your Render service.
+echo    (or run safe_restart.sh in Render Shell)
+echo ======================================================
+pause
