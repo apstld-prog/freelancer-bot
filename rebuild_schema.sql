@@ -1,3 +1,4 @@
+cat > rebuild_schema.sql <<'EOF'
 -- ======================================================
 -- FULL SCHEMA REBUILD (FREELANCER BOT — CLEAN MIGRATION)
 -- ======================================================
@@ -136,3 +137,4 @@ SELECT 1, kw FROM (VALUES
 ON CONFLICT DO NOTHING;
 
 -- ✅ schema complete
+EOF
