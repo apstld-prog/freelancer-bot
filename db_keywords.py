@@ -1,5 +1,6 @@
 # db_keywords.py
 # Psycopg2-only, complete API expected by bot.py & workers
+# Includes delete_keywords() alias for delete_user_keyword()
 
 from typing import Dict, List, Iterable, Optional
 from db import get_session
@@ -83,6 +84,12 @@ def delete_user_keyword(user_id: int, keyword: str) -> None:
         for k in kws:
             s.execute("DELETE FROM user_keywords WHERE user_id=%s AND keyword=%s;", (user_id, k))
         s.commit()
+
+
+# 🔧 new alias required by bot.py
+def delete_keywords(user_id: int, keywords: str | Iterable[str]) -> None:
+    """Alias for delete_user_keyword() — used by bot.py"""
+    delete_user_keyword(user_id, keywords)
 
 
 def clear_user_keywords(user_id: int) -> None:
