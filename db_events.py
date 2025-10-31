@@ -1,21 +1,15 @@
-# db_events.py
-# Psycopg2-only schema/bootstrap for feed events used by workers/bot
-# Includes get_platform_stats() and record_event()
-
+import logging
 from typing import Optional
 from db import get_session
-import logging
 
 logger = logging.getLogger("db_events")
 
-
 def ensure_feed_events_schema() -> None:
     with get_session() as s:
-        # feed_event: unified stash of fetched jobs
         s.execute("""
         CREATE TABLE IF NOT EXISTS feed_event (
             id BIGSERIAL PRIMARY KEY,
-            platform TEXT NOT NULL,            -- 'Freelancer', 'PeoplePerHour', 'Skywalker', etc.
+            platform TEXT NOT NULL,
             title TEXT,
             description TEXT,
             affiliate_url TEXT,
@@ -23,8 +17,8 @@ def ensure_feed_events_schema() -> None:
             budget_amount NUMERIC(18,2) NULL,
             budget_currency TEXT NULL,
             budget_usd NUMERIC(18,2) NULL,
-            created_at TIMESTAMPTZ NULL,       -- remote job "posted at" if present
-            fetched_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'),
+            fetched_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'),
             dedup_key TEXT NULL
         );
         """)
@@ -38,14 +32,12 @@ def ensure_feed_events_schema() -> None:
             END IF;
         END$$;
         """)
-
-        # Optional helper table for "sent" state (idempotency)
         s.execute("""
         CREATE TABLE IF NOT EXISTS job_sent (
             id BIGSERIAL PRIMARY KEY,
             user_id BIGINT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
             feed_event_id BIGINT NOT NULL REFERENCES feed_event(id) ON DELETE CASCADE,
-            sent_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC') NOT NULL
+            sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')
         );
         """)
         s.execute("""
@@ -60,12 +52,11 @@ def ensure_feed_events_schema() -> None:
         """)
         s.commit()
 
-
 def record_event(
     platform: str,
     title: str,
     description: Optional[str],
-    affiliate_url: str,
+    affiliate_url: Optional[str],
     original_url: str,
     budget_amount: Optional[float],
     budget_currency: Optional[str],
@@ -73,10 +64,6 @@ def record_event(
     created_at: Optional[str],
     dedup_key: Optional[str],
 ) -> Optional[int]:
-    """
-    Insert one feed_event safely (ignore duplicates by dedup_key).
-    Returns inserted id or None if duplicate.
-    """
     with get_session() as s:
         try:
             s.execute(
@@ -85,7 +72,7 @@ def record_event(
                     platform, title, description, affiliate_url, original_url,
                     budget_amount, budget_currency, budget_usd, created_at, dedup_key
                 )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW() AT TIME ZONE 'UTC'), %s)
                 ON CONFLICT (dedup_key) DO NOTHING
                 RETURNING id;
                 """,
@@ -110,9 +97,7 @@ def record_event(
             s.conn.rollback()
             return None
 
-
 def get_platform_stats() -> dict:
-    """Return dictionary with total jobs per platform and latest fetched timestamp."""
     with get_session() as s:
         s.execute("""
         SELECT platform, COUNT(*) AS count, MAX(fetched_at) AS latest
@@ -129,15 +114,8 @@ def get_platform_stats() -> dict:
         }
     return stats
 
-
-# ---------------------------------------------------------------------------
-# Compatibility wrapper for legacy workers (save_feed_event)
-# ---------------------------------------------------------------------------
+# Συμβατότητα με legacy workers
 def save_feed_event(platform, title, description, original_url, budget, currency):
-    """
-    Backward-compatible wrapper used by worker_* scripts.
-    Calls record_event() internally with simplified arguments.
-    """
     try:
         record_event(
             platform=platform,
@@ -148,17 +126,12 @@ def save_feed_event(platform, title, description, original_url, budget, currency
             budget_amount=budget,
             budget_currency=currency,
             budget_usd=None,
-            created_at=None,
+            created_at=None,  # COALESCE σε NOW()
             dedup_key=f"{platform}:{original_url}",
         )
     except Exception as e:
         logger.error(f"[save_feed_event] {e}", exc_info=True)
 
-
 if __name__ == "__main__":
-    print("======================================================")
-    print("📊 INIT FEED EVENTS TOOL — psycopg2 version (FINAL)")
-    print("======================================================")
     ensure_feed_events_schema()
-    print("✅ feed_event + job_sent tables ensured successfully.")
-    print("======================================================")
+    print("✅ feed_event schema ensured")

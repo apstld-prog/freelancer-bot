@@ -23,8 +23,6 @@ humanize==4.10.0
 
 # --- Utilities ---
 python-dotenv==1.0.1
-
-# --- Optional data manipulation ---
 pytz==2024.2
 
 # --- Currency conversion helper ---
@@ -34,7 +32,7 @@ forex-python==1.8
 beautifulsoup4==4.12.3
 lxml==5.3.0
 
-# --- Logging / Scheduling ---
+# --- Scheduling (αν το χρησιμοποιείς)
 APScheduler==3.10.4
 
 # --- Safety / Formatting ---
