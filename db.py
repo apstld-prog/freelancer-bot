@@ -1,11 +1,13 @@
-# db.py — FINAL COMPATIBLE VERSION
-# Compatible with bot.py expecting u.id, using psycopg2 safely
+# db.py — FINAL COMPATIBLE VERSION (named params + chaining)
+# Works with psycopg2, supports ':named' params from SQLAlchemy text(),
+# returns self from execute() so you can chain .fetchone() / .fetchall()
 
 import os
+import re
 import psycopg2
 import psycopg2.extras
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Optional, Union, Dict, Tuple
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -32,16 +34,38 @@ class PsycopgSession:
             finally:
                 self.conn.close()
 
-    def execute(self, sql, params: tuple | dict = ()):
+    def _convert_named_params(self, sql: str, params: Union[Dict[str, Any], Tuple, None]):
+        """
+        If params is a dict and SQL contains :name placeholders (SQLAlchemy text()),
+        convert them to psycopg2 mapping style %(name)s.
+        """
+        if isinstance(params, dict):
+            # Replace :name (not inside strings – best effort for our simple statements)
+            sql = re.sub(r':([a-zA-Z_][\w]*)', r'%(\1)s', sql)
+        return sql, params
+
+    def execute(self, sql: Union[str, Any], params: Union[Dict[str, Any], Tuple, None] = ()):
+        # Accept SQLAlchemy text() too
         if not isinstance(sql, str):
             sql = str(sql)
+
+        sql, params = self._convert_named_params(sql, params or ())
         self.cur.execute(sql, params or ())
+        # return self for chaining: s.execute(...).fetchall()
+        return self
 
     def fetchone(self):
         return self.cur.fetchone()
 
     def fetchall(self):
         return self.cur.fetchall()
+
+    def scalar(self):
+        row = self.cur.fetchone()
+        if not row:
+            return None
+        # RealDictCursor -> first value
+        return next(iter(row.values()))
 
     def commit(self):
         self.conn.commit()
@@ -81,7 +105,7 @@ def ensure_schema() -> None:
         );
         """)
 
-        # feed_event
+        # feed_event (created_at default to avoid NOT NULL violations)
         s.execute("""
         CREATE TABLE IF NOT EXISTS feed_event (
             id BIGSERIAL PRIMARY KEY,
@@ -107,7 +131,7 @@ def ensure_schema() -> None:
         );
         """)
 
-        # unique index
+        # unique index (idempotent)
         s.execute("""
         DO $$
         BEGIN
@@ -127,7 +151,12 @@ def ensure_schema() -> None:
 # --------------------------------------------------------------------------------------
 
 def get_or_create_user_by_tid(s_or_tid, maybe_tid: Optional[int] = None, username: Optional[str] = None):
-    """Backward compatible: works with (session, tid) or (tid)."""
+    """
+    Backward compatible:
+      - get_or_create_user_by_tid(session, telegram_id, username?)
+      - get_or_create_user_by_tid(telegram_id, username?)
+    Returns SimpleNamespace with attributes (id, telegram_id, username, ...)
+    """
     if isinstance(s_or_tid, PsycopgSession):
         telegram_id = maybe_tid
         session = s_or_tid
