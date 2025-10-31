@@ -191,6 +191,18 @@ async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 InlineKeyboardButton("❌ No", callback_data="kw:clear:no")]])
     await update.message.reply_text("Clear ALL your keywords?", reply_markup=kb)
 
+# ---------- Help ----------
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.effective_chat.send_message(
+            HELP_EN + help_footer(STATS_WINDOW_HOURS),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
+        )
+    except Exception as e:
+        log.error(f"help_cmd failed: {e}")
+
 # ---------- Self-test ----------
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
