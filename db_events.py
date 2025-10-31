@@ -7,7 +7,9 @@ logger = logging.getLogger("db_events")
 
 
 def ensure_feed_events_schema() -> None:
+    """Ensure the feed_event + job_sent tables and indexes exist."""
     with get_session() as s:
+        # base table
         s.execute("""
         CREATE TABLE IF NOT EXISTS feed_event (
             id BIGSERIAL PRIMARY KEY,
@@ -20,10 +22,27 @@ def ensure_feed_events_schema() -> None:
             budget_currency TEXT NULL,
             budget_usd NUMERIC(18,2) NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'),
-            fetched_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'),
             dedup_key TEXT NULL
         );
         """)
+
+        # add fetched_at if missing
+        s.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'feed_event'
+                AND column_name = 'fetched_at'
+            ) THEN
+                ALTER TABLE feed_event
+                ADD COLUMN fetched_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC');
+            END IF;
+        END$$;
+        """)
+
+        # add unique index for deduplication
         s.execute("""
         DO $$
         BEGIN
@@ -34,6 +53,8 @@ def ensure_feed_events_schema() -> None:
             END IF;
         END$$;
         """)
+
+        # job_sent table
         s.execute("""
         CREATE TABLE IF NOT EXISTS job_sent (
             id BIGSERIAL PRIMARY KEY,
@@ -42,6 +63,8 @@ def ensure_feed_events_schema() -> None:
             sent_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')
         );
         """)
+
+        # unique index
         s.execute("""
         DO $$
         BEGIN
@@ -52,6 +75,7 @@ def ensure_feed_events_schema() -> None:
             END IF;
         END$$;
         """)
+
         s.commit()
 
 
@@ -67,7 +91,7 @@ def record_event(
     created_at: Optional[str] = None,
     dedup_key: Optional[str] = None,
 ) -> Optional[int]:
-    """Insert feed_event safely even if only platform is provided."""
+    """Insert a feed_event row, safe defaults if only platform is given."""
     with get_session() as s:
         try:
             if not dedup_key:
@@ -77,9 +101,11 @@ def record_event(
                 """
                 INSERT INTO feed_event (
                     platform, title, description, affiliate_url, original_url,
-                    budget_amount, budget_currency, budget_usd, created_at, dedup_key
+                    budget_amount, budget_currency, budget_usd,
+                    created_at, fetched_at, dedup_key
                 )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW() AT TIME ZONE 'UTC'), %s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,COALESCE(%s, NOW() AT TIME ZONE 'UTC'),
+                        NOW() AT TIME ZONE 'UTC', %s)
                 ON CONFLICT (dedup_key) DO NOTHING
                 RETURNING id;
                 """,
@@ -130,8 +156,8 @@ def get_platform_stats(window_hours: int = 24) -> dict:
     return stats
 
 
-# Συμβατότητα με legacy workers
 def save_feed_event(platform, title, description, original_url, budget, currency):
+    """Legacy compatibility for older workers."""
     try:
         record_event(
             platform=platform,
