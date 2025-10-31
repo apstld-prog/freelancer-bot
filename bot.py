@@ -162,6 +162,67 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
+# ---------- Keyword management ----------
+def _parse_keywords(raw: str) -> List[str]:
+    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
+    seen, out = set(), []
+    for p in parts:
+        lp = p.lower()
+        if lp not in seen:
+            seen.add(lp)
+            out.append(p)
+    return out
+
+async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "Add keywords separated by commas. Example:\n<code>/addkeyword logo, lighting</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    kws = _parse_keywords(" ".join(context.args))
+    if not kws:
+        await update.message.reply_text("No valid keywords provided.")
+        return
+    with get_session() as s:
+        u = get_or_create_user_by_tid(s, update.effective_user.id)
+    inserted = add_keywords(u.id, kws)
+    current = list_keywords(u.id)
+    msg = f"✅ Added {inserted} new keyword(s)." if inserted > 0 else "ℹ️ Those keywords already exist (no changes)."
+    await update.message.reply_text(
+        msg + "\n\nCurrent keywords:\n• " + (", ".join(current) if current else "—"),
+        parse_mode=ParseMode.HTML,
+    )
+
+async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "Delete keywords. Example:\n<code>/delkeyword logo, sales</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    kws = _parse_keywords(" ".join(context.args))
+    with get_session() as s:
+        u = get_or_create_user_by_tid(s, update.effective_user.id)
+    removed = delete_keywords(u.id, kws)
+    left = list_keywords(u.id)
+    await update.message.reply_text(
+        f"🗑 Removed {removed} keyword(s).\n\nCurrent keywords:\n• "
+        + (", ".join(left) if left else "—"),
+        parse_mode=ParseMode.HTML,
+    )
+
+async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Yes, clear all", callback_data="kw:clear:yes"),
+                InlineKeyboardButton("❌ No", callback_data="kw:clear:no"),
+            ]
+        ]
+    )
+    await update.message.reply_text("Clear ALL your keywords?", reply_markup=kb)
+
 # ---------- Admin ----------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
