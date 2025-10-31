@@ -1,16 +1,16 @@
-# db.py
-# Psycopg2-only DB helper layer + minimal schema bootstrap + helpers used by bot.py
+# db.py — FINAL COMPATIBLE VERSION
+# Compatible with bot.py expecting u.id, using psycopg2 safely
 
 import os
 import psycopg2
 import psycopg2.extras
+from types import SimpleNamespace
 from typing import Any, Optional
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
 class PsycopgSession:
-    """Context-managed psycopg2 connection + cursor helper."""
     def __init__(self):
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL is not set")
@@ -34,10 +34,7 @@ class PsycopgSession:
 
     def execute(self, sql, params: tuple | dict = ()):
         if not isinstance(sql, str):
-            try:
-                sql = str(sql)
-            except Exception:
-                sql = getattr(sql, "text", sql)
+            sql = str(sql)
         self.cur.execute(sql, params or ())
 
     def fetchone(self):
@@ -51,7 +48,6 @@ class PsycopgSession:
 
 
 def get_session() -> PsycopgSession:
-    """Returns a new DB session."""
     return PsycopgSession()
 
 
@@ -61,7 +57,6 @@ def get_session() -> PsycopgSession:
 
 def ensure_schema() -> None:
     with get_session() as s:
-        # user table
         s.execute("""
         CREATE TABLE IF NOT EXISTS "user" (
             id BIGSERIAL PRIMARY KEY,
@@ -86,30 +81,7 @@ def ensure_schema() -> None:
         );
         """)
 
-        # trigger for updated_at
-        s.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_trigger WHERE tgname = 'trg_user_updated_at'
-            ) THEN
-                CREATE OR REPLACE FUNCTION set_user_updated_at()
-                RETURNS TRIGGER AS $BODY$
-                BEGIN
-                    NEW.updated_at := NOW() AT TIME ZONE 'UTC';
-                    RETURN NEW;
-                END;
-                $BODY$ LANGUAGE plpgsql;
-
-                CREATE TRIGGER trg_user_updated_at
-                BEFORE UPDATE ON "user"
-                FOR EACH ROW
-                EXECUTE PROCEDURE set_user_updated_at();
-            END IF;
-        END$$;
-        """)
-
-        # feed_event table
+        # feed_event
         s.execute("""
         CREATE TABLE IF NOT EXISTS feed_event (
             id BIGSERIAL PRIMARY KEY,
@@ -125,7 +97,7 @@ def ensure_schema() -> None:
         );
         """)
 
-        # saved_job table
+        # saved_job
         s.execute("""
         CREATE TABLE IF NOT EXISTS saved_job (
             id BIGSERIAL PRIMARY KEY,
@@ -154,13 +126,8 @@ def ensure_schema() -> None:
 # HELPERS
 # --------------------------------------------------------------------------------------
 
-def get_or_create_user_by_tid(s_or_tid, maybe_tid: Optional[int] = None, username: Optional[str] = None) -> dict:
-    """
-    Backward compatible:
-      - get_or_create_user_by_tid(session, telegram_id)
-      - get_or_create_user_by_tid(telegram_id)
-    """
-    # detect call style
+def get_or_create_user_by_tid(s_or_tid, maybe_tid: Optional[int] = None, username: Optional[str] = None):
+    """Backward compatible: works with (session, tid) or (tid)."""
     if isinstance(s_or_tid, PsycopgSession):
         telegram_id = maybe_tid
         session = s_or_tid
@@ -173,6 +140,7 @@ def get_or_create_user_by_tid(s_or_tid, maybe_tid: Optional[int] = None, usernam
     try:
         session.execute('SELECT * FROM "user" WHERE telegram_id = %s;', (telegram_id,))
         row = session.fetchone()
+
         if row:
             session.execute(
                 'UPDATE "user" SET username = COALESCE(%s, username), is_active = TRUE WHERE telegram_id = %s RETURNING *;',
@@ -180,7 +148,7 @@ def get_or_create_user_by_tid(s_or_tid, maybe_tid: Optional[int] = None, usernam
             )
             updated = session.fetchone()
             session.commit()
-            return dict(updated)
+            return SimpleNamespace(**updated)
 
         session.execute(
             'INSERT INTO "user" (telegram_id, username, is_active) VALUES (%s, %s, TRUE) RETURNING *;',
@@ -188,7 +156,7 @@ def get_or_create_user_by_tid(s_or_tid, maybe_tid: Optional[int] = None, usernam
         )
         created = session.fetchone()
         session.commit()
-        return dict(created)
+        return SimpleNamespace(**created)
     finally:
         if close_after:
             try:
