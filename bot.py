@@ -381,6 +381,28 @@ async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
                     text=f"⏰ Reminder: your access expires in about {hours_left} hours (on {expiry.strftime('%Y-%m-%d %H:%M UTC')}).")
             except Exception: pass
 
+# ---------- Menu action callback ----------
+async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle main menu buttons (Add Keywords, Help, Settings, etc.)"""
+    q = update.callback_query
+    data = q.data
+    await q.answer()
+
+    if data == "act:addkw":
+        await addkeyword_cmd(update, context)
+    elif data == "act:settings":
+        await mysettings_cmd(update, context)
+    elif data == "act:help":
+        await help_cmd(update, context)
+    elif data == "act:saved":
+        await saved_cmd(update, context)
+    elif data == "act:contact":
+        await contact_cmd(update, context)
+    elif data.startswith("act:admin"):
+        await admin_cmd(update, context)
+    else:
+        await q.edit_message_text("❌ Unknown action.")
+
 # ---------- Build app ----------
 def build_application() -> Application:
     ensure_schema()
