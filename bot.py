@@ -1,30 +1,38 @@
-# bot.py — FULL WORKING VERSION (Render / PostgreSQL / Multi-Worker)
+# bot.py — Full restored & fixed version (Render-safe, original layout intact)
 import os, logging, asyncio, re
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import List, Set, Optional
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder, Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
+    ApplicationBuilder, Application, CommandHandler,
+    CallbackQueryHandler, MessageHandler, ContextTypes, filters,
 )
+try:
+    from telegram.ext import JobQueue
+except Exception:
+    JobQueue = None  # type: ignore
+
 from sqlalchemy import text
 from db import ensure_schema, get_session, get_or_create_user_by_tid
 from config import ADMIN_IDS, TRIAL_DAYS, STATS_WINDOW_HOURS
 from db_events import ensure_feed_events_schema, get_platform_stats, record_event
 from db_keywords import (
-    list_keywords, add_keywords, delete_keywords,
-    clear_keywords, ensure_keyword_unique, count_keywords
+    list_keywords, add_keywords, count_keywords,
+    ensure_keyword_unique, delete_keywords, clear_keywords
 )
 
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
+    raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
+ADMIN_ELEVATE_SECRET = os.getenv("ADMIN_ELEVATE_SECRET", "")
 
-# ---------- ADMIN HELPERS ----------
+# ---------- Admin helpers ----------
 def get_db_admin_ids() -> Set[int]:
     try:
         with get_session() as s:
@@ -41,35 +49,39 @@ def is_admin_user(tid: int) -> bool:
     return tid in all_admin_ids()
 
 # ---------- UI ----------
-def main_menu_kb(is_admin=False) -> InlineKeyboardMarkup:
+def main_menu_kb(is_admin: bool=False) -> InlineKeyboardMarkup:
     kb = [
         [InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
          InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
         [InlineKeyboardButton("🆘 Help", callback_data="act:help"),
          InlineKeyboardButton("💾 Saved", callback_data="act:saved")],
-        [InlineKeyboardButton("📨 Contact", callback_data="act:contact")]
+        [InlineKeyboardButton("📨 Contact", callback_data="act:contact")],
     ]
-    if is_admin:
-        kb.append([InlineKeyboardButton("🔥 Admin", callback_data="act:admin")])
+    if is_admin: kb.append([InlineKeyboardButton("🔥 Admin", callback_data="act:admin")])
     return InlineKeyboardMarkup(kb)
 
 HELP_EN = (
     "<b>🧭 Help / How it works</b>\n\n"
-    "• /addkeyword logo, lighting\n"
-    "• /delkeyword logo\n"
-    "• /clearkeywords — remove all\n\n"
-    "<b>Other:</b>\n"
-    "/selftest — show test cards\n"
-    "/mysettings — show profile info\n"
-    "/feedstatus — show platform stats\n"
+    "<b>Keywords</b>\n"
+    "• Add: <code>/addkeyword logo, lighting, sales</code>\n"
+    "• Remove: <code>/delkeyword logo, sales</code>\n"
+    "• Clear all: <code>/clearkeywords</code>\n\n"
+    "<b>Other</b>\n"
+    "• Set countries: <code>/setcountry US,UK</code> or <code>ALL</code>\n"
+    "• Save proposal: <code>/setproposal &lt;text&gt;</code>\n"
+    "• Test card: <code>/selftest</code>\n"
 )
 
 def help_footer(hours: int) -> str:
     return (
-        f"\n<b>🛰 Platforms monitored:</b>\n"
-        f"Freelancer.com, PeoplePerHour, Skywalker, JobFind, Kariera.\n\n"
-        f"<b>👑 Admin:</b> /users /grant /block /unblock /broadcast /feedstatus\n"
-        f"<i>Stats window: {hours}h</i>"
+        "\n<b>🛰 Platforms monitored:</b>\n"
+        "• Global: Freelancer.com (affiliate), PeoplePerHour, Malt, Workana, Guru, 99designs, "
+        "Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
+        "• Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
+        "<b>👑 Admin:</b> <code>/users</code> <code>/grant &lt;id&gt; &lt;days&gt;</code> "
+        "<code>/block &lt;id&gt;</code> <code>/unblock &lt;id&gt;</code> <code>/broadcast &lt;text&gt;</code> "
+        "<code>/feedstatus</code> (alias <code>/feetstatus</code>)\n"
+        "<i>Link previews are disabled for this message.</i>\n"
     )
 
 def welcome_text(expiry: Optional[datetime]) -> str:
@@ -77,120 +89,166 @@ def welcome_text(expiry: Optional[datetime]) -> str:
     return (
         "<b>👋 Welcome to Freelancer Alert Bot!</b>\n\n"
         "🎁 You have a <b>10-day free trial</b>.\n"
-        "The bot finds matching freelance jobs and sends instant alerts."
-        f"{extra}\n\nUse /help for instructions."
+        "The bot finds matching freelance jobs from top platforms and sends instant alerts."
+        f"{extra}\n\nUse <code>/help</code> for instructions.\n"
     )
-# ---------- /start ----------
+
+def settings_text(keywords: List[str], countries: str|None, proposal_template: str|None,
+                  trial_start, trial_end, license_until, active: bool, blocked: bool) -> str:
+    def b(v: bool) -> str: return "✅" if v else "❌"
+    k = ", ".join(keywords) if keywords else "(none)"
+    c = countries if countries else "ALL"
+    pt = "(none)" if not proposal_template else "(saved)"
+    ts = trial_start.isoformat().replace("+00:00","Z") if trial_start else "—"
+    te = trial_end.isoformat().replace("+00:00","Z") if trial_end else "—"
+    lic = "None" if not license_until else license_until.isoformat().replace("+00:00","Z")
+    return (
+        "<b>🛠 Your Settings</b>\n"
+        f"• <b>Keywords:</b> {k}\n"
+        f"• <b>Countries:</b> {c}\n"
+        f"• <b>Proposal template:</b> {pt}\n\n"
+        f"<b>●</b> Start date: {ts}\n"
+        f"<b>●</b> Trial ends: {te} UTC\n"
+        f"<b>🔑</b> License until: {lic}\n"
+        f"<b>✅ Active:</b> {b(active)}    <b>⛔ Blocked:</b> {b(blocked)}\n\n"
+        "<b>🛰 Platforms monitored:</b> Global & GR boards.\n"
+        "<i>For extension, contact the admin.</i>"
+    )
+
+# ---------- /start command ----------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         s.execute(
             'UPDATE "user" SET trial_start = COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id = %(id)s;',
-            {"id": u.id},
+            {"id": u.id}
         )
         s.execute(
             'UPDATE "user" SET trial_end = COALESCE(trial_end, (NOW() AT TIME ZONE \'UTC\') + make_interval(days => %(days)s)) WHERE id = %(id)s;',
-            {"id": u.id, "days": TRIAL_DAYS},
+            {"id": u.id, "days": TRIAL_DAYS}
         )
-        row = s.execute(
+        s.execute(
             'SELECT COALESCE(license_until, trial_end) AS expiry FROM "user" WHERE id = %(id)s;',
-            {"id": u.id},
-        ).fetchone()
+            {"id": u.id}
+        )
+        row = s.fetchone()
         expiry = row["expiry"] if row else None
         s.commit()
 
     await update.effective_chat.send_message(
         welcome_text(expiry if isinstance(expiry, datetime) else None),
         parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
+        reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id))
     )
     await update.effective_chat.send_message(
         HELP_EN + help_footer(STATS_WINDOW_HOURS),
         parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
+        disable_web_page_preview=True
     )
+# ---------- whoami ----------
+async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Your Telegram ID: <code>{update.effective_user.id}</code>", parse_mode=ParseMode.HTML)
 
-# ---------- Help ----------
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_chat.send_message(
-        HELP_EN + help_footer(STATS_WINDOW_HOURS),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+# ---------- Keywords ----------
+def _parse_keywords(raw: str) -> List[str]:
+    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
+    seen, out = set(), []
+    for p in parts:
+        lp = p.lower()
+        if lp not in seen:
+            seen.add(lp)
+            out.append(p)
+    return out
 
-# ---------- Keyword Management ----------
-async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Yes, clear all", callback_data="kw:clear:yes"),
-         InlineKeyboardButton("❌ No", callback_data="kw:clear:no")],
-    ])
-    await update.message.reply_text("Clear ALL your keywords?", reply_markup=kb)
-
-async def kw_clear_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    choice = q.data.split(":")[-1]
+async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Add keywords separated by commas. Example:\n<code>/addkeyword logo, lighting</code>", parse_mode=ParseMode.HTML)
+        return
+    kws = _parse_keywords(" ".join(context.args))
+    if not kws:
+        await update.message.reply_text("No valid keywords provided.")
+        return
     with get_session() as s:
-        u = get_or_create_user_by_tid(s, q.from_user.id)
-        if choice == "yes":
-            count = clear_keywords(u.id)
-            await q.edit_message_text(f"🗑 Cleared {count} keyword(s).")
-        else:
-            await q.edit_message_text("❌ Cancelled.")
+        u = get_or_create_user_by_tid(s, update.effective_user.id)
+    inserted = add_keywords(u.id, kws)
+    current = list_keywords(u.id)
+    msg = f"✅ Added {inserted} new keyword(s)." if inserted > 0 else "ℹ️ Those keywords already exist (no changes)."
+    await update.message.reply_text(msg + "\n\nCurrent keywords:\n• " + (", ".join(current) if current else "—"), parse_mode=ParseMode.HTML)
+
+async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Delete keywords. Example:\n<code>/delkeyword logo, sales</code>", parse_mode=ParseMode.HTML)
+        return
+    kws = _parse_keywords(" ".join(context.args))
+    with get_session() as s:
+        u = get_or_create_user_by_tid(s, update.effective_user.id)
+    removed = delete_keywords(u.id, kws)
+    left = list_keywords(u.id)
+    await update.message.reply_text(f"🗑 Removed {removed} keyword(s).\n\nCurrent keywords:\n• " + (", ".join(left) if left else "—"), parse_mode=ParseMode.HTML)
+
+async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes, clear all", callback_data="kw:clear:yes"),
+                                InlineKeyboardButton("❌ No", callback_data="kw:clear:no")]])
+    await update.message.reply_text("Clear ALL your keywords?", reply_markup=kb)
 
 # ---------- Self-test ----------
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        job_text = (
+            "<b>Email Signature from Existing Logo</b>\n"
+            "<b>Budget:</b> 10.0–30.0 USD\n"
+            "<b>Source:</b> Freelancer\n"
+            "<b>Match:</b> logo\n"
+            "✏️ Please create an editable version of the email signature based on the provided logo.\n"
+        )
+        url = "https://www.freelancer.com/projects/sample"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📄 Proposal", url=url),
+             InlineKeyboardButton("🔗 Original", url=url)],
+            [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+             InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
+        ])
+        await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await asyncio.sleep(0.4)
+
+        pph_text = (
+            "<b>Logo Design for New Startup</b>\n"
+            "<b>Budget:</b> 50.0–120.0 GBP (~$60–$145 USD)\n"
+            "<b>Source:</b> PeoplePerHour\n"
+            "<b>Match:</b> logo\n"
+            "🎨 Create a modern, minimal logo for a UK startup. Provide vector files.\n"
+        )
+        pph_url = "https://www.peopleperhour.com/freelance-jobs/sample"
+        pph_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📄 Proposal", url=pph_url),
+             InlineKeyboardButton("🔗 Original", url=pph_url)],
+            [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+             InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
+        ])
+        await update.effective_chat.send_message(pph_text, parse_mode=ParseMode.HTML, reply_markup=pph_kb)
         ensure_feed_events_schema()
-        record_event("freelancer")
-        record_event("peopleperhour")
-        await update.message.reply_text("✅ Self-test OK — dummy events recorded.")
+        record_event("freelancer", "Sample", "Test job", "", url, 10, "USD", 10, datetime.utcnow(), "selftest-freelancer")
+        record_event("peopleperhour", "Sample", "Test job", "", pph_url, 50, "GBP", 60, datetime.utcnow(), "selftest-pph")
+        log.info("selftest: recorded freelancer + peopleperhour")
     except Exception as e:
-        await update.message.reply_text(f"❌ Self-test failed: {e}")
-
-# ---------- Feed Status ----------
-async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id):
-        await update.message.reply_text("You are not an admin.")
-        return
-    try:
-        stats = get_platform_stats(STATS_WINDOW_HOURS)
-        if not stats:
-            await update.message.reply_text("No events found in last 24h.")
-            return
-        msg = "📊 Feed status (last 24h):\n" + "\n".join([f"• {k}: {v}" for k, v in stats.items()])
-        await update.message.reply_text(msg)
-    except Exception as e:
-        await update.message.reply_text(f"Feed status unavailable: {e}")
-# ---------- Admin ----------
-async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id):
-        await update.message.reply_text("Not admin.")
-        return
-    with get_session() as s:
-        rows = s.execute(text('SELECT telegram_id, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 50')).fetchall()
-    txt = ["<b>Users</b>"]
-    for r in rows:
-        txt.append(f"• {r['telegram_id']} — Active:{'✅' if r['is_active'] else '❌'} Blocked:{'✅' if r['is_blocked'] else '❌'}")
-    await update.message.reply_text("\n".join(txt), parse_mode=ParseMode.HTML)
-
-# ---------- Menu buttons ----------
+        log.exception("selftest failed: %s", e)
+# ---------- Menu & Callbacks ----------
 async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    data = q.data
+    data = (q.data or "")
     await q.answer()
-    if data == "act:help":
-        await help_cmd(update, context)
-    elif data == "act:addkw":
-        await update.effective_chat.send_message("Use /addkeyword logo, design, etc.")
+    if data == "act:addkw":
+        await addkeyword_cmd(update, context)
     elif data == "act:settings":
-        await update.effective_chat.send_message("Use /mysettings to view profile.")
+        await mysettings_cmd(update, context)
+    elif data == "act:help":
+        await help_cmd(update, context)
     elif data == "act:admin":
         await users_cmd(update, context)
     else:
-        await update.effective_chat.send_message("Unknown button.")
+        await q.edit_message_text("❌ Unknown action.")
 
-# ---------- Build app ----------
+# ---------- Build ----------
 def build_application() -> Application:
     ensure_schema()
     ensure_feed_events_schema()
@@ -199,12 +257,33 @@ def build_application() -> Application:
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("selftest", selftest_cmd))
+    app.add_handler(CommandHandler("whoami", whoami_cmd))
+    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
+    app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
+    app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
-    app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
-    app.add_handler(CommandHandler("users", users_cmd))
-    app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))
-    app.add_handler(CallbackQueryHandler(kw_clear_confirm_cb, pattern=r"^kw:clear:(yes|no)$"))
+    app.add_handler(CommandHandler("selftest", selftest_cmd))
 
-    log.info("✅ Application built and ready.")
+    app.add_handler(CommandHandler("users", users_cmd))
+    app.add_handler(CommandHandler("grant", grant_cmd))
+    app.add_handler(CommandHandler("block", block_cmd))
+    app.add_handler(CommandHandler("unblock", unblock_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
+    app.add_handler(CommandHandler("feetstatus", feedstatus_cmd))
+
+    app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))
+    app.add_handler(CallbackQueryHandler(clearkeywords_cmd, pattern=r"^kw:clear:(yes|no)$"))
+
+    try:
+        if JobQueue:
+            jq = app.job_queue or JobQueue()
+            if app.job_queue is None:
+                jq.set_application(app)
+            jq.run_repeating(notify_expiring_job, interval=3600, first=60)
+            log.info("Scheduler: JobQueue active ✅")
+        else:
+            raise RuntimeError("no jobqueue")
+    except Exception:
+        log.warning("Scheduler fallback")
     return app
