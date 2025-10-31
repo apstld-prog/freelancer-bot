@@ -149,6 +149,39 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Your Telegram ID: <code>{update.effective_user.id}</code>", parse_mode=ParseMode.HTML)
 
+# ---------- My Settings ----------
+async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        with get_session() as s:
+            u = get_or_create_user_by_tid(s, update.effective_user.id)
+            kws = list_keywords(u.id)
+            s.execute(
+                text(
+                    'SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked '
+                    'FROM "user" WHERE id=:id'
+                ),
+                {"id": u.id},
+            )
+            row = s.fetchone()
+
+        await update.effective_chat.send_message(
+            settings_text(
+                kws,
+                row["countries"],
+                row["proposal_template"],
+                row["trial_start"],
+                row["trial_end"],
+                row["license_until"],
+                bool(row["is_active"]),
+                bool(row["is_blocked"]),
+            ),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        log.error(f"mysettings_cmd failed: {e}")
+        await update.effective_chat.send_message("⚠️ Could not load your settings. Please try again later.")
+
 # ---------- Keywords ----------
 def _parse_keywords(raw: str) -> List[str]:
     parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
