@@ -39,7 +39,8 @@ ADMIN_ELEVATE_SECRET = os.getenv("ADMIN_ELEVATE_SECRET", "")
 def get_db_admin_ids() -> Set[int]:
     try:
         with get_session() as s:
-            ids = [r[0] for r in s.execute(text('SELECT telegram_id FROM "user" WHERE is_admin=TRUE')).fetchall()]
+            s.execute(text('SELECT telegram_id FROM "user" WHERE is_admin=TRUE'))
+            ids = [r["telegram_id"] for r in s.fetchall()]
         return {int(x) for x in ids if x}
     except Exception:
         return set()
@@ -165,9 +166,14 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         s.execute(text('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'), {"id": u.id})
-        s.execute(text(f'UPDATE "user" SET trial_end=COALESCE(trial_end, (NOW() AT TIME ZONE \'UTC\') + INTERVAL \':days days\') WHERE id=:id')
-                  .bindparams(days=TRIAL_DAYS), {"id": u.id})
-        expiry = s.execute(text('SELECT COALESCE(license_until, trial_end) FROM "user" WHERE id=:id'), {"id": u.id}).scalar()
+        s.execute(
+            text('UPDATE "user" SET trial_end=COALESCE(trial_end, (NOW() AT TIME ZONE \'UTC\') + INTERVAL :days) WHERE id=:id')
+            .bindparams(days=f'{TRIAL_DAYS} days'),
+            {"id": u.id}
+        )
+        s.execute(text('SELECT COALESCE(license_until, trial_end) AS expiry FROM "user" WHERE id=:id'), {"id": u.id})
+        row = s.fetchone()
+        expiry = row["expiry"] if row else None
         s.commit()
     await update.effective_chat.send_message(
         welcome_text(expiry if isinstance(expiry, datetime) else None),
@@ -181,9 +187,11 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         kws = list_keywords(u.id)
-        row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
+        s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'), {"id": u.id})
+        row = s.fetchone()
     await update.message.reply_text(
-        settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6])),
+        settings_text(kws, row["countries"], row["proposal_template"], row["trial_start"], row["trial_end"],
+                      row["license_until"], bool(row["is_active"]), bool(row["is_blocked"])),
         parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -202,7 +210,7 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg + "\n\nCurrent keywords:\n• " + (", ".join(current) if current else "—"),
                                     parse_mode=ParseMode.HTML)
 
-async def delkeyword_cmd(update: Update, Context: ContextTypes.DEFAULT_TYPE):
+async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Delete keywords. Example:\n<code>/delkeyword logo, sales</code>",
                                         parse_mode=ParseMode.HTML); return
@@ -275,9 +283,13 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
         await update.message.reply_text("You are not an admin."); return
     with get_session() as s:
-        rows = s.execute(text('SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200')).fetchall()
+        s.execute(text('SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200'))
+        rows = s.fetchall()
     lines = ["<b>Users</b>"]
-    for uid, tid, trial_end, lic, act, blk in rows:
+    for r in rows:
+        uid, tid = r["id"], r["telegram_id"]
+        trial_end, lic = r["trial_end"], r["license_until"]
+        act, blk = r["is_active"], r["is_blocked"]
         kwc = count_keywords(uid)
         lines.append(f"• <a href=\"tg://user?id={tid}\">{tid}</a> — kw:{kwc} | trial:{trial_end} | lic:{lic} | A:{'✅' if act else '❌'} B:{'✅' if blk else '❌'}")
     await update.effective_chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML)
@@ -309,7 +321,7 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try: await context.bot.send_message(chat_id=tid, text=f"🔑 Your access is extended until {until.strftime('%Y-%m-%d %H:%M UTC')}.")
     except Exception: pass
 
-async def block_cmd(update: Update, Context: ContextTypes.DEFAULT_TYPE):
+async def block_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id): return
     if not update.message or not update.message.text: return
     parts = update.message.text.split()
@@ -336,7 +348,9 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: await update.effective_chat.send_message("Usage: /broadcast <text>"); return
     txt = " ".join(context.args)
     with get_session() as s:
-        ids = [r[0] for r in s.execute(text('SELECT telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()]
+        s.execute(text('SELECT telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE'))
+        rows = s.fetchall()
+        ids = [r["telegram_id"] for r in rows]
     for tid in ids:
         try: await context.bot.send_message(chat_id=tid, text=txt, parse_mode=ParseMode.HTML)
         except Exception: pass
@@ -361,8 +375,9 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with get_session() as s:
             u = get_or_create_user_by_tid(s, q.from_user.id)
             kws = list_keywords(u.id)
-            row = s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'), {"id": u.id}).fetchone()
-        txt = settings_text(kws, row[0], row[1], row[2], row[3], row[4], bool(row[5]), bool(row[6]))
+            s.execute(text('SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked FROM "user" WHERE id=:id'), {"id": u.id})
+            row = s.fetchone()
+        txt = settings_text(kws, row["countries"], row["proposal_template"], row["trial_start"], row["trial_end"], row["license_until"], bool(row["is_active"]), bool(row["is_blocked"]))
         await q.message.reply_text(txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True); await q.answer(); return
 
     if data == "act:help":
@@ -371,7 +386,6 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "act:saved":
         try:
-            # Ensure table & fetch user rows
             from sqlalchemy import text as _t
             from db import get_session as _gs, get_or_create_user_by_tid as _get_user
 
@@ -387,18 +401,19 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 """))
                 uobj = _get_user(s, q.from_user.id)
-                rows = s.execute(
+                s.execute(
                     _t("SELECT id, title, url, description FROM saved_job WHERE user_id=:uid ORDER BY saved_at DESC LIMIT 30"),
                     {"uid": uobj.id}
-                ).fetchall()
+                )
+                rows = s.fetchall()
 
             if not rows:
                 await q.message.reply_text("Saved list: (empty)")
                 await q.answer()
                 return
 
-            # Show each saved as a normal card
-            for rid, t, u, d in rows:
+            for r in rows:
+                rid, t, u, d = r["id"], r["title"], r["url"], r["description"]
                 card_html = (d or "").strip()
                 if not card_html:
                     title_txt = (t or "").strip() or "(no title)"
@@ -444,7 +459,7 @@ async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def kw_clear_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    if not q.data.startswith("kw:clear:"): return await q.answer()
+    if not (q.data or "").startswith("kw:clear:"): return await q.answer()
     agree = q.data.split(":")[-1] == "yes"
     if not agree:
         await q.message.reply_text("Cancelled."); return await q.answer()
@@ -624,12 +639,14 @@ async def incoming_message_router(update: Update, context: ContextTypes.DEFAULT_
             pass
     await update.message.reply_text("Thanks! Your message was forwarded to the admin 👌")
 
-# ---------- Expiry reminders ----------
+# ---------- Expiry reminders (FIXED for psycopg2 session) ----------
 async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc); soon = now + timedelta(hours=24)
     with get_session() as s:
-        rows = s.execute(text('SELECT telegram_id, COALESCE(license_until, trial_end) FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
-    for tid, expiry in rows:
+        s.execute(text('SELECT telegram_id, COALESCE(license_until, trial_end) AS expiry FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE'))
+        rows = s.fetchall()
+    for r in rows:
+        tid, expiry = r["telegram_id"], r["expiry"]
         if not expiry: continue
         if getattr(expiry, "tzinfo", None) is None: expiry = expiry.replace(tzinfo=timezone.utc)
         if now < expiry <= soon:
