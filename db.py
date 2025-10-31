@@ -4,12 +4,13 @@
 import os
 import psycopg2
 import psycopg2.extras
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
 class PsycopgSession:
+    """Context-managed psycopg2 connection + cursor helper."""
     def __init__(self):
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL is not set")
@@ -50,16 +51,17 @@ class PsycopgSession:
 
 
 def get_session() -> PsycopgSession:
+    """Returns a new DB session."""
     return PsycopgSession()
 
 
 # --------------------------------------------------------------------------------------
-# SCHEMA (must NOT reference feed_event before it exists)
+# SCHEMA bootstrap
 # --------------------------------------------------------------------------------------
 
 def ensure_schema() -> None:
     with get_session() as s:
-        # 1️⃣ Create "user" table first
+        # user table
         s.execute("""
         CREATE TABLE IF NOT EXISTS "user" (
             id BIGSERIAL PRIMARY KEY,
@@ -84,7 +86,7 @@ def ensure_schema() -> None:
         );
         """)
 
-        # trigger to update updated_at
+        # trigger for updated_at
         s.execute("""
         DO $$
         BEGIN
@@ -107,7 +109,7 @@ def ensure_schema() -> None:
         END$$;
         """)
 
-        # 2️⃣ Ensure feed_event exists before referencing it
+        # feed_event table
         s.execute("""
         CREATE TABLE IF NOT EXISTS feed_event (
             id BIGSERIAL PRIMARY KEY,
@@ -123,7 +125,7 @@ def ensure_schema() -> None:
         );
         """)
 
-        # 3️⃣ Now saved_job (can safely reference feed_event)
+        # saved_job table
         s.execute("""
         CREATE TABLE IF NOT EXISTS saved_job (
             id BIGSERIAL PRIMARY KEY,
@@ -152,23 +154,45 @@ def ensure_schema() -> None:
 # HELPERS
 # --------------------------------------------------------------------------------------
 
-def get_or_create_user_by_tid(telegram_id: int, username: Optional[str] = None) -> dict:
-    with get_session() as s:
-        s.execute('SELECT * FROM "user" WHERE telegram_id = %s;', (telegram_id,))
-        row = s.fetchone()
+def get_or_create_user_by_tid(s_or_tid, maybe_tid: Optional[int] = None, username: Optional[str] = None) -> dict:
+    """
+    Backward compatible:
+      - get_or_create_user_by_tid(session, telegram_id)
+      - get_or_create_user_by_tid(telegram_id)
+    """
+    # detect call style
+    if isinstance(s_or_tid, PsycopgSession):
+        telegram_id = maybe_tid
+        session = s_or_tid
+        close_after = False
+    else:
+        telegram_id = s_or_tid
+        session = get_session()
+        close_after = True
+
+    try:
+        session.execute('SELECT * FROM "user" WHERE telegram_id = %s;', (telegram_id,))
+        row = session.fetchone()
         if row:
-            s.execute(
+            session.execute(
                 'UPDATE "user" SET username = COALESCE(%s, username), is_active = TRUE WHERE telegram_id = %s RETURNING *;',
-                (username, telegram_id)
+                (username, telegram_id),
             )
-            updated = s.fetchone()
-            s.commit()
+            updated = session.fetchone()
+            session.commit()
             return dict(updated)
 
-        s.execute(
+        session.execute(
             'INSERT INTO "user" (telegram_id, username, is_active) VALUES (%s, %s, TRUE) RETURNING *;',
-            (telegram_id, username)
+            (telegram_id, username),
         )
-        created = s.fetchone()
-        s.commit()
+        created = session.fetchone()
+        session.commit()
         return dict(created)
+    finally:
+        if close_after:
+            try:
+                session.cur.close()
+                session.conn.close()
+            except Exception:
+                pass
