@@ -145,6 +145,23 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings_text(kws, row["countries"], row["proposal_template"], row["trial_start"],
                       row["trial_end"], row["license_until"], bool(row["is_active"]), bool(row["is_blocked"])),
         parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+# ---------- Help ----------
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.effective_chat.send_message(
+            HELP_EN + help_footer(STATS_WINDOW_HOURS),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
+        )
+    except Exception as e:
+        log.error(f"help_cmd failed: {e}")
+        try:
+            await update.effective_chat.send_message("⚠️ Help unavailable, please try again later.")
+        except:
+            pass
+
 # ---------- Admin ----------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
