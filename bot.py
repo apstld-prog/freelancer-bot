@@ -223,6 +223,49 @@ async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text("Clear ALL your keywords?", reply_markup=kb)
 
+# ---------- Self-test ----------
+async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        job_text = (
+            "<b>Email Signature from Existing Logo</b>\n"
+            "<b>Budget:</b> 10.0–30.0 USD\n"
+            "<b>Source:</b> Freelancer\n"
+            "<b>Match:</b> logo\n"
+            "✏️ Please create an editable version of the email signature based on the provided logo.\n"
+        )
+        url = "https://www.freelancer.com/projects/sample"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📄 Proposal", url=url),
+             InlineKeyboardButton("🔗 Original", url=url)],
+            [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+             InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
+        ])
+        await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await asyncio.sleep(0.4)
+
+        pph_text = (
+            "<b>Logo Design for New Startup</b>\n"
+            "<b>Budget:</b> 50.0–120.0 GBP (~$60–$145 USD)\n"
+            "<b>Source:</b> PeoplePerHour\n"
+            "<b>Match:</b> logo\n"
+            "🎨 Create a modern, minimal logo for a UK startup. Provide vector files.\n"
+        )
+        pph_url = "https://www.peopleperhour.com/freelance-jobs/sample"
+        pph_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📄 Proposal", url=pph_url),
+             InlineKeyboardButton("🔗 Original", url=pph_url)],
+            [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+             InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
+        ])
+        await update.effective_chat.send_message(pph_text, parse_mode=ParseMode.HTML, reply_markup=pph_kb)
+        ensure_feed_events_schema()
+        record_event("freelancer")
+        record_event("peopleperhour")
+        log.info("selftest: recorded freelancer + peopleperhour")
+    except Exception as e:
+        log.exception("selftest failed: %s", e)
+        await update.effective_chat.send_message("⚠️ Self-test failed.")
+
 # ---------- Admin ----------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
