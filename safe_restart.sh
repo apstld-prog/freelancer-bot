@@ -4,39 +4,37 @@ set -e
 echo "=========================================================="
 echo "🚀 SAFE RESTART — FREELANCER BOT (Render-Safe Workers)"
 echo "=========================================================="
-echo "$(date -u)"
 
-cd ~/project/src
+TIMESTAMP=$(date +"%Y-%m-%d_%H%M")
+LOG_DIR="./logs"
+LOG_FILE="$LOG_DIR/restart_${TIMESTAMP}.log"
 
-# Ensure logs directory exists (persistent)
-mkdir -p ~/project/src/logs
-LOGFILE="~/project/src/logs/restart_$(date -u +%Y-%m-%d_%H%M).log"
+# ensure logs directory
+mkdir -p "$LOG_DIR"
 
-echo "👉 Stopping existing worker processes..."
-pkill -f "python3 -u workers/" || true
-echo "✅ Workers stopped." | tee -a $LOGFILE
+{
+  echo "$(date)"
+  echo
+  echo "👉 Stopping existing worker processes..."
+  pkill -f "workers/worker_freelancer.py" 2>/dev/null || true
+  pkill -f "workers/worker_pph.py" 2>/dev/null || true
+  pkill -f "workers/worker_skywalker.py" 2>/dev/null || true
+  echo "✅ Workers stopped."
+  echo
 
-echo "" | tee -a $LOGFILE
-echo "👉 Starting workers..." | tee -a $LOGFILE
+  echo "👉 Starting new workers..."
+  nohup python3 -u workers/worker_freelancer.py > ./logs/worker_freelancer.out 2>&1 &
+  nohup python3 -u workers/worker_pph.py > ./logs/worker_pph.out 2>&1 &
+  nohup python3 -u workers/worker_skywalker.py > ./logs/worker_skywalker.out 2>&1 &
+  echo "✅ Workers started."
+  echo
 
-# Start all worker scripts
-nohup python3 -u workers/worker_freelancer.py >> ~/project/src/logs/worker_freelancer.log 2>&1 &
-nohup python3 -u workers/worker_pph.py >> ~/project/src/logs/worker_pph.log 2>&1 &
-nohup python3 -u workers/worker_skywalker.py >> ~/project/src/logs/worker_skywalker.log 2>&1 &
+  echo "👉 Checking active processes..."
+  ps -ef | grep "workers/" | grep -v grep || true
+  echo
+  echo "=========================================================="
+  echo "✅ SAFE RESTART COMPLETE — Workers relaunched safely."
+  echo "Logs saved at $LOG_FILE"
+  echo "=========================================================="
 
-sleep 3
-echo "👉 Running workers:" | tee -a $LOGFILE
-ps aux | grep "python3 -u workers/" | grep -v grep | tee -a $LOGFILE
-
-echo "" | tee -a $LOGFILE
-echo "✅ SAFE RESTART COMPLETE — Workers relaunched safely." | tee -a $LOGFILE
-echo "Logs saved at $LOGFILE"
-echo "=========================================================="
-
-# Optional health check
-echo "👉 Checking FastAPI health endpoint..."
-if curl -fsS http://127.0.0.1:10000/health >/dev/null 2>&1; then
-  echo "✅ FastAPI service is healthy" | tee -a $LOGFILE
-else
-  echo "⚠️ Health check failed or endpoint not available" | tee -a $LOGFILE
-fi
+} | tee "$LOG_FILE"
