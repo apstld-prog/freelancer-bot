@@ -381,12 +381,15 @@ async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
                     text=f"⏰ Reminder: your access expires in about {hours_left} hours (on {expiry.strftime('%Y-%m-%d %H:%M UTC')}).")
             except Exception: pass
 
-# ---------- Build Application ----------
+# ---------- Build app ----------
 def build_application() -> Application:
-    ensure_schema(); ensure_feed_events_schema(); ensure_keyword_unique()
-    app=ApplicationBuilder().token(BOT_TOKEN).build()
+    ensure_schema()
+    ensure_feed_events_schema()
+    ensure_keyword_unique()
 
-    # Public commands
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # public
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("whoami", whoami_cmd))
@@ -396,7 +399,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
 
-    # Admin
+    # admin
     app.add_handler(CommandHandler("users", users_cmd))
     app.add_handler(CommandHandler("grant", grant_cmd))
     app.add_handler(CommandHandler("block", block_cmd))
@@ -405,12 +408,40 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
     app.add_handler(CommandHandler("feetstatus", feedstatus_cmd))
 
-    # Scheduler
-    if JobQueue is not None:
-        jq=app.job_queue or JobQueue()
-        if app.job_queue is None: jq.set_application(app)
-        jq.run_repeating(notify_expiring_job,interval=3600,first=60)
-        log.info("Scheduler: JobQueue active")
-    else:
-        log.warning("JobQueue unavailable — expiry loop skipped")
+    # ---------- FIXED CALLBACK HANDLERS ----------
+    app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))
+    app.add_handler(CallbackQueryHandler(kw_clear_confirm_cb, pattern=r"^kw:clear:(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(admin_action_cb, pattern=r"^adm:(reply|decline|grant):"))
+    app.add_handler(CallbackQueryHandler(saved_action_cb, pattern=r"^saved:del:\d+$"))
+    app.add_handler(CallbackQueryHandler(job_action_cb, pattern=r"^job:(save|delete)$"))
+
+    # text router (continuous chat)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, incoming_message_router))
+
+    # scheduler
+    try:
+        if JobQueue is not None:
+            jq = app.job_queue or JobQueue()
+            if app.job_queue is None:
+                jq.set_application(app)
+            jq.run_repeating(notify_expiring_job, interval=3600, first=60)
+            log.info("Scheduler: JobQueue active ✅")
+        else:
+            raise RuntimeError("no jobqueue")
+    except Exception:
+        try:
+            app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
+            log.info("Scheduler: fallback loop started ✅")
+        except Exception:
+            app.bot_data["start_fallback_on_first_update"] = True
+            log.info("Scheduler: fallback loop will start on first update")
+
+    # ---------- FIX: Render callback readiness ----------
+    async def _on_first_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if app.bot_data.pop("start_fallback_on_first_update", False):
+            await _ensure_fallback_running(app)
+        return None
+
+    app.add_handler(MessageHandler(filters.ALL, _on_first_update))
+    log.info("✅ Application fully built with all handlers.")
     return app

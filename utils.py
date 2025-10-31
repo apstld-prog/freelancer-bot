@@ -2,10 +2,8 @@ import os
 import json
 import logging
 from datetime import datetime, timezone
-
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
 from currency_usd import usd_line
 from humanize import naturaltime
 
@@ -85,8 +83,9 @@ def _build_markup(job: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔗 Original", url=original_url),
         ],
         [
-            InlineKeyboardButton("⭐ Save", callback_data=f"save:{job_id}"),
-            InlineKeyboardButton("🗑 Delete", callback_data=f"delete:{job_id}"),
+            # ✅ FIXED callback prefix to match job_action_cb
+            InlineKeyboardButton("⭐ Save", callback_data=f"job:save:{job_id}"),
+            InlineKeyboardButton("🗑 Delete", callback_data=f"job:delete:{job_id}"),
         ],
     ]
     return InlineKeyboardMarkup(buttons)
@@ -103,19 +102,19 @@ def _build_message(job: dict) -> tuple[str, InlineKeyboardMarkup]:
     usd_str = usd_line(budget_amt, budget_cur)
 
     text = (
-        f"💼 {title}\n"
-        f"💰 Budget: {usd_str}\n"
-        f"🌍 Source: {platform}\n"
-        f"🔑 Match: {keyword}\n"
-        f"🕒 Posted: {_time_ago(created_at)}\n\n"
+        f"<b>💼 {title}</b>\n"
+        f"💰 <b>Budget:</b> {usd_str}\n"
+        f"🌍 <b>Source:</b> {platform}\n"
+        f"🔑 <b>Match:</b> {keyword}\n"
+        f"🕒 <b>Posted:</b> {_time_ago(created_at)}\n\n"
         f"✏️ {desc}\n\n"
-        f"📝 Requirements:\n{reqs}"
+        f"📝 <b>Requirements:</b>\n{reqs}"
     )
     markup = _build_markup(job)
     return text, markup
 
 # =========================================================
-# Telegram sending (backward-compatible signature)
+# Telegram sending
 # =========================================================
 async def send_job_to_user(*args):
     """
@@ -137,7 +136,8 @@ async def send_job_to_user(*args):
     chat_id = int(user_id)
     if bot is not None:
         try:
-            await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=False)
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup,
+                                   parse_mode="HTML", disable_web_page_preview=False)
             return
         except Exception as e:
             logger.warning(f"[send_job_to_user/PTB] Failed to send to {chat_id}: {e}")
