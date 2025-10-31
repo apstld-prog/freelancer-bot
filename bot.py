@@ -266,6 +266,59 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.exception("selftest failed: %s", e)
         await update.effective_chat.send_message("⚠️ Self-test failed.")
 
+# ---------- Saved jobs ----------
+async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show last saved jobs for the user without overwriting the main menu."""
+    try:
+        user_id = update.effective_user.id
+        with get_session() as s:
+            s.execute(
+                text(
+                    """
+                    SELECT sj.job_id, sj.saved_at,
+                           je.platform, je.title, je.description,
+                           je.affiliate_url, je.original_url,
+                           je.budget_amount, je.budget_currency,
+                           je.budget_usd, je.created_at
+                    FROM saved_job sj
+                    LEFT JOIN job_event je ON je.id = sj.job_id
+                    WHERE sj.user_id = (SELECT id FROM "user" WHERE telegram_id = :tid)
+                    ORDER BY sj.saved_at DESC
+                    LIMIT 10
+                    """
+                ),
+                {"tid": user_id},
+            )
+            rows = s.fetchall()
+
+        if not rows:
+            await update.effective_chat.send_message("💾 You have no saved jobs yet.")
+            return
+
+        lines = ["<b>💾 Your last saved jobs:</b>"]
+        for r in rows:
+            title = r["title"] or "(no title)"
+            platform = r["platform"] or "?"
+            posted = r["created_at"].strftime("%Y-%m-%d %H:%M") if r["created_at"] else "?"
+            budget = (
+                f"{r['budget_amount']} {r['budget_currency']}"
+                if r["budget_amount"] and r["budget_currency"]
+                else "N/A"
+            )
+            usd = f" (~${r['budget_usd']:.2f})" if r["budget_usd"] else ""
+            link = r["affiliate_url"] or r["original_url"] or ""
+            lines.append(
+                f"• <b>{title}</b>\n💰 {budget}{usd}\n🌍 {platform} | ⏱ {posted}\n🔗 <a href='{link}'>Open</a>"
+            )
+
+        await update.effective_chat.send_message(
+            "\n\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        log.exception("saved_cmd failed: %s", e)
+        await update.effective_chat.send_message("⚠️ Could not load saved jobs.")
+
 # ---------- Admin ----------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
