@@ -1,8 +1,10 @@
 import logging
 from typing import Optional
+from datetime import datetime, timedelta, timezone
 from db import get_session
 
 logger = logging.getLogger("db_events")
+
 
 def ensure_feed_events_schema() -> None:
     with get_session() as s:
@@ -52,20 +54,25 @@ def ensure_feed_events_schema() -> None:
         """)
         s.commit()
 
+
 def record_event(
     platform: str,
-    title: str,
-    description: Optional[str],
-    affiliate_url: Optional[str],
-    original_url: str,
-    budget_amount: Optional[float],
-    budget_currency: Optional[str],
-    budget_usd: Optional[float],
-    created_at: Optional[str],
-    dedup_key: Optional[str],
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    affiliate_url: Optional[str] = None,
+    original_url: Optional[str] = None,
+    budget_amount: Optional[float] = None,
+    budget_currency: Optional[str] = None,
+    budget_usd: Optional[float] = None,
+    created_at: Optional[str] = None,
+    dedup_key: Optional[str] = None,
 ) -> Optional[int]:
+    """Insert feed_event safely even if only platform is provided."""
     with get_session() as s:
         try:
+            if not dedup_key:
+                dedup_key = f"{platform}:{original_url or datetime.now(timezone.utc).isoformat()}"
+
             s.execute(
                 """
                 INSERT INTO feed_event (
@@ -78,8 +85,8 @@ def record_event(
                 """,
                 (
                     platform,
-                    title,
-                    description,
+                    title or "(selftest event)",
+                    description or "(no description)",
                     affiliate_url,
                     original_url,
                     budget_amount,
@@ -97,15 +104,23 @@ def record_event(
             s.conn.rollback()
             return None
 
-def get_platform_stats() -> dict:
+
+def get_platform_stats(window_hours: int = 24) -> dict:
+    """Return per-platform stats within the given time window (hours)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
     with get_session() as s:
-        s.execute("""
-        SELECT platform, COUNT(*) AS count, MAX(fetched_at) AS latest
-        FROM feed_event
-        GROUP BY platform
-        ORDER BY platform;
-        """)
+        s.execute(
+            """
+            SELECT platform, COUNT(*) AS count, MAX(fetched_at) AS latest
+            FROM feed_event
+            WHERE fetched_at >= %s
+            GROUP BY platform
+            ORDER BY platform;
+            """,
+            (cutoff,),
+        )
         rows = s.fetchall()
+
     stats = {}
     for r in rows:
         stats[r["platform"]] = {
@@ -113,6 +128,7 @@ def get_platform_stats() -> dict:
             "latest": str(r["latest"]) if r["latest"] else None,
         }
     return stats
+
 
 # Συμβατότητα με legacy workers
 def save_feed_event(platform, title, description, original_url, budget, currency):
@@ -126,11 +142,12 @@ def save_feed_event(platform, title, description, original_url, budget, currency
             budget_amount=budget,
             budget_currency=currency,
             budget_usd=None,
-            created_at=None,  # COALESCE σε NOW()
+            created_at=None,
             dedup_key=f"{platform}:{original_url}",
         )
     except Exception as e:
         logger.error(f"[save_feed_event] {e}", exc_info=True)
+
 
 if __name__ == "__main__":
     ensure_feed_events_schema()
