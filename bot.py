@@ -1,4 +1,4 @@
-# bot.py — EN-only, add via /addkeyword only, robust keywords, admin panel, selftest
+# bot.py — EN-only, robust admin + keyword system, corrected /start for PostgreSQL
 import os, logging, asyncio, re
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -113,13 +113,7 @@ def settings_text(keywords: List[str], countries: str|None, proposal_template: s
         "<i>For extension, contact the admin.</i>"
     )
 
-# ---------- Commands ----------
-async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"Your Telegram ID: <code>{update.effective_user.id}</code>", parse_mode=ParseMode.HTML
-    )
-
-# ✅ FIXED PostgreSQL-safe /start
+# ---------- /start (PostgreSQL safe) ----------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
@@ -128,7 +122,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {"id": u.id},
         )
         s.execute(
-            'UPDATE "user" SET trial_end = COALESCE(trial_end, (NOW() AT TIME ZONE \'UTC\') + (%(days)s || \' days\')::interval) WHERE id = %(id)s;',
+            'UPDATE "user" SET trial_end = COALESCE(trial_end, (NOW() AT TIME ZONE \'UTC\') + make_interval(days => %(days)s)) WHERE id = %(id)s;',
             {"id": u.id, "days": TRIAL_DAYS},
         )
         s.execute(
@@ -138,6 +132,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = s.fetchone()
         expiry = row["expiry"] if row else None
         s.commit()
+
     await update.effective_chat.send_message(
         welcome_text(expiry if isinstance(expiry, datetime) else None),
         parse_mode=ParseMode.HTML,
@@ -148,6 +143,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
+
+# ---------- whoami ----------
+async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"Your Telegram ID: <code>{update.effective_user.id}</code>", parse_mode=ParseMode.HTML
+    )
+
 # ---------- My Settings ----------
 async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
@@ -176,7 +178,7 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True,
     )
 
-# ---------- Keyword Management ----------
+# ---------- Keyword management ----------
 def _parse_keywords(raw: str) -> List[str]:
     parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
     seen, out = set(), []
@@ -247,8 +249,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
-
-# ---------- Selftest ----------
+# ---------- Self-test ----------
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         job_text = (
@@ -259,21 +260,13 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✏️ Please create an editable version of the email signature based on the provided logo.\n"
         )
         url = "https://www.freelancer.com/projects/sample"
-        kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("📄 Proposal", url=url),
-                    InlineKeyboardButton("🔗 Original", url=url),
-                ],
-                [
-                    InlineKeyboardButton("⭐ Save", callback_data="job:save"),
-                    InlineKeyboardButton("🗑️ Delete", callback_data="job:delete"),
-                ],
-            ]
-        )
-        await update.effective_chat.send_message(
-            job_text, parse_mode=ParseMode.HTML, reply_markup=kb
-        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📄 Proposal", url=url),
+             InlineKeyboardButton("🔗 Original", url=url)],
+            [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+             InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
+        ])
+        await update.effective_chat.send_message(job_text, parse_mode=ParseMode.HTML, reply_markup=kb)
         await asyncio.sleep(0.4)
 
         pph_text = (
@@ -284,115 +277,116 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🎨 Create a modern, minimal logo for a UK startup. Provide vector files.\n"
         )
         pph_url = "https://www.peopleperhour.com/freelance-jobs/sample"
-        pph_kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("📄 Proposal", url=pph_url),
-                    InlineKeyboardButton("🔗 Original", url=pph_url),
-                ],
-                [
-                    InlineKeyboardButton("⭐ Save", callback_data="job:save"),
-                    InlineKeyboardButton("🗑️ Delete", callback_data="job:delete"),
-                ],
-            ]
-        )
-        await update.effective_chat.send_message(
-            pph_text, parse_mode=ParseMode.HTML, reply_markup=pph_kb
-        )
-        try:
-            ensure_feed_events_schema()
-            record_event("freelancer")
-            record_event("peopleperhour")
-            log.info("selftest: recorded freelancer + peopleperhour")
-        except Exception as ie:
-            log.exception("selftest: could not record feed_event: %s", ie)
+        pph_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📄 Proposal", url=pph_url),
+             InlineKeyboardButton("🔗 Original", url=pph_url)],
+            [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+             InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
+        ])
+        await update.effective_chat.send_message(pph_text, parse_mode=ParseMode.HTML, reply_markup=pph_kb)
+        ensure_feed_events_schema()
+        record_event("freelancer")
+        record_event("peopleperhour")
+        log.info("selftest: recorded freelancer + peopleperhour")
     except Exception as e:
         log.exception("selftest failed: %s", e)
 
 # ---------- Admin ----------
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_user(update.effective_user.id):
-        await update.message.reply_text("You are not an admin.")
-        return
+        await update.message.reply_text("You are not an admin."); return
     with get_session() as s:
-        s.execute(
-            text(
-                'SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200'
-            )
-        )
+        s.execute(text('SELECT id,telegram_id,trial_end,license_until,is_active,is_blocked FROM "user" ORDER BY id DESC LIMIT 200'))
         rows = s.fetchall()
     lines = ["<b>Users</b>"]
     for r in rows:
-        uid, tid = r["id"], r["telegram_id"]
-        trial_end, lic = r["trial_end"], r["license_until"]
-        act, blk = r["is_active"], r["is_blocked"]
+        uid,tid = r["id"], r["telegram_id"]
+        trial_end,lic = r["trial_end"], r["license_until"]
+        act,blk = r["is_active"], r["is_blocked"]
         kwc = count_keywords(uid)
-        lines.append(
-            f"• <a href=\"tg://user?id={tid}\">{tid}</a> — kw:{kwc} | trial:{trial_end} | lic:{lic} | "
-            f"A:{'✅' if act else '❌'} B:{'✅' if blk else '❌'}"
-        )
+        lines.append(f"• <a href=\"tg://user?id={tid}\">{tid}</a> — kw:{kwc} | trial:{trial_end} | lic:{lic} | A:{'✅' if act else '❌'} B:{'✅' if blk else '❌'}")
     await update.effective_chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML)
-# ---------- Feed Status ----------
+
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id):
-        return
+    if not is_admin_user(update.effective_user.id): return
     try:
         stats = get_platform_stats(STATS_WINDOW_HOURS) or {}
     except Exception as e:
-        await update.effective_chat.send_message(f"Feed status unavailable: {e}")
-        return
+        await update.effective_chat.send_message(f"Feed status unavailable: {e}"); return
     if not stats:
-        await update.effective_chat.send_message(
-            f"No events in the last {STATS_WINDOW_HOURS} hours."
-        )
-        return
-    await update.effective_chat.send_message(
-        "📊 Feed status (last %dh):\n%s"
-        % (STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k, v in stats.items()]))
-    )
+        await update.effective_chat.send_message(f"No events in the last {STATS_WINDOW_HOURS} hours."); return
+    await update.effective_chat.send_message("📊 Feed status (last %dh):\n%s" %
+        (STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k,v in stats.items()])))
 
 async def feetstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await feedstatus_cmd(update, context)
 
-# ---------- Expiry reminders ----------
-async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(timezone.utc)
-    soon = now + timedelta(hours=24)
+async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update.effective_user.id): return
+    if len(context.args)<2:
+        await update.effective_chat.send_message("Usage: /grant <id> <days>"); return
+    tid=int(context.args[0]); days=int(context.args[1])
+    until=datetime.now(timezone.utc)+timedelta(days=days)
     with get_session() as s:
-        s.execute(
-            text(
-                'SELECT telegram_id, COALESCE(license_until, trial_end) AS expiry FROM "user" '
-                'WHERE is_active=TRUE AND is_blocked=FALSE'
-            )
-        )
-        rows = s.fetchall()
+        s.execute(text('UPDATE "user" SET license_until=:dt WHERE telegram_id=:tid'),{"dt":until,"tid":tid}); s.commit()
+    await update.effective_chat.send_message(f"✅ Granted until {until.isoformat()} for {tid}.")
+    try: await context.bot.send_message(chat_id=tid,text=f"🔑 Your access is extended until {until.strftime('%Y-%m-%d %H:%M UTC')}.")
+    except Exception: pass
+
+async def block_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update.effective_user.id): return
+    if len(update.message.text.split())<2:
+        await update.effective_chat.send_message("Usage: /block <id>"); return
+    tid=int(update.message.text.split()[1])
+    with get_session() as s:
+        s.execute(text('UPDATE "user" SET is_blocked=TRUE WHERE telegram_id=:tid'),{"tid":tid}); s.commit()
+    await update.effective_chat.send_message(f"⛔ Blocked {tid}.")
+
+async def unblock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update.effective_user.id): return
+    if len(update.message.text.split())<2:
+        await update.effective_chat.send_message("Usage: /unblock <id>"); return
+    tid=int(update.message.text.split()[1])
+    with get_session() as s:
+        s.execute(text('UPDATE "user" SET is_blocked=FALSE WHERE telegram_id=:tid'),{"tid":tid}); s.commit()
+    await update.effective_chat.send_message(f"✅ Unblocked {tid}.")
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update.effective_user.id): return
+    if not context.args:
+        await update.effective_chat.send_message("Usage: /broadcast <text>"); return
+    txt=" ".join(context.args)
+    with get_session() as s:
+        s.execute(text('SELECT telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE'))
+        rows=s.fetchall()
+        ids=[r["telegram_id"] for r in rows]
+    for tid in ids:
+        try: await context.bot.send_message(chat_id=tid,text=txt,parse_mode=ParseMode.HTML)
+        except Exception: pass
+    await update.effective_chat.send_message(f"📣 Broadcast sent to {len(ids)} users.")
+# ---------- Expiry reminders + scheduler ----------
+async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
+    now=datetime.now(timezone.utc); soon=now+timedelta(hours=24)
+    with get_session() as s:
+        s.execute(text('SELECT telegram_id,COALESCE(license_until,trial_end) AS expiry FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE'))
+        rows=s.fetchall()
     for r in rows:
-        tid, expiry = r["telegram_id"], r["expiry"]
-        if not expiry:
-            continue
-        if getattr(expiry, "tzinfo", None) is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-        if now < expiry <= soon:
+        tid,expiry=r["telegram_id"],r["expiry"]
+        if not expiry: continue
+        if getattr(expiry,"tzinfo",None) is None: expiry=expiry.replace(tzinfo=timezone.utc)
+        if now<expiry<=soon:
             try:
-                hours_left = int((expiry - now).total_seconds() // 3600)
-                await context.bot.send_message(
-                    chat_id=tid,
-                    text=(
-                        f"⏰ Reminder: your access expires in about {hours_left} hours "
-                        f"(on {expiry.strftime('%Y-%m-%d %H:%M UTC')})."
-                    ),
-                )
-            except Exception:
-                pass
+                hours_left=int((expiry-now).total_seconds()//3600)
+                await context.bot.send_message(chat_id=tid,
+                    text=f"⏰ Reminder: your access expires in about {hours_left} hours (on {expiry.strftime('%Y-%m-%d %H:%M UTC')}).")
+            except Exception: pass
 
 # ---------- Build Application ----------
 def build_application() -> Application:
-    ensure_schema()
-    ensure_feed_events_schema()
-    ensure_keyword_unique()
+    ensure_schema(); ensure_feed_events_schema(); ensure_keyword_unique()
+    app=ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
+    # Public commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("whoami", whoami_cmd))
@@ -402,17 +396,21 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
     app.add_handler(CommandHandler("selftest", selftest_cmd))
 
+    # Admin
     app.add_handler(CommandHandler("users", users_cmd))
+    app.add_handler(CommandHandler("grant", grant_cmd))
+    app.add_handler(CommandHandler("block", block_cmd))
+    app.add_handler(CommandHandler("unblock", unblock_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("feedstatus", feedstatus_cmd))
     app.add_handler(CommandHandler("feetstatus", feedstatus_cmd))
 
+    # Scheduler
     if JobQueue is not None:
-        jq = app.job_queue or JobQueue()
-        if app.job_queue is None:
-            jq.set_application(app)
-        jq.run_repeating(notify_expiring_job, interval=3600, first=60)
+        jq=app.job_queue or JobQueue()
+        if app.job_queue is None: jq.set_application(app)
+        jq.run_repeating(notify_expiring_job,interval=3600,first=60)
         log.info("Scheduler: JobQueue active")
     else:
         log.warning("JobQueue unavailable — expiry loop skipped")
-
     return app
