@@ -21,8 +21,6 @@ except Exception:
 
 from sqlalchemy import text
 
-from db import db
-
 # --- project imports
 from db import ensure_schema, get_session, get_or_create_user_by_tid
 from config import ADMIN_IDS, TRIAL_DAYS, STATS_WINDOW_HOURS
