@@ -587,74 +587,74 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = q.message
     data = q.data
 
-if data == "job:save":
-    try:
-        with get_session() as s:
-            u = get_or_create_user_by_tid(s, update.effective_user.id)
+    if data == "job:save":
+        try:
+            with get_session() as s:
+                u = get_or_create_user_by_tid(s, update.effective_user.id)
 
-            # Extract safely
-            text_html = (
-                getattr(msg, "text_html", None)
-                or getattr(msg, "caption_html", None)
-                or getattr(msg, "text", None)
-                or getattr(msg, "caption", None)
-                or ""
-            )
-
-            title = _extract_card_title(text_html)
-            dedup = f"manual::{abs(hash(title)) % 10000000}"
-
-            original_url = ""
-            try:
-                if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
-                    first_row = msg.reply_markup.inline_keyboard[0]
-                    if len(first_row) > 1 and getattr(first_row[1], "url", None):
-                        original_url = first_row[1].url or ""
-                    elif len(first_row) >= 1 and getattr(first_row[0], "url", None):
-                        original_url = first_row[0].url or ""
-            except Exception:
-                pass
-
-            # Insert job
-            je = s.execute(text("""
-                INSERT INTO job_event (
-                    platform, title, description, affiliate_url, original_url,
-                    budget_amount, budget_currency, budget_usd, created_at, dedup_key
+                # Extract safely
+                text_html = (
+                    getattr(msg, "text_html", None)
+                    or getattr(msg, "caption_html", None)
+                    or getattr(msg, "text", None)
+                    or getattr(msg, "caption", None)
+                    or ""
                 )
-                VALUES (:p, :t, :d, :a, :o, :ba, :bc, :bu, NOW() AT TIME ZONE 'UTC', :dk)
-                ON CONFLICT (dedup_key) DO UPDATE SET title = EXCLUDED.title
-                RETURNING id
-            """), {
-                "p": "manual",
-                "t": title,
-                "d": text_html,
-                "a": original_url,
-                "o": original_url,
-                "ba": None,
-                "bc": "USD",
-                "bu": None,
-                "dk": dedup
-            }).fetchone()
 
-            s.execute(
-                text("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
-                {"u": u.id, "j": je["id"]}
+                title = _extract_card_title(text_html)
+                dedup = f"manual::{abs(hash(title)) % 10000000}"
+
+                original_url = ""
+                try:
+                    if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
+                        first_row = msg.reply_markup.inline_keyboard[0]
+                        if len(first_row) > 1 and getattr(first_row[1], "url", None):
+                            original_url = first_row[1].url or ""
+                        elif len(first_row) >= 1 and getattr(first_row[0], "url", None):
+                            original_url = first_row[0].url or ""
+                except Exception:
+                    pass
+
+                # Insert job
+                je = s.execute(text("""
+                    INSERT INTO job_event (
+                        platform, title, description, affiliate_url, original_url,
+                        budget_amount, budget_currency, budget_usd, created_at, dedup_key
+                    )
+                    VALUES (:p, :t, :d, :a, :o, :ba, :bc, :bu, NOW() AT TIME ZONE 'UTC', :dk)
+                    ON CONFLICT (dedup_key) DO UPDATE SET title = EXCLUDED.title
+                    RETURNING id
+                """), {
+                    "p": "manual",
+                    "t": title,
+                    "d": text_html,
+                    "a": original_url,
+                    "o": original_url,
+                    "ba": None,
+                    "bc": "USD",
+                    "bu": None,
+                    "dk": dedup
+                }).fetchone()
+
+                s.execute(
+                    text("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
+                    {"u": u.id, "j": je["id"]}
+                )
+                s.commit()
+
+            await msg.delete()
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="✅ Job saved successfully."
             )
-            s.commit()
 
-        await msg.delete()
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="✅ Job saved successfully."
-        )
-
-    except Exception as e:
-        log.exception("job:save error: %s", e)
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"⚠️ Save failed: {e}"
-        )
-    return
+        except Exception as e:
+            log.exception("job:save error: %s", e)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"⚠️ Save failed: {e}"
+            )
+        return
 
 async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
