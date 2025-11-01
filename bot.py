@@ -591,70 +591,6 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             with get_session() as s:
                 u = get_or_create_user_by_tid(s, update.effective_user.id)
-                s.execute(text("""
-                    CREATE TABLE IF NOT EXISTS saved_job(
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        job_id BIGINT NOT NULL,
-                        saved_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
-                    )
-                """))
-                # Insert dummy record into job_event for selftest jobs
-                je = s.execute(text("""
-                    INSERT INTO job_event(platform, title, description, original_url, created_at)
-                    VALUES('manual', :t, :d, '', NOW() AT TIME ZONE 'UTC')
-                    RETURNING id
-                """), {
-                    "t": msg.text_html or msg.text or "Untitled",
-                    "d": msg.text_html or msg.text or "",
-                }).fetchone()
-                s.execute(
-                    text("INSERT INTO saved_job(user_id, job_id) VALUES(:u,:j)"),
-                    {"u": u.id, "j": je["id"]}
-                )
-                s.commit()
-            await msg.delete()
-        except Exception as e:
-            log.exception("job:save error: %s", e)
-        return
-
-    if data == "job:delete":
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-    q = update.callback_query
-    await q.answer()
-    data = (q.data or "")
-    msg = q.message
-
-    # find "Original" url from keyboard row 0 / col 1 (or 0)
-    original_url = ""
-    try:
-        if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
-            first_row = msg.reply_markup.inline_keyboard[0]
-            # usually [Proposal, Original]
-            if len(first_row) > 1 and getattr(first_row[1], "url", None):
-                original_url = first_row[1].url or ""
-            elif len(first_row) >= 1 and getattr(first_row[0], "url", None):
-                original_url = first_row[0].url or ""
-    except Exception:
-        pass
-
-    text_html = ""
-    try:
-        text_html = (getattr(msg, "text_html", None) or
-                     getattr(msg, "caption_html", None) or
-                     getattr(msg, "text", None) or
-                     getattr(msg, "caption", None) or "")
-    except Exception:
-        pass
-    title = _extract_card_title(text_html)
-
-    if data == "job:save":
-        try:
-            with get_session() as s:
-                u = get_or_create_user_by_tid(s, update.effective_user.id)
 
                 # Ensure tables exist
                 s.execute(text("""
@@ -681,17 +617,18 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 """))
 
-                # Extract clean title + dedup key
+                # Prepare job data
                 title = _extract_card_title(text_html)
                 dedup = f"manual::{abs(hash(title))%10000000}"
 
-                # Insert into job_event safely
+                # Insert the job into job_event
                 je = s.execute(text("""
                     INSERT INTO job_event (
                         platform, title, description, affiliate_url, original_url,
                         budget_amount, budget_currency, budget_usd, created_at, dedup_key
                     )
                     VALUES (:p,:t,:d,:a,:o,:ba,:bc,:bu, NOW() AT TIME ZONE 'UTC', :dk)
+                    ON CONFLICT (dedup_key) DO UPDATE SET title = EXCLUDED.title
                     RETURNING id
                 """), {
                     "p": "manual",
@@ -705,18 +642,25 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "dk": dedup
                 }).fetchone()
 
-                # Link saved_job
+                # Link to saved_job table
                 s.execute(
                     text("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
                     {"u": u.id, "j": je["id"]}
                 )
                 s.commit()
 
-            # Delete the card after saving
             await msg.delete()
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="✅ Job saved successfully."
+            )
 
         except Exception as e:
             log.exception("job:save error: %s", e)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"⚠️ Save failed: {e}"
+            )
         return
 
 async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
