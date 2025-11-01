@@ -235,70 +235,109 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 # Contact / Admin chat
 # =========================================================
-user_contact_state = {}
+def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Reply", callback_data=f"adm:reply:{user_id}"),
+         InlineKeyboardButton("❌ Decline", callback_data=f"adm:decline:{user_id}")],
+        [InlineKeyboardButton("+30d", callback_data=f"adm:grant:{user_id}:30"),
+         InlineKeyboardButton("+90d", callback_data=f"adm:grant:{user_id}:90"),
+         InlineKeyboardButton("+180d", callback_data=f"adm:grant:{user_id}:180"),
+         InlineKeyboardButton("+365d", callback_data=f"adm:grant:{user_id}:365")],
+    ])
 
-async def contact_cmd(update, context):
-    uid = update.effective_user.id
-    user_contact_state[uid] = True
-    await update.effective_chat.send_message("📩 Send a message to the admin below.\nType /cancel to stop.")
+def pair_admin_user(app: Application, admin_id: int, user_id: int) -> None:
+    pairs = app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})
+    pairs["user_to_admin"][user_id] = admin_id
+    pairs["admin_to_user"][admin_id] = user_id
 
-async def message_router(update, context):
-    uid = update.effective_user.id
-    txt = update.message.text
-    if not txt: return
-    if is_admin_user(uid) and txt.startswith("/reply"):
-        parts = txt.split(maxsplit=2)
-        if len(parts) < 3:
-            await update.message.reply_text("Usage: /reply <user_id> <msg>")
-            return
-        to = int(parts[1]); msg = parts[2]
-        await context.bot.send_message(to, f"💬 Admin: {msg}")
-        await update.message.reply_text("✅ Reply sent.")
-        return
-    if is_admin_user(uid): return
-    if user_contact_state.get(uid):
-        for admin in all_admin_ids():
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Reply", callback_data=f"reply:{uid}"),
-                 InlineKeyboardButton("❌ Delete", callback_data=f"decline:{uid}")],
-                [InlineKeyboardButton("+30d", callback_data=f"grant:{uid}:30"),
-                 InlineKeyboardButton("+90d", callback_data=f"grant:{uid}:90"),
-                 InlineKeyboardButton("+180d", callback_data=f"grant:{uid}:180"),
-                 InlineKeyboardButton("+365d", callback_data=f"grant:{uid}:365")]
-            ])
-            await context.bot.send_message(admin, f"📩 <b>New message from user</b>\nID: {uid}\n\n{txt}",
-                                           parse_mode=ParseMode.HTML, reply_markup=kb)
-        await update.message.reply_text("✅ Message sent to admin.")
-        user_contact_state[uid] = False
+def get_paired_admin(app: Application, user_id: int) -> Optional[int]:
+    return app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})["user_to_admin"].get(user_id)
+
+def get_paired_user(app: Application, admin_id: int) -> Optional[int]:
+    return app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})["admin_to_user"].get(admin_id)
+
+def unpair(app: Application, admin_id: Optional[int]=None, user_id: Optional[int]=None):
+    pairs = app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})
+    if admin_id is not None:
+        uid = pairs["admin_to_user"].pop(admin_id, None)
+        if uid is not None: pairs["user_to_admin"].pop(uid, None)
+    if user_id is not None:
+        aid = pairs["user_to_admin"].pop(user_id, None)
+        if aid is not None: pairs["admin_to_user"].pop(aid, None)
+
 # =========================================================
 # Admin Commands / Menu
 # =========================================================
-def admin_menu_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👥 Users", callback_data="admin:users"),
-         InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcast")],
-        [InlineKeyboardButton("📊 Feed Status", callback_data="admin:feedstatus")]
-    ])
-
-async def admin_menu_cmd(update, context):
-    await update.effective_chat.send_message("👑 <b>Admin Menu</b>", parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
-
-async def users_cmd(update, context):
+async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update.effective_user.id):
+        await update.message.reply_text("You are not an admin."); return
     with get_session() as s:
-        rows = s.execute(text("""
-            SELECT telegram_id, username, is_active, is_blocked, trial_end, license_until
-            FROM "user" ORDER BY id DESC LIMIT 20
-        """)).fetchall()
-    if not rows:
-        await update.effective_chat.send_message("No users.")
-        return
-    lines = [
-        f"{r['telegram_id']} | @{r['username'] or '-'} | Active:{'✅' if r['is_active'] else '❌'} | "
-        f"Blocked:{'✅' if r['is_blocked'] else '❌'} | Trial ends:{r['trial_end']:%Y-%m-%d} | "
-        f"License:{r['license_until'] or '—'}"
-        for r in rows
-    ]
-    await update.effective_chat.send_message("\n".join(lines))
+        rows = s.execute(text('SELECT id, telegram_id, trial_end, license_until, is_active, is_blocked FROM "user" ORDER BY id DESC LIMIT 200')).fetchall()
+    lines = ["<b>Users</b>"]
+    for uid, tid, trial_end, lic, act, blk in rows:
+        kwc = count_keywords(uid)
+        lines.append(f"• <a href=\"tg://user?id={tid}\">{tid}</a> — kw:{kwc} | trial:{trial_end} | lic:{lic} | A:{'✅' if act else '❌'} B:{'✅' if blk else '❌'}")
+    await update.effective_chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML)
+
+async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update.effective_user.id): return
+    try:
+        stats = get_platform_stats(STATS_WINDOW_HOURS) or {}
+    except Exception as e:
+        await update.effective_chat.send_message(f"Feed status unavailable: {e}"); return
+    if not stats:
+        await update.effective_chat.send_message(f"No events in the last {STATS_WINDOW_HOURS} hours."); return
+    await update.effective_chat.send_message("📊 Feed status (last %dh):\n%s" % (
+        STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k,v in stats.items()])
+    ))
+
+async def feetstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await feedstatus_cmd(update, context)
+
+async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update.effective_user.id): return
+    if len(context.args) < 2:
+        await update.effective_chat.send_message("Usage: /grant <id> <days>"); return
+    tid = int(context.args[0]); days = int(context.args[1])
+    until = datetime.now(timezone.utc) + timedelta(days=days)
+    with get_session() as s:
+        s.execute(text('UPDATE "user" SET license_until=:dt WHERE telegram_id=:tid'), {"dt": until, "tid": tid}); s.commit()
+    await update.effective_chat.send_message(f"✅ Granted until {until.isoformat()} for {tid}.")
+    try: await context.bot.send_message(chat_id=tid, text=f"🔑 Your access is extended until {until.strftime('%Y-%m-%d %H:%M UTC')}.")
+    except Exception: pass
+
+async def block_cmd(update: Update, Context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update.effective_user.id): return
+    if not update.message or not update.message.text: return
+    parts = update.message.text.split()
+    if len(parts) < 2:
+        await update.effective_chat.send_message("Usage: /block <id>"); return
+    tid = int(parts[1])
+    with get_session() as s:
+        s.execute(text('UPDATE "user" SET is_blocked=TRUE WHERE telegram_id=:tid'), {"tid": tid}); s.commit()
+    await update.effective_chat.send_message(f"⛔ Blocked {tid}.")
+
+async def unblock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update.effective_user.id): return
+    if not update.message or not update.message.text: return
+    parts = update.message.text.split()
+    if len(parts) < 2:
+        await update.effective_chat.send_message("Usage: /unblock <id>"); return
+    tid = int(parts[1])
+    with get_session() as s:
+        s.execute(text('UPDATE "user" SET is_blocked=FALSE WHERE telegram_id=:tid'), {"tid": tid}); s.commit()
+    await update.effective_chat.send_message(f"✅ Unblocked {tid}.")
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_user(update.effective_user.id): return
+    if not context.args: await update.effective_chat.send_message("Usage: /broadcast <text>"); return
+    txt = " ".join(context.args)
+    with get_session() as s:
+        ids = [r[0] for r in s.execute(text('SELECT telegram_id FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()]
+    for tid in ids:
+        try: await context.bot.send_message(chat_id=tid, text=txt, parse_mode=ParseMode.HTML)
+        except Exception: pass
+    await update.effective_chat.send_message(f"📣 Broadcast sent to {len(ids)} users.")
 
 # =========================================================
 # Save/Delete callbacks
@@ -338,6 +377,38 @@ async def menu_action_cb(update, context):
         await feedstatus_cmd(update, context)
     else:
         await q.message.chat.send_message("❌ Unknown action.")
+
+# ---------- Expiry reminders ----------
+async def notify_expiring_job(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(timezone.utc); soon = now + timedelta(hours=24)
+    with get_session() as s:
+        rows = s.execute(text('SELECT telegram_id, COALESCE(license_until, trial_end) FROM "user" WHERE is_active=TRUE AND is_blocked=FALSE')).fetchall()
+    for tid, expiry in rows:
+        if not expiry: continue
+        if getattr(expiry, "tzinfo", None) is None: expiry = expiry.replace(tzinfo=timezone.utc)
+        if now < expiry <= soon:
+            try:
+                hours_left = int((expiry - now).total_seconds() // 3600)
+                await context.bot.send_message(chat_id=tid, text=f"⏰ Reminder: your access expires in about {hours_left} hours (on {expiry.strftime('%Y-%m-%d %H:%M UTC')}).")
+            except Exception: pass
+
+async def _background_expiry_loop(app: Application):
+    await asyncio.sleep(5)
+    while True:
+        try:
+            ctx = SimpleNamespace(bot=app.bot)
+            await notify_expiring_job(ctx)  # type: ignore[arg-type]
+        except Exception as e:
+            log.exception("expiry loop error: %s", e)
+        await asyncio.sleep(3600)
+
+async def _ensure_fallback_running(app: Application):
+    if app.bot_data.get("expiry_task"): return
+    try:
+        app.bot_data["expiry_task"] = asyncio.get_event_loop().create_task(_background_expiry_loop(app))
+        log.info("Fallback expiry loop started (immediate).")
+    except Exception as e:
+        log.warning("Could not start fallback loop immediately: %s", e)
 
 # =========================================================
 # Application Builder
