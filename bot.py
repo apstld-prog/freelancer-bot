@@ -661,23 +661,43 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             with get_session() as s:
                 u = get_or_create_user_by_tid(s, update.effective_user.id)
+
+                # Ensure tables exist
+                s.execute(text("""
+                    CREATE TABLE IF NOT EXISTS job_event (
+                        id SERIAL PRIMARY KEY,
+                        platform TEXT,
+                        title TEXT,
+                        description TEXT,
+                        affiliate_url TEXT,
+                        original_url TEXT,
+                        budget_amount NUMERIC,
+                        budget_currency TEXT,
+                        budget_usd NUMERIC,
+                        created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
+                        dedup_key TEXT
+                    )
+                """))
                 s.execute(text("""
                     CREATE TABLE IF NOT EXISTS saved_job (
                         id SERIAL PRIMARY KEY,
                         user_id BIGINT NOT NULL,
                         job_id BIGINT NOT NULL,
-                        saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                        saved_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
                     )
                 """))
 
-            # Ensure schema fix: add job_id column if missing
-            try:
-                s.execute(text("ALTER TABLE saved_job ADD COLUMN job_id BIGINT"))
-                s.commit()
-            except Exception:
-                pass
+                # create job_event row
+                text_html = msg.text_html or msg.text or ""
+                title = _extract_card_title(text_html)
+                original_url = ""
+                if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
+                    row0 = msg.reply_markup.inline_keyboard[0]
+                    if len(row0) > 1 and getattr(row0[1], "url", None):
+                        original_url = row0[1].url or ""
+                    elif len(row0) >= 1 and getattr(row0[0], "url", None):
+                        original_url = row0[0].url or ""
 
-                # create dummy job_event row for a text-only card if needed
                 je = s.execute(text("""
                     INSERT INTO job_event (platform, title, description, affiliate_url, original_url,
                                            budget_amount, budget_currency, budget_usd, created_at, dedup_key)
@@ -689,23 +709,26 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "d": text_html,
                     "a": original_url,
                     "o": original_url,
-                    "ba": None, "bc": "USD", "bu": None,
-                    "dk": f"manual::{hash(title)%10_000_000}"
+                    "ba": None,
+                    "bc": "USD",
+                    "bu": None,
+                    "dk": f"manual::{hash(title)%10_000_000}",
                 }).fetchone()
-                s.execute(text("INSERT INTO saved_job (user_id, job_id) VALUES (:u,:j)"), {"u": u.id, "j": je["id"]})
-                s.commit()
-        except Exception as e:
-            log.exception("job:save error: %s", e)
-        return
 
-    if data == "job:delete":
-        try:
-            if msg: await msg.delete()
-        except Exception:
+                s.execute(
+                    text("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
+                    {"u": u.id, "j": je["id"]}
+                )
+                s.commit()
+
+            await q.answer("✅ Saved successfully!", show_alert=True)
             try:
-                if msg: await msg.edit_reply_markup(reply_markup=None)
+                await msg.delete()
             except Exception:
                 pass
+        except Exception as e:
+            log.exception("job:save error: %s", e)
+            await q.answer("⚠️ Failed to save job.", show_alert=True)
         return
 
 async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
