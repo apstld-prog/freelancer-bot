@@ -876,6 +876,18 @@ def build_application() -> Application:
     ensure_feed_events_schema()
     ensure_keyword_unique()
 
+    # --- Ensure job_event schema fixes ---
+    try:
+        with get_session() as s:
+            s.execute(text("""
+                ALTER TABLE job_event
+                ADD COLUMN IF NOT EXISTS budget_usd NUMERIC;
+            """))
+            s.commit()
+            log.info("✅ job_event schema verified (budget_usd OK)")
+    except Exception as e:
+        log.warning(f⚠️ Could not verify job_event schema: {e}")
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # public commands
