@@ -133,15 +133,16 @@ def ensure_schema() -> None:
 
         # unique index (idempotent)
         s.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_indexes WHERE indexname='ux_saved_job_user_feed'
-            ) THEN
-                CREATE UNIQUE INDEX ux_saved_job_user_feed ON saved_job(user_id, feed_event_id);
-            END IF;
-        END$$;
-        """)
+   	    DO $$
+    	    BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_indexes WHERE indexname = 'ux_saved_job_user_job'
+        ) THEN
+                    CREATE UNIQUE INDEX ux_saved_job_user_job ON saved_job(user_id, job_id);
+                END IF;
+        END $$;
+""")
+
 
         s.commit()
 
