@@ -57,14 +57,15 @@ def usd_fmt(amount: Optional[float], cur: str) -> str:
 def get_db_admin_ids() -> Set[int]:
     try:
         with get_session() as s:
-        # Ensure schema fix: add job_id column if missing
-        try:
-            s.execute(text("ALTER TABLE saved_job ADD COLUMN job_id BIGINT"))
-            s.commit()
-        except Exception:
-            pass
+            # Ensure schema fix: add job_id column if missing
+            try:
+                s.execute(text("ALTER TABLE saved_job ADD COLUMN job_id BIGINT"))
+                s.commit()
+            except Exception:
+                pass
+
             rows = s.execute(text('SELECT telegram_id FROM "user" WHERE is_admin=TRUE')).fetchall()
-        return {int(r["telegram_id"]) for r in rows if r["telegram_id"]}
+            return {int(r["telegram_id"]) for r in rows if r["telegram_id"]}
     except Exception:
         return set()
 
