@@ -587,38 +587,38 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = q.message
     data = q.data
 
-if data == "job:save":
-    try:
-        with get_session() as s:
-            u = get_or_create_user_by_tid(s, update.effective_user.id)
+    if data == "job:save":
+        try:
+            with get_session() as s:
+                u = get_or_create_user_by_tid(s, update.effective_user.id)
 
-            # Extract message content safely
-            text_html = ""
-            try:
-                text_html = (
-                    getattr(msg, "text_html", None)
-                    or getattr(msg, "caption_html", None)
-                    or getattr(msg, "text", None)
-                    or getattr(msg, "caption", None)
-                    or ""
-                )
-            except Exception:
-                pass
+                # Extract message content safely
+                text_html = ""
+                try:
+                    text_html = (
+                        getattr(msg, "text_html", None)
+                        or getattr(msg, "caption_html", None)
+                        or getattr(msg, "text", None)
+                        or getattr(msg, "caption", None)
+                        or ""
+                    )
+                except Exception:
+                    pass
 
-            # Ensure tables exist
-            s.execute(text("""
-                CREATE TABLE IF NOT EXISTS job_event (
-                    id SERIAL PRIMARY KEY,
-                    platform TEXT,
-                    title TEXT,
-                    description TEXT,
-                    affiliate_url TEXT,
-                    original_url TEXT,
-                    budget_amount NUMERIC,
-                    budget_currency TEXT,
-                    budget_usd NUMERIC,
-                    created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
-                    dedup_key TEXT
+                # Ensure tables exist
+                s.execute(text("""
+                    CREATE TABLE IF NOT EXISTS job_event (
+                        id SERIAL PRIMARY KEY,
+                        platform TEXT,
+                        title TEXT,
+                        description TEXT,
+                        affiliate_url TEXT,
+                        original_url TEXT,
+                        budget_amount NUMERIC,
+                        budget_currency TEXT,
+                        budget_usd NUMERIC,
+                        created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
+                        dedup_key TEXT
                 )
             """))
             s.execute(text("""
@@ -649,8 +649,7 @@ if data == "job:save":
             # Insert the job into job_event
             je = s.execute(text("""
                 INSERT INTO job_event (
-                    platform, title, description, affiliate_url, original_url,
-                    budget_amount, budget_currency, budget_usd, created_at, dedup_key
+                    platform, title, description, affiliate_url, original_url, budget_amount, budget_currency, budget_usd, created_at, dedup_key
                 )
                 VALUES (:p, :t, :d, :a, :o, :ba, :bc, :bu, NOW() AT TIME ZONE 'UTC', :dk)
                 ON CONFLICT (dedup_key) DO UPDATE SET title = EXCLUDED.title
