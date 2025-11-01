@@ -587,54 +587,23 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = q.message
     data = q.data
 
-    if data == "job:save":
-        try:
-            with get_session() as s:
-                u = get_or_create_user_by_tid(s, update.effective_user.id)
+if data == "job:save":
+    try:
+        with get_session() as s:
+            u = get_or_create_user_by_tid(s, update.effective_user.id)
 
-                # Extract message content safely
-                text_html = ""
-                try:
-                    text_html = (
-                        getattr(msg, "text_html", None)
-                        or getattr(msg, "caption_html", None)
-                        or getattr(msg, "text", None)
-                        or getattr(msg, "caption", None)
-                        or ""
-                    )
-                except Exception:
-                    pass
+            # Extract safely
+            text_html = (
+                getattr(msg, "text_html", None)
+                or getattr(msg, "caption_html", None)
+                or getattr(msg, "text", None)
+                or getattr(msg, "caption", None)
+                or ""
+            )
 
-                # Ensure tables exist
-                s.execute(text("""
-                    CREATE TABLE IF NOT EXISTS job_event (
-                        id SERIAL PRIMARY KEY,
-                        platform TEXT,
-                        title TEXT,
-                        description TEXT,
-                        affiliate_url TEXT,
-                        original_url TEXT,
-                        budget_amount NUMERIC,
-                        budget_currency TEXT,
-                        budget_usd NUMERIC,
-                        created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
-                        dedup_key TEXT
-                )
-            """))
-            s.execute(text("""
-                CREATE TABLE IF NOT EXISTS saved_job (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    job_id BIGINT NOT NULL,
-                    saved_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
-                )
-            """))
-
-            # Prepare job data
             title = _extract_card_title(text_html)
             dedup = f"manual::{abs(hash(title)) % 10000000}"
 
-            # Find the "Original" URL from the message buttons
             original_url = ""
             try:
                 if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
@@ -646,10 +615,11 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-            # Insert the job into job_event
+            # Insert job
             je = s.execute(text("""
                 INSERT INTO job_event (
-                    platform, title, description, affiliate_url, original_url, budget_amount, budget_currency, budget_usd, created_at, dedup_key
+                    platform, title, description, affiliate_url, original_url,
+                    budget_amount, budget_currency, budget_usd, created_at, dedup_key
                 )
                 VALUES (:p, :t, :d, :a, :o, :ba, :bc, :bu, NOW() AT TIME ZONE 'UTC', :dk)
                 ON CONFLICT (dedup_key) DO UPDATE SET title = EXCLUDED.title
@@ -666,14 +636,12 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "dk": dedup
             }).fetchone()
 
-            # Link to saved_job table
             s.execute(
                 text("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
                 {"u": u.id, "j": je["id"]}
             )
             s.commit()
 
-        # Delete the message after saving
         await msg.delete()
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
