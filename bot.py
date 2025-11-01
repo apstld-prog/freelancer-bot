@@ -587,7 +587,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = q.message
     data = q.data
 
-    if data == "job:save":
+if data == "job:save":
     try:
         with get_session() as s:
             u = get_or_create_user_by_tid(s, update.effective_user.id)
