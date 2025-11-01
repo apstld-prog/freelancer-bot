@@ -886,7 +886,7 @@ def build_application() -> Application:
             s.commit()
             log.info("✅ job_event schema verified (budget_usd OK)")
     except Exception as e:
-        log.warning(f⚠️ Could not verify job_event schema: {e}")
+        log.warning(f"⚠️ Could not verify job_event schema: {e}")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
