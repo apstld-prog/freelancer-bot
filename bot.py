@@ -670,12 +670,12 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 """))
 
-                # Ensure schema fix: add job_id column if missing
-        try:
-            s.execute(text("ALTER TABLE saved_job ADD COLUMN job_id BIGINT"))
-            s.commit()
-        except Exception:
-            pass
+            # Ensure schema fix: add job_id column if missing
+            try:
+                s.execute(text("ALTER TABLE saved_job ADD COLUMN job_id BIGINT"))
+                s.commit()
+            except Exception:
+                pass
 
                 # create dummy job_event row for a text-only card if needed
                 je = s.execute(text("""
