@@ -701,11 +701,13 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 je = s.execute(text("""
     INSERT INTO job_event (
         platform, title, description, affiliate_url, original_url,
-        budget_amount, budget_currency, budget_usd, created_at, hash, dedup_key
+        budget_amount, budget_currency, budget_usd,
+        created_at, hash, dedup_key
     )
     VALUES (
         :p, :t, :d, :a, :o,
-        :ba, :bc, :bu, NOW() AT TIME ZONE 'UTC', :h, :dk
+        :ba, :bc, :bu,
+        NOW() AT TIME ZONE 'UTC', :h, :dk
     )
     RETURNING id
 """), {
@@ -717,8 +719,8 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     "ba": None,
     "bc": "USD",
     "bu": None,
-    "h": f"manual::{abs(hash(title))%1_000_000}",  # ✅ populate hash always
-    "dk": f"manual::{abs(hash(title))%10_000_000}",  # ✅ dedup_key same logic
+    "h": f"manual::{abs(hash(title))%1_000_000}",       # ✅ ensures hash non-null
+    "dk": f"manual::{abs(hash(title))%10_000_000}",      # ✅ keeps dedup_key
 }).fetchone()
 
                 s.execute(
