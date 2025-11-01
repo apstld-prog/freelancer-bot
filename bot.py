@@ -674,6 +674,8 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             text("SELECT id FROM job_event WHERE dedup_key = :dk"),
                             {"dk": dedup}
                         ).fetchone()
+		    if je and isinstance(je, tuple):
+    			je = {"id": je[0]}
                 except Exception as e:
                     log.exception("job_event insert error: %s", e)
                     await context.bot.send_message(
