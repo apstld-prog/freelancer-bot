@@ -664,6 +664,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """))
             # Ensure schema fix: add job_id column if missing
             try:
+try:
     s.execute(text("ALTER TABLE saved_job ADD COLUMN job_id BIGINT"))
     s.commit()
 except Exception:
