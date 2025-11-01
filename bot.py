@@ -515,7 +515,7 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show saved jobs with working buttons (fallback URLs if missing)."""
     user_id = update.effective_user.id
     try:
-        with db() as s:
+        with get_session() as s:
             rows = s.execute(text("""
                 SELECT sj.saved_at, je.platform, je.title, je.description,
                        je.affiliate_url, je.original_url, je.budget_amount,
