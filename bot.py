@@ -588,80 +588,93 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
 
     if data == "job:save":
-        try:
-            with get_session() as s:
-                u = get_or_create_user_by_tid(s, update.effective_user.id)
+    try:
+        with get_session() as s:
+            u = get_or_create_user_by_tid(s, update.effective_user.id)
 
-                # Ensure tables exist
-                s.execute(text("""
-                    CREATE TABLE IF NOT EXISTS job_event (
-                        id SERIAL PRIMARY KEY,
-                        platform TEXT,
-                        title TEXT,
-                        description TEXT,
-                        affiliate_url TEXT,
-                        original_url TEXT,
-                        budget_amount NUMERIC,
-                        budget_currency TEXT,
-                        budget_usd NUMERIC,
-                        created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
-                        dedup_key TEXT
-                    )
-                """))
-                s.execute(text("""
-                    CREATE TABLE IF NOT EXISTS saved_job (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        job_id BIGINT NOT NULL,
-                        saved_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
-                    )
-                """))
-
-                # Prepare job data
-                title = _extract_card_title(text_html)
-                dedup = f"manual::{abs(hash(title))%10000000}"
-
-                # Insert the job into job_event
-                je = s.execute(text("""
-                    INSERT INTO job_event (
-                        platform, title, description, affiliate_url, original_url,
-                        budget_amount, budget_currency, budget_usd, created_at, dedup_key
-                    )
-                    VALUES (:p,:t,:d,:a,:o,:ba,:bc,:bu, NOW() AT TIME ZONE 'UTC', :dk)
-                    ON CONFLICT (dedup_key) DO UPDATE SET title = EXCLUDED.title
-                    RETURNING id
-                """), {
-                    "p": "manual",
-                    "t": title,
-                    "d": text_html,
-                    "a": original_url,
-                    "o": original_url,
-                    "ba": None,
-                    "bc": "USD",
-                    "bu": None,
-                    "dk": dedup
-                }).fetchone()
-
-                # Link to saved_job table
-                s.execute(
-                    text("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
-                    {"u": u.id, "j": je["id"]}
+            # Extract message content safely
+            text_html = ""
+            try:
+                text_html = (
+                    getattr(msg, "text_html", None)
+                    or getattr(msg, "caption_html", None)
+                    or getattr(msg, "text", None)
+                    or getattr(msg, "caption", None)
+                    or ""
                 )
-                s.commit()
+            except Exception:
+                pass
 
-            await msg.delete()
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="✅ Job saved successfully."
-            )
+            # Ensure tables exist
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS job_event (
+                    id SERIAL PRIMARY KEY,
+                    platform TEXT,
+                    title TEXT,
+                    description TEXT,
+                    affiliate_url TEXT,
+                    original_url TEXT,
+                    budget_amount NUMERIC,
+                    budget_currency TEXT,
+                    budget_usd NUMERIC,
+                    created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
+                    dedup_key TEXT
+                )
+            """))
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS saved_job (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    job_id BIGINT NOT NULL,
+                    saved_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
+                )
+            """))
 
-        except Exception as e:
-            log.exception("job:save error: %s", e)
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"⚠️ Save failed: {e}"
+            # Prepare job data
+            title = _extract_card_title(text_html)
+            dedup = f"manual::{abs(hash(title))%10000000}"
+
+            # Insert the job into job_event
+            je = s.execute(text("""
+                INSERT INTO job_event (
+                    platform, title, description, affiliate_url, original_url,
+                    budget_amount, budget_currency, budget_usd, created_at, dedup_key
+                )
+                VALUES (:p,:t,:d,:a,:o,:ba,:bc,:bu, NOW() AT TIME ZONE 'UTC', :dk)
+                ON CONFLICT (dedup_key) DO UPDATE SET title = EXCLUDED.title
+                RETURNING id
+            """), {
+                "p": "manual",
+                "t": title,
+                "d": text_html,
+                "a": original_url,
+                "o": original_url,
+                "ba": None,
+                "bc": "USD",
+                "bu": None,
+                "dk": dedup
+            }).fetchone()
+
+            # Link to saved_job table
+            s.execute(
+                text("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
+                {"u": u.id, "j": je["id"]}
             )
-        return
+            s.commit()
+
+        await msg.delete()
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="✅ Job saved successfully."
+        )
+
+    except Exception as e:
+        log.exception("job:save error: %s", e)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"⚠️ Save failed: {e}"
+        )
+    return
 
 async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
