@@ -659,7 +659,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         budget_amount, budget_currency, budget_usd, created_at, dedup_key
                     )
                     VALUES (:p, :t, :d, :a, :o, :ba, :bc, :bu, NOW() AT TIME ZONE 'UTC', :dk)
-                    ON CONFLICT (dedup_key) DO UPDATE SET title = EXCLUDED.title
+                    
                     RETURNING id
                 """), {
                     "p": "manual",
