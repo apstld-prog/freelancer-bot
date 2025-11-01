@@ -11,7 +11,7 @@ from sqlalchemy import text
 from db import get_session, get_or_create_user_by_tid
 from db_keywords import list_keywords, add_keywords, delete_keywords, clear_keywords
 from db_events import ensure_feed_events_schema, record_event
-from config import ADMIN_IDS, TRIAL_DAYS, STATS_WINDOW_HOURS
+from config import ADMIN_IDS, TRIAL_DAYS
 
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
@@ -74,22 +74,16 @@ HELP_FULL = (
     "1️⃣ Add keywords with <code>/addkeyword python, telegram</code> (English or Greek)\n"
     "2️⃣ Set countries with <code>/setcountry US,UK</code> or <code>ALL</code>\n"
     "3️⃣ Save a proposal template with <code>/setproposal &lt;text&gt;</code>\n"
-    "  Placeholders: {jobtitle}, {experience}, {stack}, {budgetitem}, {name}\n"
+    "   Placeholders: {jobtitle}, {experience}, {stack}, {budgetitem}, {name}\n"
     "4️⃣ When a job arrives you can:\n"
-    "⭐ Keep it\n🗑 Delete it\n📄 Proposal → direct affiliate link\n🔗 Original → affiliate wrapped job link\n\n"
-    "Use <code>/mysettings</code> to check your filters and proposal.\n"
-    "Use <code>/selftest</code> for a test job.\n"
-    "Use <code>/platforms GR</code> for local platforms.\n\n"
-    "🌍 <b>Platforms monitored:</b>\n"
-    "• Global: Freelancer.com (affiliate), PeoplePerHour, Malt, Workana, Guru, 99designs, Toptal, Codeable, "
-    "YunoJuno, Worksome, twago, freelancermap\n"
-    "• Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
-    "👑 <b>Admin commands:</b>\n"
-    "<code>/users</code> — list users\n"
-    "<code>/grant &lt;telegram_id&gt; &lt;days&gt;</code> — extend license\n"
-    "<code>/block &lt;telegram_id&gt;</code> / <code>/unblock</code>\n"
-    "<code>/broadcast &lt;text&gt;</code> — send message to all active\n"
-    "<code>/feedstatus</code> — show active feed toggles"
+    "⭐ Keep it\n🗑 Delete it\n📄 Proposal → affiliate link\n🔗 Original → same wrapped link\n\n"
+    "Use <code>/mysettings</code> to check filters.\n"
+    "Use <code>/selftest</code> to test job.\n"
+    "Use <code>/platforms GR</code> to view Greek sites.\n\n"
+    "🌍 <b>Platforms:</b> Freelancer, PeoplePerHour, Malt, Workana, Guru, 99designs, "
+    "Toptal, Codeable, YunoJuno, Worksome, twago, freelancermap\n"
+    "🇬🇷 Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
+    "👑 <b>Admin:</b> /users /grant /block /unblock /broadcast /feedstatus"
 )
 
 # =========================================================
@@ -153,12 +147,21 @@ async def clearkeywords_cmd(update, context):
 # Selftest / Feedstatus / Saved
 # =========================================================
 async def selftest_cmd(update, context):
+    with get_session() as s:
+        u = get_or_create_user_by_tid(s, update.effective_user.id)
+        ensure_feed_events_schema()
+        record_event("freelancer")
+        # Save dummy job for test
+        s.execute(text("""
+            INSERT INTO saved_job (user_id, event_id, saved_at)
+            VALUES (:u, (SELECT MAX(id) FROM job_event), NOW())
+        """), {"u": u.id})
+        s.commit()
     txt = (
-        "<b>Email Signature from Existing Logo</b>\n"
-        "💰 Budget: 10 – 30 EUR ($10.8 – $32.4 USD)\n"
+        "<b>Logo Project Test</b>\n"
+        "💰 Budget: 50 EUR ($54.00 USD)\n"
         "🌍 Source: Freelancer\n"
-        "🔎 Match: logo\n"
-        "📝 Please duplicate and make an editable version of my existing email signature based on the logo file."
+        "🔎 Match: logo"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Proposal", url="https://freelancer.com"),
@@ -166,9 +169,6 @@ async def selftest_cmd(update, context):
         [InlineKeyboardButton("⭐ Save", callback_data="save:test"),
          InlineKeyboardButton("🗑 Delete", callback_data="delete:test")]
     ])
-    ensure_feed_events_schema()
-    record_event("freelancer")
-    record_event("peopleperhour")
     await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
     await update.effective_chat.send_message("✅ Self-test OK — dummy events recorded.")
 
@@ -182,12 +182,11 @@ async def feedstatus_cmd(update, context):
             GROUP BY platform ORDER BY platform
         """)).fetchall()
     if not rows:
-        await update.effective_chat.send_message("📊 No feed activity in last 24 hours.")
+        await update.effective_chat.send_message("📊 No feed activity in last 24h.")
         return
-    msg = ["📊 <b>Feed status (last 24 h)</b>:"]
+    msg = ["📊 <b>Feed status (24h)</b>:"]
     for r in rows:
-        status = "✅ active" if r["cnt"] > 0 else "❌ inactive"
-        msg.append(f"• {r['platform']} — {status} ({r['cnt']} jobs, last: {r['last']:%Y-%m-%d %H:%M})")
+        msg.append(f"• {r['platform']} — {r['cnt']} jobs, latest: {r['last']:%Y-%m-%d %H:%M}")
     await update.effective_chat.send_message("\n".join(msg), parse_mode=ParseMode.HTML)
 
 async def saved_cmd(update, context):
@@ -202,7 +201,7 @@ async def saved_cmd(update, context):
             ORDER BY sj.saved_at DESC LIMIT 10
         """), {"tid": uid}).fetchall()
     if not rows:
-        await update.effective_chat.send_message("💾 You have no saved jobs yet.")
+        await update.effective_chat.send_message("💾 No saved jobs yet.")
         return
     msg = "<b>💾 Saved Jobs:</b>\n" + "\n\n".join(
         [f"• {r['title']}\n💰 {to_usd(r['budget_amount'], r['budget_currency'])}\n🌍 {r['platform']}\n🔗 <a href='{r['affiliate_url']}'>Open</a>"
@@ -223,25 +222,18 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """), {"id": u.id}).fetchone()
     k = ", ".join(kws) if kws else "(none)"
     c = r["countries"] if r["countries"] else "ALL"
-    tstart = r["trial_start"].strftime("%Y-%m-%d") if r["trial_start"] else "-"
-    tend = r["trial_end"].strftime("%Y-%m-%d") if r["trial_end"] else "-"
-    lic = r["license_until"].strftime("%Y-%m-%d") if r["license_until"] else "-"
     active = "✅" if r["is_active"] else "❌"
     blocked = "✅" if r["is_blocked"] else "❌"
     txt = (
         f"<b>🛠 Your Settings</b>\n\n"
-        f"• Keywords: {k}\n"
-        f"• Countries: {c}\n"
-        f"• Proposal: {'(saved)' if r['proposal_template'] else '(none)'}\n\n"
-        f"Trial: {tstart} → {tend}\n"
-        f"License: {lic}\n"
-        f"Active: {active}   Blocked: {blocked}\n\n"
-        "<i>For extension contact the admin.</i>"
+        f"• Keywords: {k}\n• Countries: {c}\n• Proposal: {'(saved)' if r['proposal_template'] else '(none)'}\n"
+        f"• Trial ends: {r['trial_end']:%Y-%m-%d}\n• License: {r['license_until'] or '—'}\n"
+        f"• Active: {active}   Blocked: {blocked}\n\n<i>Contact admin for extension.</i>"
     )
     await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML)
 
 # =========================================================
-# Contact Chat / Admin
+# Contact / Admin chat
 # =========================================================
 user_contact_state = {}
 
@@ -253,9 +245,7 @@ async def contact_cmd(update, context):
 async def message_router(update, context):
     uid = update.effective_user.id
     txt = update.message.text
-    if not txt:
-        return
-    # ADMIN reply logic
+    if not txt: return
     if is_admin_user(uid) and txt.startswith("/reply"):
         parts = txt.split(maxsplit=2)
         if len(parts) < 3:
@@ -265,11 +255,7 @@ async def message_router(update, context):
         await context.bot.send_message(to, f"💬 Admin: {msg}")
         await update.message.reply_text("✅ Reply sent.")
         return
-    if is_admin_user(uid):
-        await update.message.reply_text("ℹ️ Use /reply <user_id> <msg> to respond.")
-        return
-
-    # USER → ADMIN
+    if is_admin_user(uid): return
     if user_contact_state.get(uid):
         for admin in all_admin_ids():
             kb = InlineKeyboardMarkup([
@@ -280,50 +266,55 @@ async def message_router(update, context):
                  InlineKeyboardButton("+180d", callback_data=f"grant:{uid}:180"),
                  InlineKeyboardButton("+365d", callback_data=f"grant:{uid}:365")]
             ])
-            await context.bot.send_message(
-                admin,
-                f"📩 <b>New message from user</b>\nID: <a href='tg://user?id={uid}'>{uid}</a>\n\n{txt}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb
-            )
+            await context.bot.send_message(admin, f"📩 <b>New message from user</b>\nID: {uid}\n\n{txt}",
+                                           parse_mode=ParseMode.HTML, reply_markup=kb)
         await update.message.reply_text("✅ Message sent to admin.")
         user_contact_state[uid] = False
 # =========================================================
-# Admin and Save/Delete callbacks
+# Admin Commands / Menu
 # =========================================================
+def admin_menu_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 Users", callback_data="admin:users"),
+         InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcast")],
+        [InlineKeyboardButton("📊 Feed Status", callback_data="admin:feedstatus")]
+    ])
+
+async def admin_menu_cmd(update, context):
+    await update.effective_chat.send_message("👑 <b>Admin Menu</b>", parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+
 async def users_cmd(update, context):
-    if not is_admin_user(update.effective_user.id):
-        await update.effective_chat.send_message("⛔ Not allowed.")
-        return
     with get_session() as s:
         rows = s.execute(text("""
-            SELECT telegram_id, username, is_active, is_blocked,
-                   trial_end, license_until
-            FROM "user" ORDER BY id DESC LIMIT 30
+            SELECT telegram_id, username, is_active, is_blocked, trial_end, license_until
+            FROM "user" ORDER BY id DESC LIMIT 20
         """)).fetchall()
     if not rows:
-        await update.effective_chat.send_message("No users found.")
+        await update.effective_chat.send_message("No users.")
         return
-    lines = [f"{r['telegram_id']} | @{r['username'] or '-'} | Active:{'✅' if r['is_active'] else '❌'} | "
-             f"Blocked:{'✅' if r['is_blocked'] else '❌'} | Trial ends:{r['trial_end']:%Y-%m-%d} | "
-             f"License:{r['license_until'] or '—'}" for r in rows]
+    lines = [
+        f"{r['telegram_id']} | @{r['username'] or '-'} | Active:{'✅' if r['is_active'] else '❌'} | "
+        f"Blocked:{'✅' if r['is_blocked'] else '❌'} | Trial ends:{r['trial_end']:%Y-%m-%d} | "
+        f"License:{r['license_until'] or '—'}"
+        for r in rows
+    ]
     await update.effective_chat.send_message("\n".join(lines))
 
-# ----- Save/Delete -----
+# =========================================================
+# Save/Delete callbacks
+# =========================================================
 async def save_action_cb(update, context):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_reply_markup(None)
     await q.message.reply_text("⭐ Saved successfully (dummy).")
 
 async def delete_action_cb(update, context):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_reply_markup(None)
     await q.message.reply_text("🗑 Deleted (dummy).")
 
 # =========================================================
-# Menu Handler and App Builder
+# Menu Actions
 # =========================================================
 async def menu_action_cb(update, context):
     q = update.callback_query
@@ -340,10 +331,17 @@ async def menu_action_cb(update, context):
     elif data == "act:contact":
         await contact_cmd(update, context)
     elif data == "act:admin":
+        await admin_menu_cmd(update, context)
+    elif data.startswith("admin:users"):
         await users_cmd(update, context)
+    elif data.startswith("admin:feedstatus"):
+        await feedstatus_cmd(update, context)
     else:
         await q.message.chat.send_message("❌ Unknown action.")
 
+# =========================================================
+# Application Builder
+# =========================================================
 def build_application() -> Application:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
@@ -359,4 +357,5 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))
     app.add_handler(CallbackQueryHandler(save_action_cb, pattern=r"^save:"))
     app.add_handler(CallbackQueryHandler(delete_action_cb, pattern=r"^delete:"))
+    app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^admin:"))
     return app
