@@ -111,6 +111,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_chat.send_message(HELP_FULL, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
 # =========================================================
 # Keywords
 # =========================================================
@@ -148,7 +149,6 @@ async def clearkeywords_cmd(update, context):
         u = get_or_create_user_by_tid(s, update.effective_user.id)
         clear_keywords(u.id)
     await update.message.reply_text("✅ All keywords cleared.")
-
 # =========================================================
 # Selftest / Feedstatus / Saved
 # =========================================================
@@ -197,7 +197,7 @@ async def saved_cmd(update, context):
             SELECT je.platform, je.title, je.affiliate_url,
                    je.budget_amount, je.budget_currency, je.created_at
             FROM saved_job sj
-            LEFT JOIN job_event je ON je.id=sj.job_id
+            LEFT JOIN job_event je ON je.id=sj.event_id
             WHERE sj.user_id=(SELECT id FROM "user" WHERE telegram_id=:tid)
             ORDER BY sj.saved_at DESC LIMIT 10
         """), {"tid": uid}).fetchall()
@@ -209,6 +209,37 @@ async def saved_cmd(update, context):
          for r in rows]
     )
     await update.effective_chat.send_message(msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+# =========================================================
+# My Settings
+# =========================================================
+async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with get_session() as s:
+        u = get_or_create_user_by_tid(s, update.effective_user.id)
+        kws = list_keywords(u.id)
+        r = s.execute(text("""
+            SELECT countries, proposal_template, trial_start, trial_end, license_until, is_active, is_blocked
+            FROM "user" WHERE id=:id
+        """), {"id": u.id}).fetchone()
+    k = ", ".join(kws) if kws else "(none)"
+    c = r["countries"] if r["countries"] else "ALL"
+    tstart = r["trial_start"].strftime("%Y-%m-%d") if r["trial_start"] else "-"
+    tend = r["trial_end"].strftime("%Y-%m-%d") if r["trial_end"] else "-"
+    lic = r["license_until"].strftime("%Y-%m-%d") if r["license_until"] else "-"
+    active = "✅" if r["is_active"] else "❌"
+    blocked = "✅" if r["is_blocked"] else "❌"
+    txt = (
+        f"<b>🛠 Your Settings</b>\n\n"
+        f"• Keywords: {k}\n"
+        f"• Countries: {c}\n"
+        f"• Proposal: {'(saved)' if r['proposal_template'] else '(none)'}\n\n"
+        f"Trial: {tstart} → {tend}\n"
+        f"License: {lic}\n"
+        f"Active: {active}   Blocked: {blocked}\n\n"
+        "<i>For extension contact the admin.</i>"
+    )
+    await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML)
+
 # =========================================================
 # Contact Chat / Admin
 # =========================================================
@@ -217,7 +248,7 @@ user_contact_state = {}
 async def contact_cmd(update, context):
     uid = update.effective_user.id
     user_contact_state[uid] = True
-    await update.effective_chat.send_message("✉️ Send your message to the admin.\nType /cancel to exit.")
+    await update.effective_chat.send_message("📩 Send a message to the admin below.\nType /cancel to stop.")
 
 async def message_router(update, context):
     uid = update.effective_user.id
@@ -228,14 +259,14 @@ async def message_router(update, context):
     if is_admin_user(uid) and txt.startswith("/reply"):
         parts = txt.split(maxsplit=2)
         if len(parts) < 3:
-            await update.message.reply_text("Usage: /reply &lt;user_id&gt; &lt;msg&gt;", parse_mode=ParseMode.HTML)
+            await update.message.reply_text("Usage: /reply <user_id> <msg>")
             return
         to = int(parts[1]); msg = parts[2]
         await context.bot.send_message(to, f"💬 Admin: {msg}")
         await update.message.reply_text("✅ Reply sent.")
         return
     if is_admin_user(uid):
-        await update.message.reply_text("ℹ️ Use /reply &lt;user_id&gt; &lt;msg&gt; to respond.")
+        await update.message.reply_text("ℹ️ Use /reply <user_id> <msg> to respond.")
         return
 
     # USER → ADMIN
@@ -257,7 +288,9 @@ async def message_router(update, context):
             )
         await update.message.reply_text("✅ Message sent to admin.")
         user_contact_state[uid] = False
-
+# =========================================================
+# Admin and Save/Delete callbacks
+# =========================================================
 async def users_cmd(update, context):
     if not is_admin_user(update.effective_user.id):
         await update.effective_chat.send_message("⛔ Not allowed.")
@@ -276,6 +309,19 @@ async def users_cmd(update, context):
              f"License:{r['license_until'] or '—'}" for r in rows]
     await update.effective_chat.send_message("\n".join(lines))
 
+# ----- Save/Delete -----
+async def save_action_cb(update, context):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_reply_markup(None)
+    await q.message.reply_text("⭐ Saved successfully (dummy).")
+
+async def delete_action_cb(update, context):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_reply_markup(None)
+    await q.message.reply_text("🗑 Deleted (dummy).")
+
 # =========================================================
 # Menu Handler and App Builder
 # =========================================================
@@ -284,9 +330,9 @@ async def menu_action_cb(update, context):
     data = q.data
     await q.answer()
     if data == "act:addkw":
-        await q.message.chat.send_message("Use /addkeyword &lt;text&gt; to add keywords.", parse_mode=ParseMode.HTML)
+        await q.message.chat.send_message("Use /addkeyword <text> to add keywords.", parse_mode=ParseMode.HTML)
     elif data == "act:settings":
-        await context.bot.send_message(q.message.chat_id, "⚙️ Use /mysettings to view settings.")
+        await mysettings_cmd(update, context)
     elif data == "act:help":
         await help_cmd(update, context)
     elif data == "act:saved":
@@ -302,6 +348,7 @@ def build_application() -> Application:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("mysettings", mysettings_cmd))
     app.add_handler(CommandHandler("addkeyword", addkeyword_cmd))
     app.add_handler(CommandHandler("delkeyword", delkeyword_cmd))
     app.add_handler(CommandHandler("clearkeywords", clearkeywords_cmd))
@@ -310,4 +357,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("users", users_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
     app.add_handler(CallbackQueryHandler(menu_action_cb, pattern=r"^act:"))
+    app.add_handler(CallbackQueryHandler(save_action_cb, pattern=r"^save:"))
+    app.add_handler(CallbackQueryHandler(delete_action_cb, pattern=r"^delete:"))
     return app
