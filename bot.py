@@ -554,10 +554,11 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        je.budget_usd,
                        je.created_at
                 FROM saved_job sj
-                LEFT JOIN job_event je ON je.id = sj.job_id
-                WHERE sj.user_id = :uid
-                ORDER BY sj.saved_at DESC
-                LIMIT 10;
+		JOIN job_event je ON je.id = sj.job_id
+		WHERE sj.user_id = :uid
+		AND je.id IS NOT NULL
+		ORDER BY sj.saved_at DESC
+		LIMIT 10
             """), {"uid": user_id}).fetchall()
 
         if not rows:
