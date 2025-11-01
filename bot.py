@@ -651,7 +651,7 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     title = _extract_card_title(text_html)
 
-    if data == "job:save":
+        if data == "job:save":
         try:
             with get_session() as s:
                 u = get_or_create_user_by_tid(s, update.effective_user.id)
@@ -681,56 +681,42 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 """))
 
-                # create job_event row
-                text_html = msg.text_html or msg.text or ""
+                # Extract clean title + dedup key
                 title = _extract_card_title(text_html)
-                original_url = ""
-                if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
-                    row0 = msg.reply_markup.inline_keyboard[0]
-                    if len(row0) > 1 and getattr(row0[1], "url", None):
-                        original_url = row0[1].url or ""
-                    elif len(row0) >= 1 and getattr(row0[0], "url", None):
-                        original_url = row0[0].url or ""
+                dedup = f"manual::{abs(hash(title))%10000000}"
 
+                # Insert into job_event safely
                 je = s.execute(text("""
-    INSERT INTO job_event (
-        platform, title, description, affiliate_url, original_url,
-        budget_amount, budget_currency, budget_usd,
-        created_at, hash, dedup_key
-    )
-    VALUES (
-        :p, :t, :d, :a, :o,
-        :ba, :bc, :bu,
-        NOW() AT TIME ZONE 'UTC', :h, :dk
-    )
-    RETURNING id
-"""), {
-    "p": "manual",
-    "t": title,
-    "d": text_html,
-    "a": original_url,
-    "o": original_url,
-    "ba": None,
-    "bc": "USD",
-    "bu": None,
-    "h": f"manual::{abs(hash(title))%1_000_000}",       # ✅ ensures hash non-null
-    "dk": f"manual::{abs(hash(title))%10_000_000}",      # ✅ keeps dedup_key
-}).fetchone()
+                    INSERT INTO job_event (
+                        platform, title, description, affiliate_url, original_url,
+                        budget_amount, budget_currency, budget_usd, created_at, dedup_key
+                    )
+                    VALUES (:p,:t,:d,:a,:o,:ba,:bc,:bu, NOW() AT TIME ZONE 'UTC', :dk)
+                    RETURNING id
+                """), {
+                    "p": "manual",
+                    "t": title,
+                    "d": text_html,
+                    "a": original_url,
+                    "o": original_url,
+                    "ba": None,
+                    "bc": "USD",
+                    "bu": None,
+                    "dk": dedup
+                }).fetchone()
 
+                # Link saved_job
                 s.execute(
                     text("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
                     {"u": u.id, "j": je["id"]}
                 )
                 s.commit()
 
-            await q.answer("✅ Saved successfully!", show_alert=True)
-            try:
-                await msg.delete()
-            except Exception:
-                pass
+            # Delete the card after saving
+            await msg.delete()
+
         except Exception as e:
             log.exception("job:save error: %s", e)
-            await q.answer("⚠️ Failed to save job.", show_alert=True)
         return
 
 async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
