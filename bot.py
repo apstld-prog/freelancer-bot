@@ -509,22 +509,55 @@ async def inline_admin_action_cb(update: Update, context: ContextTypes.DEFAULT_T
         await q.message.reply_text(f"✅ Granted +{days}d.")
         return
 
-# ------------- Saved list (JOIN with job_event) ----------------
+# ------------- Saved Jobs List -----------------
 
 async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show saved jobs with working buttons (fallback URLs if missing)."""
+    """Show saved jobs with working buttons and proper SQL joins."""
     user_id = update.effective_user.id
     try:
         with get_session() as s:
+            # Ensure schema (safety check)
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS job_event (
+                    id SERIAL PRIMARY KEY,
+                    platform TEXT,
+                    title TEXT,
+                    description TEXT,
+                    affiliate_url TEXT,
+                    original_url TEXT,
+                    budget_amount NUMERIC,
+                    budget_currency TEXT,
+                    budget_usd NUMERIC,
+                    created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
+                );
+            """))
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS saved_job (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    job_id BIGINT NOT NULL,
+                    saved_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
+                );
+            """))
+
+            # Fetch last 10 saved jobs for this user
             rows = s.execute(text("""
-                SELECT sj.saved_at, je.platform, je.title, je.description,
-                       je.affiliate_url, je.original_url, je.budget_amount,
-                       je.budget_currency, je.budget_usd, je.created_at
+                SELECT sj.id AS sid,
+                       sj.saved_at,
+                       je.platform,
+                       je.title,
+                       je.description,
+                       je.affiliate_url,
+                       je.original_url,
+                       je.budget_amount,
+                       je.budget_currency,
+                       je.budget_usd,
+                       je.created_at
                 FROM saved_job sj
                 LEFT JOIN job_event je ON je.id = sj.job_id
                 WHERE sj.user_id = :uid
                 ORDER BY sj.saved_at DESC
-                LIMIT 10
+                LIMIT 10;
             """), {"uid": user_id}).fetchall()
 
         if not rows:
@@ -532,19 +565,19 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         for r in rows:
-            title = r.title or "(no title)"
+            title = (r.title or "(no title)").strip()
             desc = (r.description or "").strip()
             platform = r.platform or "Unknown"
             budget = f"{r.budget_amount or 'N/A'} {r.budget_currency or ''}".strip()
-            usd = f" (~${r.budget_usd:.2f} USD)" if r.budget_usd else ""
+            usd = f" (~${float(r.budget_usd):.2f} USD)" if r.budget_usd else ""
             posted = (
                 r.created_at.strftime("%Y-%m-%d %H:%M UTC")
                 if r.created_at else "N/A"
             )
 
-            # Fallback URLs — prevents “text buttons are unallowed” error
+            # Ensure fallback URLs (Telegram requires valid links)
             proposal_url = r.affiliate_url or r.original_url or "https://freelancer.com"
-            original_url = r.original_url or "https://freelancer.com"
+            original_url = r.original_url or r.affiliate_url or "https://freelancer.com"
 
             msg = (
                 f"<b>{title}</b>\n"
@@ -560,11 +593,15 @@ async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("🔗 Original", url=original_url)
                 ],
                 [
-                    InlineKeyboardButton("🗑 Delete", callback_data="job:delete")
+                    InlineKeyboardButton("🗑 Delete", callback_data=f"saved:delete:{r.sid}")
                 ]
             ])
 
-            await update.effective_chat.send_message(msg, parse_mode=ParseMode.HTML, reply_markup=kb)
+            await update.effective_chat.send_message(
+                msg,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb
+            )
 
     except Exception as e:
         log.exception("saved_cmd error: %s", e)
