@@ -504,50 +504,72 @@ async def inline_admin_action_cb(update: Update, context: ContextTypes.DEFAULT_T
 # ------------- Saved list (JOIN with job_event) ----------------
 
 async def saved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show saved jobs with USD conversion."""
     try:
         with get_session() as s:
             u = get_or_create_user_by_tid(s, update.effective_user.id)
-            # ensure schema (id, user_id, job_id, saved_at) — compatible with previous runs
+
+            # Ensure both tables exist
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS job_event (
+                    id SERIAL PRIMARY KEY,
+                    platform TEXT,
+                    title TEXT,
+                    description TEXT,
+                    affiliate_url TEXT,
+                    original_url TEXT,
+                    budget_amount NUMERIC,
+                    budget_currency TEXT,
+                    budget_usd NUMERIC,
+                    created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
+                    dedup_key TEXT
+                )
+            """))
+
             s.execute(text("""
                 CREATE TABLE IF NOT EXISTS saved_job (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
                     job_id BIGINT NOT NULL,
-                    saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
+                    saved_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
                 )
             """))
+
             rows = s.execute(text("""
-                SELECT sj.job_id, sj.saved_at,
-                       je.platform, je.title, je.description, je.original_url,
-                       je.budget_amount, je.budget_currency, je.created_at
-                FROM saved_job sj
-                LEFT JOIN job_event je ON je.id = sj.job_id
-                WHERE sj.user_id = :u
-                ORDER BY sj.saved_at DESC
-                LIMIT 20
+                SELECT sj.job_id, je.title, je.platform,
+                       je.budget_amount, je.budget_currency,
+                       je.original_url, je.created_at
+                  FROM saved_job sj
+             LEFT JOIN job_event je ON je.id = sj.job_id
+                 WHERE sj.user_id = :u
+              ORDER BY sj.saved_at DESC
+                 LIMIT 20
             """), {"u": u.id}).fetchall()
 
         if not rows:
-            await update.effective_chat.send_message("💾 No saved jobs yet."); return
+            await update.effective_chat.send_message("💾 No saved jobs yet.")
+            return
 
         for r in rows:
-            b = usd_fmt(r["budget_amount"], r["budget_currency"] or "USD")
+            b = usd_fmt(r["budget_amount"], r["budget_currency"])
             posted = r["created_at"].strftime("%Y-%m-%d %H:%M UTC") if r["created_at"] else "—"
             msg = (
                 f"<b>{r['title'] or '(no title)'}</b>\n"
-                f"<b>Budget:</b> {b}\n"
-                f"<b>Platform:</b> {r['platform']}\n"
-                f"<b>Posted:</b> {posted}\n"
+                f"💰 <b>Budget:</b> {b}\n"
+                f"🌐 <b>Platform:</b> {r['platform'] or '—'}\n"
+                f"🕓 <b>Posted:</b> {posted}"
             )
-            kb = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔗 Original", url=r["original_url"] or "")],
-                 [InlineKeyboardButton("🗑 Delete", callback_data=f"saved:del:{r['job_id']}")]]
-            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Original", url=r["original_url"] or "")],
+                [InlineKeyboardButton("🗑 Delete", callback_data=f"saved:del:{r['job_id']}")]
+            ])
             await update.effective_chat.send_message(msg, parse_mode=ParseMode.HTML, reply_markup=kb)
             await asyncio.sleep(0.25)
+
     except Exception as e:
         log.exception("saved_cmd error: %s", e)
-        await update.effective_chat.send_message("⚠️ Saved list unavailable.")
+        await update.effective_chat.send_message(f"⚠️ Saved list unavailable.\nError: {e}")
+
 # ------------- Job card actions (Save/Delete) -----------------
 
 def _extract_card_title(text_html: str) -> str:
