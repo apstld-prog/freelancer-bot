@@ -632,7 +632,19 @@ if data == "job:save":
 
             # Prepare job data
             title = _extract_card_title(text_html)
-            dedup = f"manual::{abs(hash(title))%10000000}"
+            dedup = f"manual::{abs(hash(title)) % 10000000}"
+
+            # Find the "Original" URL from the message buttons
+            original_url = ""
+            try:
+                if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
+                    first_row = msg.reply_markup.inline_keyboard[0]
+                    if len(first_row) > 1 and getattr(first_row[1], "url", None):
+                        original_url = first_row[1].url or ""
+                    elif len(first_row) >= 1 and getattr(first_row[0], "url", None):
+                        original_url = first_row[0].url or ""
+            except Exception:
+                pass
 
             # Insert the job into job_event
             je = s.execute(text("""
@@ -640,7 +652,7 @@ if data == "job:save":
                     platform, title, description, affiliate_url, original_url,
                     budget_amount, budget_currency, budget_usd, created_at, dedup_key
                 )
-                VALUES (:p,:t,:d,:a,:o,:ba,:bc,:bu, NOW() AT TIME ZONE 'UTC', :dk)
+                VALUES (:p, :t, :d, :a, :o, :ba, :bc, :bu, NOW() AT TIME ZONE 'UTC', :dk)
                 ON CONFLICT (dedup_key) DO UPDATE SET title = EXCLUDED.title
                 RETURNING id
             """), {
@@ -662,6 +674,7 @@ if data == "job:save":
             )
             s.commit()
 
+        # Delete the message after saving
         await msg.delete()
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
