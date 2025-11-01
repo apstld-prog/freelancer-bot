@@ -617,14 +617,15 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
-                # Insert job
+            # Insert or fetch job
+            try:
                 je = s.execute(text("""
                     INSERT INTO job_event (
                         platform, title, description, affiliate_url, original_url,
                         budget_amount, budget_currency, budget_usd, created_at, dedup_key
                     )
-                    VALUES (:p, :t, :d, :a, :o, :ba, :bc, :bu, NOW() AT TIME ZONE 'UTC', :dk)
-                    
+                    VALUES (:p,:t,:d,:a,:o,:ba,:bc,:bu, NOW() AT TIME ZONE 'UTC', :dk)
+                    ON CONFLICT (dedup_key) DO NOTHING
                     RETURNING id
                 """), {
                     "p": "manual",
@@ -638,25 +639,19 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "dk": dedup
                 }).fetchone()
 
-                s.execute(
-                    text("INSERT INTO saved_job (user_id, job_id) VALUES (:u, :j)"),
-                    {"u": u.id, "j": je["id"]}
+                # Αν υπάρχει ήδη, πάρε το id του
+                if je is None:
+                    je = s.execute(
+                        text("SELECT id FROM job_event WHERE dedup_key = :dk"),
+                        {"dk": dedup}
+                    ).fetchone()
+            except Exception as e:
+                log.exception("job_event insert error: %s", e)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"⚠️ Job insert failed: {e}"
                 )
-                s.commit()
-
-            await msg.delete()
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="✅ Job saved successfully."
-            )
-
-        except Exception as e:
-            log.exception("job:save error: %s", e)
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"⚠️ Save failed: {e}"
-            )
-        return
+                return
 
 async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
