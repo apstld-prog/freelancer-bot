@@ -594,6 +594,18 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with get_session() as s:
                 u = get_or_create_user_by_tid(s, update.effective_user.id)
 
+                # 🔹 define original_url safely (prevents NameError)
+                original_url = ""
+                try:
+                    if msg and msg.reply_markup and msg.reply_markup.inline_keyboard:
+                        first_row = msg.reply_markup.inline_keyboard[0]
+                        if len(first_row) > 1 and getattr(first_row[1], "url", None):
+                            original_url = first_row[1].url or ""
+                        elif len(first_row) >= 1 and getattr(first_row[0], "url", None):
+                            original_url = first_row[0].url or ""
+                except Exception:
+                    original_url = ""
+
                 # Extract message content safely
                 text_html = ""
                 try:
