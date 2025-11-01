@@ -664,7 +664,11 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """))
             # Ensure schema fix: add job_id column if missing
             try:
-                s.execute(text("ALTER TABLE saved_job ADD COLUMN IF NOT EXISTS job_id BIGINT"))
+                try:
+    s.execute(text("ALTER TABLE saved_job ADD COLUMN job_id BIGINT"))
+    s.commit()
+except Exception:
+    pass
                 s.commit()
             except Exception:
                 pass
@@ -721,8 +725,6 @@ async def saved_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.exception("saved delete error: %s", e)
 
-# ------------- Self-test (exact old look + USD in parentheses) ---------
-
 async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show 2 sample jobs (same visual layout as your old bot)"""
     try:
@@ -774,50 +776,6 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.exception("selftest error: %s", e)
         await update.effective_chat.send_message("⚠️ Self-test failed.")
-    try:
-        # 1) Freelancer
-        txt1 = (
-            "<b>Design a Modern Company Logo</b>\n"
-            f"<b>Budget:</b> 50.00 EUR (~${50.00*FX['EUR']:.2f} USD)\n"
-            "<b>Source:</b> Freelancer\n"
-            "<b>Match:</b> logo\n"
-            f"<i>Posted:</i> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-        )
-        kb1 = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📄 Proposal", url="https://www.freelancer.com/projects/sample"),
-             InlineKeyboardButton("🔗 Original", url="https://www.freelancer.com/projects/sample")],
-            [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
-             InlineKeyboardButton("🗑 Delete", callback_data="job:delete")],
-        ])
-        await update.effective_chat.send_message(txt1, parse_mode=ParseMode.HTML, reply_markup=kb1)
-        # record dummy feed event for /feedstatus
-        ensure_feed_events_schema()
-        record_event("freelancer")
-
-        await asyncio.sleep(0.4)
-
-        # 2) PPH
-        txt2 = (
-            "<b>WordPress Landing Page</b>\n"
-            "<b>Budget:</b> 120.00 USD\n"
-            "<b>Source:</b> PeoplePerHour\n"
-            "<b>Match:</b> wordpress\n"
-            f"<i>Posted:</i> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-        )
-        kb2 = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📄 Proposal", url="https://www.peopleperhour.com/freelance-jobs/sample"),
-             InlineKeyboardButton("🔗 Original", url="https://www.peopleperhour.com/freelance-jobs/sample")],
-            [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
-             InlineKeyboardButton("🗑 Delete", callback_data="job:delete")],
-        ])
-        await update.effective_chat.send_message(txt2, parse_mode=ParseMode.HTML, reply_markup=kb2)
-        record_event("peopleperhour")
-
-        await update.effective_chat.send_message("✅ Self-test completed — 2 sample jobs posted.")
-    except Exception as e:
-        log.exception("selftest error: %s", e)
-        await update.effective_chat.send_message("⚠️ Self-test failed.")
-
 # ------------- Menu actions router (keeps old menu behaviour) ---------
 
 async def menu_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
