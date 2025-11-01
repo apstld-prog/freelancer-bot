@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Set
 from types import SimpleNamespace
 
-from telegram import Update, InlineKeyboardButton, ΦInlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder, Application, CommandHandler, CallbackQueryHandler,
