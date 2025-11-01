@@ -662,7 +662,8 @@ async def job_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         saved_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'UTC')
                     )
                 """))
-                   # Ensure schema fix: add job_id column if missing
+
+                # Ensure schema fix: add job_id column if missing
         try:
             s.execute(text("ALTER TABLE saved_job ADD COLUMN job_id BIGINT"))
             s.commit()
