@@ -1,34 +1,43 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+# ==========================================================
+# 🚀 START.SH — Freelancer Bot full service (Render stable)
+# ==========================================================
+
+set -euo pipefail
 
 echo "======================================================"
 echo "🚀 Starting Freelancer Alert Bot full service"
 echo "======================================================"
-date
-
+date -u
 echo "Environment check:"
-echo "WORKER_INTERVAL=${WORKER_INTERVAL}"
-echo "KEYWORD_FILTER_MODE=${KEYWORD_FILTER_MODE}"
-echo "Render Service: https://${RENDER_EXTERNAL_HOSTNAME}"
+echo "WORKER_INTERVAL=${WORKER_INTERVAL:-180}"
+echo "KEYWORD_FILTER_MODE=${KEYWORD_FILTER_MODE:-on}"
+echo "Render Service: ${RENDER_EXTERNAL_URL:-${RENDER_SERVICE_NAME:-unknown}}"
 echo "------------------------------------------------------"
 
-# Kill any stale workers
+LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 echo "✅ Logs directory ready."
-mkdir -p logs
 
+# --- Stop stale worker processes ---
 echo "👉 Cleaning any stale workers..."
-pkill -f worker_freelancer.py || true
-pkill -f worker_pph.py || true
-pkill -f worker_skywalker.py || true
+pkill -f "workers/worker_freelancer.py" >/dev/null 2>&1 || true
+pkill -f "workers/worker_pph.py"        >/dev/null 2>&1 || true
+pkill -f "workers/worker_skywalker.py"  >/dev/null 2>&1 || true
+sleep 2
 echo "✅ Old workers terminated (if any)."
 
-# Start workers
+# --- Start background workers ---
 echo "👉 Starting background workers..."
-python3 workers/worker_freelancer.py >> logs/freelancer.log 2>&1 &
-python3 workers/worker_pph.py >> logs/pph.log 2>&1 &
-python3 workers/worker_skywalker.py >> logs/skywalker.log 2>&1 &
+nohup python3 -u workers/worker_freelancer.py > "$LOG_DIR/worker_freelancer.log" 2>&1 &
+nohup python3 -u workers/worker_pph.py        > "$LOG_DIR/worker_pph.log" 2>&1 &
+nohup python3 -u workers/worker_skywalker.py  > "$LOG_DIR/worker_skywalker.log" 2>&1 &
 echo "✅ Workers running."
+echo
 
-# Start API + Bot
+# --- Start main FastAPI + Telegram bot (foreground) ---
 echo "👉 Starting FastAPI + Telegram bot via uvicorn..."
-python3 -m uvicorn app:app --host 0.0.0.0 --port 10000
+PORT="${PORT:-10000}"
+
+# VERY IMPORTANT: run in foreground, single process
+exec uvicorn app:app --host 0.0.0.0 --port "${PORT}" --no-access-log --timeout-keep-alive 120
