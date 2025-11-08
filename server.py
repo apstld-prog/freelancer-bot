@@ -1,34 +1,34 @@
-# server.py
+import os
 import logging
 from fastapi import FastAPI, Request
 from bot import application
 
-logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("server")
+app = FastAPI()
 
-app = FastAPI(title="Freelancer Bot API")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BASE_URL = os.getenv("WEBHOOK_BASE_URL")
+SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
+
+WEBHOOK_URL = f"{BASE_URL}/{SECRET}"
+
+@app.on_event("startup")
+async def startup():
+    log.info("Starting Telegram application...")
+    await application.initialize()
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    await application.bot.set_webhook(url=WEBHOOK_URL)
+    await application.start()
+    log.info("Webhook set and application started.")
+
+@app.post("/{token}")
+async def telegram_webhook(request: Request, token: str):
+    if token != SECRET:
+        return {"status": "ignored"}
+    data = await request.json()
+    await application.process_update(application.update_queue._parse_update(data))
+    return {"ok": True}
 
 @app.get("/")
 def root():
-    return {"status": "running"}
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-@app.post("/webhook/{token}")
-async def tg_webhook(token: str, request: Request):
-    if token != application.bot.token:
-        log.error("Invalid webhook token")
-        return {"error": "unauthorized"}
-
-    data = await request.json()
-    await application.update_queue.put(data)
-    return {"ok": True}
-
-@app.on_event("startup")
-async def on_startup():
-    log.info("Starting Telegram application...")
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
+    return {"status": "ok"}
