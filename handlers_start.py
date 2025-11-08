@@ -78,3 +78,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     log.info("âœ… /start executed for user %s", user.id)
 
+
+from telegram.ext import CommandHandler
+
+def setup(app):
+    app.add_handler(CommandHandler("start", start_command))

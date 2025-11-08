@@ -1,5 +1,7 @@
 # worker_pph.py — FULL VERSION (deduplication + keyword + USD + posted time)
 
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import os
 import asyncio
 import logging

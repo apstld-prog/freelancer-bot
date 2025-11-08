@@ -8,6 +8,9 @@ from handlers_help import setup as setup_help
 from handlers_settings import setup as setup_settings
 from handlers_jobs import setup as setup_jobs
 
+def build_application():
+    return application
+
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 setup_start(application)
