@@ -1,4 +1,4 @@
-﻿# worker_freelancer.py â€” FULL VERSION (deduplication + keyword + USD + posted time)
+# worker_skywalker.py — FULL VERSION (deduplication + keyword + USD + posted time)
 
 import os
 import asyncio
@@ -11,11 +11,11 @@ from db_events import record_event
 from db_keywords import list_keywords
 from utils_fx import convert_to_usd
 
-log = logging.getLogger("worker.freelancer")
+log = logging.getLogger("worker.skywalker")
 logging.basicConfig(level=logging.INFO)
 
-API_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
-PLATFORM = "freelancer"
+API_URL = "https://skywalker.gr/api/jobs"
+PLATFORM = "skywalker"
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "120"))
 KEYWORD_MODE = os.getenv("KEYWORD_FILTER_MODE", "on").lower() == "on"
 
@@ -38,17 +38,11 @@ def make_fingerprint(title: str, url: str) -> str:
     raw = f"{PLATFORM}|{title.strip()}|{url.strip()}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-async def fetch_freelancer_jobs():
-    params = {
-        "limit": 30,
-        "sort_field": "time_submitted",
-        "sort_direction": "desc",
-        "full_description": True,
-    }
+async def fetch_skywalker_jobs():
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(API_URL, params=params)
+        r = await client.get(API_URL)
         r.raise_for_status()
-        return r.json().get("result", {}).get("projects", [])
+        return r.json().get("jobs", [])
 
 async def process_jobs():
     from bot import build_application
@@ -60,18 +54,17 @@ async def process_jobs():
         log.warning("No keywords found in database. Worker idle.")
         return
 
-    jobs = await fetch_freelancer_jobs()
+    jobs = await fetch_skywalker_jobs()
     count_new = 0
 
     with get_session() as s:
         for job in jobs:
             title = job.get("title", "").strip()
-            desc = job.get("preview_description", "").strip()
-            budget = job.get("budget", {}) or {}
-            amount = budget.get("minimum", 0)
-            currency = budget.get("currency", {}).get("code", "USD")
-            url = f"https://www.freelancer.com/projects/{job.get('seo_url','')}"
-            created_ts = job.get("submitdate") or job.get("time_submitted")
+            desc = job.get("description", "").strip()
+            budget = job.get("salary", 0)
+            currency = "EUR"
+            url = job.get("url", "https://skywalker.gr")
+            created_ts = job.get("published_at")
             posted = posted_ago(created_ts)
 
             fp = make_fingerprint(title, url)
@@ -86,11 +79,11 @@ async def process_jobs():
             if KEYWORD_MODE and not match_kw:
                 continue
 
-            usd_amount = convert_to_usd(amount, currency)
+            usd_amount = convert_to_usd(budget, currency)
             msg = (
                 f"<b>{title}</b>\n"
-                f"<b>Budget:</b> {amount} {currency} (~${usd_amount} USD)\n"
-                f"<b>Source:</b> Freelancer\n"
+                f"<b>Budget:</b> {budget} {currency} (~${usd_amount} USD)\n"
+                f"<b>Source:</b> Skywalker\n"
                 f"<b>Match:</b> {', '.join(match_kw) if match_kw else 'N/A'}\n"
                 f"{desc[:400]}...\n"
                 f"<i>Posted: {posted}</i>"
@@ -111,10 +104,10 @@ async def process_jobs():
                 log.error("Send failed: %s", e)
 
     record_event(PLATFORM)
-    log.info("âœ… %s cycle complete â€” %d new jobs sent", PLATFORM, count_new)
+    log.info("✅ %s cycle complete — %d new jobs sent", PLATFORM, count_new)
 
 async def run_worker():
-    log.info("ðŸš€ Starting %s worker...", PLATFORM)
+    log.info("🚀 Starting %s worker...", PLATFORM)
     while True:
         try:
             await process_jobs()
@@ -124,4 +117,3 @@ async def run_worker():
 
 if __name__ == "__main__":
     asyncio.run(run_worker())
-
