@@ -28,3 +28,4 @@ def fetch_freelancer_jobs():
     return jobs
 
 
+

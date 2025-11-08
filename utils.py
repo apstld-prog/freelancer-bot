@@ -15,3 +15,4 @@ def ensure_user(telegram_id: int):
     session.close()
     return user
 
+

@@ -181,3 +181,4 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
     return len(to_insert)
 
 
+

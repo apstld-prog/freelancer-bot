@@ -1,145 +1,58 @@
-﻿# worker_pph.py â€” FULL VERSION (deduplication + keyword + USD + posted time)
-
-import os, sys
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-import os
-import asyncio
-import logging
-import hashlib
-from datetime import datetime, timezone
-import httpx
+﻿import logging
+import time
+import requests
 from db import get_session
 from db_keywords import list_keywords
-from utils_fx import convert_to_usd
+from db_events import record_event
+from utils import get_all_active_users
 
 log = logging.getLogger("worker.pph")
-logging.basicConfig(level=logging.INFO)
 
-API_URL = "https://www.peopleperhour.com/api/v1/jobs"
-PLATFORM = "peopleperhour"
-WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "120"))
-KEYWORD_MODE = os.getenv("KEYWORD_FILTER_MODE", "on").lower() == "on"
+API_URL = "https://www.peopleperhour.com/site-search"
 
-def posted_ago(ts_str: str) -> str:
-    try:
-        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-        diff = datetime.now(timezone.utc) - dt
-        if diff.days > 0:
-            return f"{diff.days} days ago"
-        elif diff.seconds > 3600:
-            return f"{diff.seconds // 3600} hours ago"
-        elif diff.seconds > 60:
-            return f"{diff.seconds // 60} minutes ago"
-        else:
-            return "just now"
-    except Exception:
-        return "N/A"
 
-def make_fingerprint(title: str, url: str) -> str:
-    raw = f"{PLATFORM}|{title.strip()}|{url.strip()}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+def run_pph_worker():
+    log.info("🚀 Starting peopleperhour worker...")
 
-async def fetch_pph_jobs():
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(API_URL)
-        r.raise_for_status()
-        return r.json().get("data", [])
-
-async def process_jobs():
-    from bot import build_application
-    app = build_application()
-
-    with get_session() as s:
-        keywords = [k.keyword.lower() for k in list_keywords(s)]
-    if not keywords:
-        log.warning("No keywords found in database. Worker idle.")
-        return
-
-    jobs = await fetch_pph_jobs()
-    count_new = 0
-
-    with get_session() as s:
-        for job in jobs:
-            title = job.get("title", "").strip()
-            desc = job.get("description", "").strip()
-            budget = job.get("budget", 0)
-            currency = job.get("currency", "GBP")
-            url = job.get("url", "https://peopleperhour.com")
-            created_ts = job.get("created_at")
-            posted = posted_ago(created_ts)
-
-            fp = make_fingerprint(title, url)
-            exists = s.execute(
-                "SELECT 1 FROM job_fingerprints WHERE fingerprint=:fp",
-                {"fp": fp}
-            ).fetchone()
-            if exists:
-                continue
-
-            match_kw = [k for k in keywords if k in title.lower() or k in desc.lower()]
-            if KEYWORD_MODE and not match_kw:
-                continue
-
-            usd_amount = convert_to_usd(budget, currency)
-            msg = (
-                f"<b>{title}</b>\n"
-                f"<b>Budget:</b> {budget} {currency} (~${usd_amount} USD)\n"
-                f"<b>Source:</b> PeoplePerHour\n"
-                f"<b>Match:</b> {', '.join(match_kw) if match_kw else 'N/A'}\n"
-                f"{desc[:400]}...\n"
-                f"<i>Posted: {posted}</i>"
-            )
-
-            try:
-                await app.bot.send_message(chat_id=os.getenv("ADMIN_IDS").split(",")[0],
-                                           text=msg, parse_mode="HTML",
-                                           disable_web_page_preview=True)
-                s.execute(
-                    "INSERT INTO job_fingerprints(fingerprint, platform, title, url, created_at) "
-                    "VALUES (:fp, :p, :t, :u, NOW())",
-                    {"fp": fp, "p": PLATFORM, "t": title, "u": url},
-                )
-                s.commit()
-                count_new += 1
-            except Exception as e:
-                log.error("Send failed: %s", e)
-
-    record_event(PLATFORM)
-    log.info("âœ… %s cycle complete â€” %d new jobs sent", PLATFORM, count_new)
-
-async def run_worker():
-    log.info("ðŸš€ Starting %s worker...", PLATFORM)
     while True:
         try:
-            await process_jobs()
+            with get_session() as s:
+                users = get_all_active_users(s)
+
+                for u in users:
+                    user_id = u.id          # ✅ FIX
+                    kws = list_keywords(user_id)  # ✅ FIX
+
+                    if not kws:
+                        continue
+
+                    for kw in kws:
+                        r = requests.get(
+                            API_URL,
+                            params={"q": kw},
+                            timeout=15
+                        )
+
+                        if r.status_code != 200:
+                            continue
+
+                        html = r.text
+
+                        # Δεν κάνουμε parsing εδώ – placeholder
+                        record_event(
+                            user_id=user_id,
+                            platform="peopleperhour",
+                            title=f"Result for {kw}",
+                            description="",
+                            affiliate_url=None,
+                            original_url="https://peopleperhour.com/",
+                            budget_amount=None,
+                            budget_currency=None,
+                            keyword=kw
+                        )
+
         except Exception as e:
-            log.error("Error in worker loop: %s", e)
-        await asyncio.sleep(WORKER_INTERVAL)
+            log.error(f"Error in worker loop: {e}")
 
-if __name__ == "__main__":
-    asyncio.run(run_worker())
-
-
-# --- inline record_event (avoid import issues from workers) ---
-from sqlalchemy import text as _sql_text
-from db import get_session as _get_session
-
-def record_event(platform: str, keyword_match: str = None):
-    try:
-        with _get_session() as _s:
-            _s.execute(_sql_text("""
-                CREATE TABLE IF NOT EXISTS feed_event (
-                    id SERIAL PRIMARY KEY,
-                    platform TEXT,
-                    keyword_match TEXT,
-                    created_at TIMESTAMP DEFAULT NOW()
-                );
-            """))
-            _s.execute(_sql_text(
-                "INSERT INTO feed_event(platform, keyword_match, created_at) VALUES (:p, :k, NOW())"
-            ), {"p": platform, "k": keyword_match or ""})
-            _s.commit()
-    except Exception as e:
-        import logging as _logging
-        _logging.getLogger("worker").warning("record_event failed: %s", e)
+        time.sleep(60)
 

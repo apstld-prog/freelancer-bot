@@ -17,3 +17,4 @@ def fetch_kariera() -> List[Dict]: return []
 def fetch_careerjet() -> List[Dict]: return []
 
 
+

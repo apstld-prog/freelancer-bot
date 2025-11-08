@@ -36,3 +36,4 @@ def get_platform_stats(hours=24):
     return stats
 
 
+

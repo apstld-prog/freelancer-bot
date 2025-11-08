@@ -47,3 +47,4 @@ def fetch(listing_url: str):
     return out
 
 
+
