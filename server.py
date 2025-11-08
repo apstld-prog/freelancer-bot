@@ -1,32 +1,34 @@
+# server.py
 import logging
 from fastapi import FastAPI, Request
 from bot import application
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("server")
+log = logging.getLogger("server")
 
 app = FastAPI(title="Freelancer Bot API")
 
-# Root endpoint — must return 200 for Render health checks
 @app.get("/")
 def root():
-    return {"status": "ok"}
-
-@app.head("/")
-def head_root():
-    return {"status": "ok"}
+    return {"status": "running"}
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# Telegram Webhook
 @app.post("/webhook/{token}")
-async def telegram_webhook(token: str, request: Request):
+async def tg_webhook(token: str, request: Request):
     if token != application.bot.token:
-        logger.error("Invalid webhook token")
+        log.error("Invalid webhook token")
         return {"error": "unauthorized"}
 
     data = await request.json()
     await application.update_queue.put(data)
     return {"ok": True}
+
+@app.on_event("startup")
+async def on_startup():
+    log.info("Starting Telegram application...")
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()

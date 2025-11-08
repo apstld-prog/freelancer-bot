@@ -33,6 +33,9 @@ def close_session(db):
         pass
 
 def get_or_create_user_by_tid(tid: int):
+    """
+    Returns user_id for given telegram_id, creates if missing.
+    """
     db = get_session()
     try:
         res = db.execute(
