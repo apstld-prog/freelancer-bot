@@ -1,89 +1,131 @@
-﻿import asyncio
+﻿import time
 import logging
-import httpx
-from datetime import datetime, timezone
+import os
+import requests
+from bs4 import BeautifulSoup
 
-from db import get_session
-from db_keywords import get_keywords
-from db_events import record_event, has_been_sent
+from db import get_session, close_session
+from db_keywords import get_keywords_for_user
+from db_events import record_event
+from utils import send_job_to_user
 
-logger = logging.getLogger("worker.pph")
+log = logging.getLogger("worker.pph")
 
-API_URL = "https://www.peopleperhour.com/api/hourlies"
+INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
 
-
-async def fetch_jobs_for_keywords(keywords):
-    async with httpx.AsyncClient(timeout=15) as client:
-        query = ",".join(keywords)
-        params = {
-            "search": query,
-            "sort": "newest",
-            "page": 1
-        }
-        r = await client.get(API_URL, params=params)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("hourlies", [])
+BASE_URL = "https://www.peopleperhour.com/freelance-jobs?search="
 
 
-async def worker_loop():
-    logger.info("🚀 Starting peopleperhour worker...")
+def fetch_pph(keyword: str):
+    """
+    Scrapes PeoplePerHour for matching jobs.
+    """
+    url = BASE_URL + requests.utils.quote(keyword)
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
 
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return []
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    results = soup.select("li.project")
+
+    jobs = []
+
+    for item in results:
+        try:
+            title_el = item.select_one("h3 a")
+            if not title_el:
+                continue
+
+            title = title_el.get_text(strip=True)
+            link = "https://www.peopleperhour.com" + title_el.get("href")
+
+            desc_el = item.select_one(".project__description")
+            desc = desc_el.get_text(strip=True) if desc_el else ""
+
+            budget_el = item.select_one(".project__budget")
+            budget_text = budget_el.get_text(strip=True) if budget_el else None
+
+            amount = None
+            currency = None
+
+            if budget_text:
+                # Examples:
+                # "£50", "€120", "$300"
+                try:
+                    currency = budget_text[0]
+                    amount = int("".join(c for c in budget_text[1:] if c.isdigit()))
+                except Exception:
+                    amount = None
+                    currency = None
+
+            job_id = link.split("-")[-1]  # fallback unique ID
+
+            jobs.append({
+                "job_id": job_id,
+                "title": title,
+                "description": desc,
+                "original_url": link,
+                "affiliate_url": link,  # replace later if needed
+                "budget_amount": amount,
+                "budget_currency": currency
+            })
+        except Exception:
+            continue
+
+    return jobs
+
+
+def run_once():
+    db = get_session()
+
+    try:
+        users = db.execute("SELECT telegram_id FROM users").fetchall()
+    finally:
+        close_session(db)
+
+    for (telegram_id,) in users:
+        keywords = get_keywords_for_user(telegram_id)
+        if not keywords:
+            continue
+
+        for kw in keywords:
+            jobs = fetch_pph(kw)
+            if not jobs:
+                continue
+
+            for job in jobs:
+                event = {
+                    "platform": "pph",
+                    "job_id": job["job_id"],
+                    "telegram_id": telegram_id,
+                    "title": job["title"],
+                    "description": job["description"],
+                    "original_url": job["original_url"],
+                    "affiliate_url": job["affiliate_url"],
+                    "budget_amount": job["budget_amount"],
+                    "budget_currency": job["budget_currency"],
+                }
+
+                if record_event(**event):
+                    send_job_to_user(telegram_id, event)
+
+
+def main_loop():
+    log.info("🚀 Starting PeoplePerHour worker...")
     while True:
         try:
-            session = get_session()
-
-            # ---------------------------------------------
-            # Fetch all users who have keywords
-            # ---------------------------------------------
-            rows = session.execute(
-                "SELECT DISTINCT user_id FROM keyword"
-            ).fetchall()
-            user_ids = [r[0] for r in rows]
-
-            session.close()
-
-            # ---------------------------------------------
-            # Run per-user
-            # ---------------------------------------------
-            for uid in user_ids:
-                keywords = get_keywords(uid)
-                if not keywords:
-                    continue
-
-                jobs = await fetch_jobs_for_keywords(keywords)
-
-                # -----------------------------------------
-                # Filter + Send events to db_events
-                # -----------------------------------------
-                for job in jobs:
-                    job_id = job.get("id")
-                    title = job.get("title", "")
-                    desc = job.get("description", "")
-
-                    if not job_id:
-                        continue
-
-                    # Avoid duplicates
-                    if has_been_sent(uid, "pph", job_id):
-                        continue
-
-                    record_event(
-                        user_id=uid,
-                        platform="pph",
-                        external_id=str(job_id),
-                        title=title,
-                        description=desc,
-                        affiliate_url=None,
-                        original_url=f"https://www.peopleperhour.com/hourlie/{job_id}"
-                    )
-
+            run_once()
         except Exception as e:
-            logger.error(f"Error in worker loop: {e}")
+            log.error(f"Worker PPH error: {e}")
+        time.sleep(INTERVAL)
 
-        await asyncio.sleep(40)
 
-
-def start():
-    asyncio.run(worker_loop())
-
+if __name__ == "__main__":
+    main_loop()

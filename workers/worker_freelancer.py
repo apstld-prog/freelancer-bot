@@ -1,99 +1,105 @@
-﻿import asyncio
+﻿import time
 import logging
-import httpx
-from datetime import datetime, timezone
+import os
+import requests
 
-from db import get_session
-from db_keywords import get_keywords
-from db_events import record_event, has_been_sent
+from db import get_session, close_session
+from db_keywords import get_keywords_for_user
+from db_events import record_event
+from utils import send_job_to_user
 
-logger = logging.getLogger("worker.freelancer")
+log = logging.getLogger("worker.freelancer")
+
+INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
+
+BASE_URL = (
+    "https://www.freelancer.com/api/projects/0.1/projects/active/"
+    "?full_description=false&job_details=false&limit=30&offset=0"
+    "&sort_field=time_submitted&sort_direction=desc&query="
+)
 
 
-API_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
-
-
-async def fetch_jobs_for_keywords(keywords):
-    async with httpx.AsyncClient(timeout=15) as client:
-        query = ",".join(keywords)
-        params = {
-            "full_description": "false",
-            "job_details": "false",
-            "limit": 30,
-            "offset": 0,
-            "sort_field": "time_submitted",
-            "sort_direction": "desc",
-            "query": query
-        }
-        r = await client.get(API_URL, params=params)
-        r.raise_for_status()
+def fetch_freelancer(keyword: str):
+    """Fetch jobs from Freelancer.com API for a given keyword."""
+    try:
+        url = BASE_URL + requests.utils.quote(keyword)
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            return []
         data = r.json()
-        return data.get("result", {}).get("projects", [])
+    except Exception:
+        return []
+
+    projects = data.get("result", {}).get("projects", [])
+    jobs = []
+
+    for p in projects:
+        job_id = p.get("id")
+        title = p.get("title", "")
+        desc = p.get("preview_description", "")
+        link = f"https://www.freelancer.com/projects/{job_id}"
+
+        budget = p.get("budget", {})
+        amount = budget.get("minimum")
+        currency = budget.get("currency", {}).get("code")
+
+        jobs.append({
+            "job_id": job_id,
+            "title": title,
+            "description": desc,
+            "original_url": link,
+            "affiliate_url": link,  # Replace later with affiliate logic
+            "budget_amount": amount,
+            "budget_currency": currency
+        })
+
+    return jobs
 
 
-async def worker_loop():
-    logger.info("🚀 Starting freelancer worker...")
+def run_once():
+    db = get_session()
 
+    try:
+        users = db.execute("SELECT telegram_id FROM users").fetchall()
+    finally:
+        close_session(db)
+
+    for (telegram_id,) in users:
+        keywords = get_keywords_for_user(telegram_id)
+        if not keywords:
+            continue
+
+        for kw in keywords:
+            jobs = fetch_freelancer(kw)
+            if not jobs:
+                continue
+
+            for job in jobs:
+                event = {
+                    "platform": "freelancer",
+                    "job_id": job["job_id"],
+                    "telegram_id": telegram_id,
+                    "title": job["title"],
+                    "description": job["description"],
+                    "original_url": job["original_url"],
+                    "affiliate_url": job["affiliate_url"],
+                    "budget_amount": job["budget_amount"],
+                    "budget_currency": job["budget_currency"],
+                }
+
+                if record_event(**event):
+                    send_job_to_user(telegram_id, event)
+
+
+def main_loop():
+    log.info("🚀 Starting freelancer worker...")
     while True:
         try:
-            session = get_session()
-
-            # ---------------------------------------------
-            # Fetch all users who have keywords
-            # ---------------------------------------------
-            rows = session.execute(
-                "SELECT DISTINCT user_id FROM keyword"
-            ).fetchall()
-            user_ids = [r[0] for r in rows]
-
-            session.close()
-
-            # ---------------------------------------------
-            # Run per-user
-            # ---------------------------------------------
-            for uid in user_ids:
-                keywords = get_keywords(uid)
-
-                if not keywords:
-                    continue
-
-                jobs = await fetch_jobs_for_keywords(keywords)
-
-                # -----------------------------------------
-                # Filter + Send events to db_events
-                # -----------------------------------------
-                for job in jobs:
-                    job_id = job.get("id")
-                    title = job.get("title", "")
-                    desc = job.get("preview_description", "")
-
-                    if not job_id:
-                        continue
-
-                    # Avoid duplicates
-                    if has_been_sent(uid, "freelancer", job_id):
-                        continue
-
-                    # ✅ Record job in feed_event
-                    record_event(
-                        user_id=uid,
-                        platform="freelancer",
-                        external_id=str(job_id),
-                        title=title,
-                        description=desc,
-                        affiliate_url=None,
-                        original_url=f"https://www.freelancer.com/projects/{job_id}"
-                    )
-
+            run_once()
         except Exception as e:
-            logger.error(f"Error in worker loop: {e}")
-
-        # ---------------------------------------------
-        # Worker sleep interval
-        # ---------------------------------------------
-        await asyncio.sleep(40)
+            log.error(f"Worker Freelancer error: {e}")
+        time.sleep(INTERVAL)
 
 
-def start():
-    asyncio.run(worker_loop())
-
+if __name__ == "__main__":
+    main_loop()

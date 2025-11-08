@@ -1,88 +1,111 @@
-﻿import asyncio
+﻿import time
 import logging
-import httpx
-from datetime import datetime, timezone
+import os
+import requests
+from bs4 import BeautifulSoup
 
-from db import get_session
-from db_keywords import get_keywords
-from db_events import record_event, has_been_sent
+from db import get_session, close_session
+from db_keywords import get_keywords_for_user
+from db_events import record_event
+from utils import send_job_to_user
 
-logger = logging.getLogger("worker.skywalker")
+log = logging.getLogger("worker.skywalker")
 
-API_URL = "https://www.skywalker.gr/api/v1/jobs"
+INTERVAL = int(os.getenv("WORKER_INTERVAL", "180"))
 
-
-async def fetch_jobs_for_keywords(keywords):
-    async with httpx.AsyncClient(timeout=15) as client:
-        query = ",".join(keywords)
-        params = {
-            "search": query,
-            "order": "desc",
-            "sort": "date"
-        }
-        r = await client.get(API_URL, params=params)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("results", [])
+BASE_URL = "https://www.skywalker.gr/el/aggelies-ergasias?keywords="
 
 
-async def worker_loop():
-    logger.info("🚀 Starting skywalker worker...")
+def fetch_skywalker(keyword: str):
+    """
+    Scrapes Skywalker job listings based on the keyword.
+    """
+    url = BASE_URL + requests.utils.quote(keyword)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return []
+    except Exception:
+        return []
 
+    soup = BeautifulSoup(r.text, "html.parser")
+    items = soup.select("div.job-item")
+    jobs = []
+
+    for item in items:
+        try:
+            title_el = item.select_one("a.job-title")
+            if not title_el:
+                continue
+
+            title = title_el.get_text(strip=True)
+            link = "https://www.skywalker.gr" + title_el.get("href")
+
+            desc_el = item.select_one("div.job-description")
+            desc = desc_el.get_text(strip=True) if desc_el else ""
+
+            job_id = link.split("/")[-1].split("-")[0]
+
+            jobs.append({
+                "job_id": job_id,
+                "title": title,
+                "description": desc,
+                "original_url": link,
+                "affiliate_url": link,
+                "budget_amount": None,
+                "budget_currency": None,
+            })
+        except Exception:
+            continue
+
+    return jobs
+
+
+def run_once():
+    db = get_session()
+
+    try:
+        users = db.execute("SELECT telegram_id FROM users").fetchall()
+    finally:
+        close_session(db)
+
+    for (telegram_id,) in users:
+        keywords = get_keywords_for_user(telegram_id)
+        if not keywords:
+            continue
+
+        for kw in keywords:
+            jobs = fetch_skywalker(kw)
+            if not jobs:
+                continue
+
+            for job in jobs:
+                event = {
+                    "platform": "skywalker",
+                    "job_id": job["job_id"],
+                    "telegram_id": telegram_id,
+                    "title": job["title"],
+                    "description": job["description"],
+                    "original_url": job["original_url"],
+                    "affiliate_url": job["affiliate_url"],
+                    "budget_amount": None,
+                    "budget_currency": None,
+                }
+
+                if record_event(**event):
+                    send_job_to_user(telegram_id, event)
+
+
+def main_loop():
+    log.info("🚀 Starting Skywalker worker...")
     while True:
         try:
-            session = get_session()
-
-            # ---------------------------------------------
-            # Fetch all users who have keywords
-            # ---------------------------------------------
-            rows = session.execute(
-                "SELECT DISTINCT user_id FROM keyword"
-            ).fetchall()
-            user_ids = [r[0] for r in rows]
-
-            session.close()
-
-            # ---------------------------------------------
-            # Run per-user
-            # ---------------------------------------------
-            for uid in user_ids:
-                keywords = get_keywords(uid)
-                if not keywords:
-                    continue
-
-                jobs = await fetch_jobs_for_keywords(keywords)
-
-                # -----------------------------------------
-                # Record events & avoid duplicates
-                # -----------------------------------------
-                for job in jobs:
-                    job_id = job.get("id")
-                    title = job.get("title", "")
-                    desc = job.get("description", "")
-
-                    if not job_id:
-                        continue
-
-                    if has_been_sent(uid, "skywalker", job_id):
-                        continue
-
-                    record_event(
-                        user_id=uid,
-                        platform="skywalker",
-                        external_id=str(job_id),
-                        title=title,
-                        description=desc,
-                        affiliate_url=None,
-                        original_url=f"https://www.skywalker.gr/el/aggelia/ergasia/{job_id}"
-                    )
-
+            run_once()
         except Exception as e:
-            logger.error(f"Error in worker loop: {e}")
+            log.error(f"Worker Skywalker error: {e}")
+        time.sleep(INTERVAL)
 
-        await asyncio.sleep(50)
 
-
-def start():
-    asyncio.run(worker_loop())
-
+if __name__ == "__main__":
+    main_loop()
