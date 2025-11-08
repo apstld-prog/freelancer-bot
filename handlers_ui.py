@@ -1,4 +1,4 @@
-# handlers_ui.py — FINAL FULL VERSION (Nov 2025)
+﻿# handlers_ui.py â€” FINAL FULL VERSION (Nov 2025)
 
 import logging
 from datetime import datetime
@@ -23,10 +23,10 @@ def user_header(s, uid):
     ).fetchone()
 
     if not row or not row.trial_end:
-        return "⏳ <b>Trial:</b> unknown\n"
+        return "â³ <b>Trial:</b> unknown\n"
 
     dt = row.trial_end.strftime("%Y-%m-%d %H:%M UTC")
-    return f"⏳ <b>Trial ends:</b> {dt}\n"
+    return f"â³ <b>Trial ends:</b> {dt}\n"
 
 
 # ----------------------------------------------------------------------
@@ -44,7 +44,7 @@ async def handle_ui_callback(update, context: ContextTypes.DEFAULT_TYPE):
 
     # -------------------------
     if action == "addkw":
-        msg = header + "➕ <b>Add Keywords</b>\nWrite keywords separated by comma."
+        msg = header + "âž• <b>Add Keywords</b>\nWrite keywords separated by comma."
         await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
         return
 
@@ -57,10 +57,10 @@ async def handle_ui_callback(update, context: ContextTypes.DEFAULT_TYPE):
             ).fetchone()
         kws = row.keywords or "(none)"
         msg = header + (
-            "⚙ <b>Your Settings</b>\n"
-            f"• Keywords: {kws}\n"
-            f"• Country: {row.country or 'ALL'}\n"
-            f"• Proposal: {row.proposal or '(none)'}"
+            "âš™ <b>Your Settings</b>\n"
+            f"â€¢ Keywords: {kws}\n"
+            f"â€¢ Country: {row.country or 'ALL'}\n"
+            f"â€¢ Proposal: {row.proposal or '(none)'}"
         )
         await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
         return
@@ -76,16 +76,16 @@ async def handle_ui_callback(update, context: ContextTypes.DEFAULT_TYPE):
                 LIMIT 10
             """)).fetchall()
 
-        msg = header + "<b>💾 Saved Jobs</b>\n"
+        msg = header + "<b>ðŸ’¾ Saved Jobs</b>\n"
         if not rows:
             msg += "(none)"
         else:
             for r in rows:
                 msg += (
                     f"\n<b>{r.title}</b>\n"
-                    f"🪙 {r.budget_amount} {r.budget_currency}\n"
-                    f"🌍 {r.platform}\n"
-                    f"⏱ {r.created_at}\n"
+                    f"ðŸª™ {r.budget_amount} {r.budget_currency}\n"
+                    f"ðŸŒ {r.platform}\n"
+                    f"â± {r.created_at}\n"
                     f"{r.affiliate_url}\n"
                     "______________________________\n"
                 )
@@ -95,14 +95,14 @@ async def handle_ui_callback(update, context: ContextTypes.DEFAULT_TYPE):
 
     # -------------------------
     if action == "feed":
-        msg = header + "📊 <b>Feed Status</b>\nWorking normally."
+        msg = header + "ðŸ“Š <b>Feed Status</b>\nWorking normally."
         await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
         return
 
     # -------------------------
     if action == "contact":
         msg = header + (
-            "📨 <b>Contact admin</b>\n"
+            "ðŸ“¨ <b>Contact admin</b>\n"
             "Send your message here."
         )
         await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
@@ -110,18 +110,18 @@ async def handle_ui_callback(update, context: ContextTypes.DEFAULT_TYPE):
 
     # -------------------------
     if action == "help":
-        msg = header + "🆘 <b>Help</b>\nUse menu buttons."
+        msg = header + "ðŸ†˜ <b>Help</b>\nUse menu buttons."
         await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
         return
 
     # -------------------------
     if action == "admin":
         if uid not in ADMIN_IDS:
-            await q.message.edit_text("⛔ No access.")
+            await q.message.edit_text("â›” No access.")
             return
 
         msg = header + (
-            "👑 <b>Admin Panel</b>\n"
+            "ðŸ‘‘ <b>Admin Panel</b>\n"
             "/users\n"
             "/grant <id> <days>\n"
             "/block <id>\n"
@@ -145,10 +145,11 @@ async def handle_user_message(update, context):
         for admin in ADMIN_IDS:
             await context.bot.send_message(
                 admin,
-                f"📩 From user {uid}:\n\n{text}",
+                f"ðŸ“© From user {uid}:\n\n{text}",
             )
         context.user_data["contact_mode"] = False
-        return await update.message.reply_text("✅ Sent.")
+        return await update.message.reply_text("âœ… Sent.")
 
     # Add keyword mode (if you want later)
-    return await update.message.reply_text("✅ Saved.")
+    return await update.message.reply_text("âœ… Saved.")
+

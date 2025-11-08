@@ -1,4 +1,4 @@
-# platform_kariera.py
+﻿# platform_kariera.py
 import requests
 from bs4 import BeautifulSoup
 
@@ -6,9 +6,9 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
 
 def fetch(listing_url: str):
     """
-    Αν το KARIERA_RSS που δίνεις είναι στην πραγματικότητα listing σελίδα HTML,
-    π.χ. https://www.kariera.gr/jobs , κάνουμε basic HTML scrape από τα job-cards.
-    Αν έχεις πραγματικό RSS, μπορείς να αλλάξεις αυτόν τον parser με XML parse.
+    Î‘Î½ Ï„Î¿ KARIERA_RSS Ï€Î¿Ï… Î´Î¯Î½ÎµÎ¹Ï‚ ÎµÎ¯Î½Î±Î¹ ÏƒÏ„Î·Î½ Ï€ÏÎ±Î³Î¼Î±Ï„Î¹ÎºÏŒÏ„Î·Ï„Î± listing ÏƒÎµÎ»Î¯Î´Î± HTML,
+    Ï€.Ï‡. https://www.kariera.gr/jobs , ÎºÎ¬Î½Î¿Ï…Î¼Îµ basic HTML scrape Î±Ï€ÏŒ Ï„Î± job-cards.
+    Î‘Î½ Î­Ï‡ÎµÎ¹Ï‚ Ï€ÏÎ±Î³Î¼Î±Ï„Î¹ÎºÏŒ RSS, Î¼Ï€Î¿ÏÎµÎ¯Ï‚ Î½Î± Î±Î»Î»Î¬Î¾ÎµÎ¹Ï‚ Î±Ï…Ï„ÏŒÎ½ Ï„Î¿Î½ parser Î¼Îµ XML parse.
     """
     out = []
     if not listing_url:
@@ -17,7 +17,7 @@ def fetch(listing_url: str):
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # Συνήθη CSS selectors (ενδέχεται να θες προσαρμογή αν αλλάξει markup)
+    # Î£Ï…Î½Î®Î¸Î· CSS selectors (ÎµÎ½Î´Î­Ï‡ÎµÏ„Î±Î¹ Î½Î± Î¸ÎµÏ‚ Ï€ÏÎ¿ÏƒÎ±ÏÎ¼Î¿Î³Î® Î±Î½ Î±Î»Î»Î¬Î¾ÎµÎ¹ markup)
     cards = soup.select("[data-test='job-result'], .job-card, article")
     for c in cards[:50]:  # safeguard
         a = c.find("a", href=True)
@@ -25,11 +25,11 @@ def fetch(listing_url: str):
             continue
         url = a["href"]
         if url.startswith("/"):
-            # απόλυτο URL
+            # Î±Ï€ÏŒÎ»Ï…Ï„Î¿ URL
             url = "https://www.kariera.gr" + url
         title = (a.get_text(strip=True) or "").strip()
         if not title:
-            # δοκίμασε header
+            # Î´Î¿ÎºÎ¯Î¼Î±ÏƒÎµ header
             h = c.find(["h2", "h3"])
             if h:
                 title = h.get_text(strip=True)
@@ -45,3 +45,4 @@ def fetch(listing_url: str):
             "platform": "kariera",
         })
     return out
+

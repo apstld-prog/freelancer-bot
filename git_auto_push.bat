@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 echo ======================================================
 echo AUTO GIT PUSH TOOL FOR RENDER DEPLOYMENTS
 echo ======================================================
@@ -20,3 +20,4 @@ echo.
 echo Done! All files and folders uploaded successfully.
 echo ======================================================
 pause
+

@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from sqlalchemy import text
 from db import get_session
 
@@ -16,7 +16,7 @@ def ensure_feed_events_schema():
             );
         """))
         s.commit()
-        log.info("✅ feed_event table ensured.")
+        log.info("âœ… feed_event table ensured.")
 
 
 def get_platform_stats(hours=24):
@@ -32,5 +32,6 @@ def get_platform_stats(hours=24):
         ).fetchall()
 
     stats = {r[0]: r[1] for r in rows}
-    log.info(f"📊 Platform stats (last {hours}h): {stats}")
+    log.info(f"ðŸ“Š Platform stats (last {hours}h): {stats}")
     return stats
+

@@ -1,4 +1,4 @@
-import httpx, logging
+﻿import httpx, logging
 from datetime import datetime, timezone
 from utils_fx import convert_to_usd
 
@@ -26,3 +26,4 @@ def fetch_freelancer_jobs():
     except Exception as e:
         log.error(f"Fetch error: {e}")
     return jobs
+

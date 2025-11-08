@@ -1,5 +1,5 @@
-# ==============================================================
-# bot.py — FINAL FULL VERSION (Nov 2025)
+﻿# ==============================================================
+# bot.py â€” FINAL FULL VERSION (Nov 2025)
 # ==============================================================
 
 import os
@@ -22,26 +22,26 @@ log = logging.getLogger("bot")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("❌ Missing TELEGRAM_BOT_TOKEN")
+    raise RuntimeError("âŒ Missing TELEGRAM_BOT_TOKEN")
 
 
 def main_menu(is_admin=False):
     rows = [
         [
-            InlineKeyboardButton("➕ Add Keywords", callback_data="ui:addkw"),
-            InlineKeyboardButton("⚙ Settings", callback_data="ui:settings")
+            InlineKeyboardButton("âž• Add Keywords", callback_data="ui:addkw"),
+            InlineKeyboardButton("âš™ Settings", callback_data="ui:settings")
         ],
         [
-            InlineKeyboardButton("💾 Saved Jobs", callback_data="ui:saved"),
-            InlineKeyboardButton("📊 Feed Status", callback_data="ui:feed")
+            InlineKeyboardButton("ðŸ’¾ Saved Jobs", callback_data="ui:saved"),
+            InlineKeyboardButton("ðŸ“Š Feed Status", callback_data="ui:feed")
         ],
         [
-            InlineKeyboardButton("📨 Contact", callback_data="ui:contact"),
-            InlineKeyboardButton("🆘 Help", callback_data="ui:help")
+            InlineKeyboardButton("ðŸ“¨ Contact", callback_data="ui:contact"),
+            InlineKeyboardButton("ðŸ†˜ Help", callback_data="ui:help")
         ]
     ]
     if is_admin:
-        rows.append([InlineKeyboardButton("👑 Admin Panel", callback_data="ui:admin")])
+        rows.append([InlineKeyboardButton("ðŸ‘‘ Admin Panel", callback_data="ui:admin")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -79,10 +79,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     expiry_str = expiry.strftime('%Y-%m-%d %H:%M UTC')
 
     txt = (
-        "<b>👋 Welcome to Freelancer Alert Bot!</b>\n\n"
-        "🎁 <b>Your 10-day free trial is active.</b>\n"
+        "<b>ðŸ‘‹ Welcome to Freelancer Alert Bot!</b>\n\n"
+        "ðŸŽ <b>Your 10-day free trial is active.</b>\n"
         "You will get real-time job alerts for your keywords.\n\n"
-        f"<b>⏳ Trial ends:</b> {expiry_str}\n"
+        f"<b>â³ Trial ends:</b> {expiry_str}\n"
         "____________________________________________"
     )
     await update.message.reply_text(
@@ -94,7 +94,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🆘 <b>Help</b>\nManage keywords, saved jobs and settings from the menu.",
+        "ðŸ†˜ <b>Help</b>\nManage keywords, saved jobs and settings from the menu.",
         parse_mode=ParseMode.HTML
     )
 
@@ -114,8 +114,9 @@ def build_application():
 
 
 async def on_startup():
-    log.info("✅ Telegram bot startup")
+    log.info("âœ… Telegram bot startup")
 
 
 async def on_shutdown():
-    log.info("🛑 Telegram bot shutdown")
+    log.info("ðŸ›‘ Telegram bot shutdown")
+

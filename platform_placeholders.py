@@ -1,4 +1,4 @@
-
+﻿
 from typing import List, Dict
 def fetch_peopleperhour() -> List[Dict]: return []
 def fetch_malt() -> List[Dict]: return []
@@ -15,3 +15,4 @@ def fetch_99designs() -> List[Dict]: return []
 def fetch_jobfind() -> List[Dict]: return []
 def fetch_kariera() -> List[Dict]: return []
 def fetch_careerjet() -> List[Dict]: return []
+

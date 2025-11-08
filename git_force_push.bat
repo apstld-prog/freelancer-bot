@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 echo ======================================================
 echo   GIT FORCE FULL REFRESH - TOUCH ALL FILES
 echo   (Forces Git to treat everything as modified)
@@ -25,6 +25,7 @@ echo [+] Forcing push to remote...
 git push --force
 
 echo.
-echo ✅ Force refresh + push completed successfully.
+echo âœ… Force refresh + push completed successfully.
 echo ======================================================
 pause
+

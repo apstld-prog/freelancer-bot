@@ -1,4 +1,4 @@
-# worker_pph.py — FULL VERSION (deduplication + keyword + USD + posted time)
+﻿# worker_pph.py â€” FULL VERSION (deduplication + keyword + USD + posted time)
 
 import os
 import asyncio
@@ -104,10 +104,10 @@ async def process_jobs():
                 log.error("Send failed: %s", e)
 
     record_event(PLATFORM)
-    log.info("✅ %s cycle complete — %d new jobs sent", PLATFORM, count_new)
+    log.info("âœ… %s cycle complete â€” %d new jobs sent", PLATFORM, count_new)
 
 async def run_worker():
-    log.info("🚀 Starting %s worker...", PLATFORM)
+    log.info("ðŸš€ Starting %s worker...", PLATFORM)
     while True:
         try:
             await process_jobs()
@@ -117,3 +117,4 @@ async def run_worker():
 
 if __name__ == "__main__":
     asyncio.run(run_worker())
+

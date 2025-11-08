@@ -1,4 +1,4 @@
-# db_keywords.py — keyword management helpers for users
+﻿# db_keywords.py â€” keyword management helpers for users
 import logging
 from typing import List, Dict
 from datetime import datetime, timezone
@@ -139,3 +139,4 @@ def get_all_user_keywords(db=None) -> Dict[int, List[str]]:
     if close_it:
         db.close()
     return out
+

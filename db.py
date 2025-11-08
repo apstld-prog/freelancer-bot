@@ -1,4 +1,4 @@
-import os
+﻿import os
 import logging
 from datetime import datetime, timezone
 from sqlalchemy import (
@@ -12,7 +12,7 @@ if not os.getenv("RENDER"):
     try:
         from dotenv import load_dotenv
         load_dotenv(override=False)
-        print("ℹ️ Local .env loaded (development mode)")
+        print("â„¹ï¸ Local .env loaded (development mode)")
     except Exception:
         pass
 
@@ -21,11 +21,11 @@ log = logging.getLogger("db")
 # --- Environment detection ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    print("❌ DATABASE_URL not found in environment!")
+    print("âŒ DATABASE_URL not found in environment!")
     print("Current env keys:", list(os.environ.keys())[:10])
     raise RuntimeError("DATABASE_URL env var is required")
 else:
-    print(f"✅ DATABASE_URL detected: {DATABASE_URL[:70]}...")
+    print(f"âœ… DATABASE_URL detected: {DATABASE_URL[:70]}...")
 
 # --- Engine and session setup ---
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
@@ -179,3 +179,4 @@ def add_user_keywords(db, user_id: int, keywords: list[str]) -> int:
     if to_insert:
         db.commit()
     return len(to_insert)
+

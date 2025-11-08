@@ -1,4 +1,4 @@
-import httpx, logging
+﻿import httpx, logging
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from utils_fx import convert_to_usd
@@ -43,5 +43,6 @@ def parse_budget(txt: str):
     if not m:
         return 0, "USD"
     amount = int(m.group(1))
-    cur = "GBP" if "£" in txt else "EUR" if "€" in txt else "USD"
+    cur = "GBP" if "Â£" in txt else "EUR" if "â‚¬" in txt else "USD"
     return amount, cur
+

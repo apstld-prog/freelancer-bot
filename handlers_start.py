@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -13,19 +13,19 @@ log = logging.getLogger(__name__)
 def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton("🟩 Add Keywords", callback_data="act:addkw"),
-            InlineKeyboardButton("⚙️ Settings", callback_data="act:settings"),
+            InlineKeyboardButton("ðŸŸ© Add Keywords", callback_data="act:addkw"),
+            InlineKeyboardButton("âš™ï¸ Settings", callback_data="act:settings"),
         ],
         [
-            InlineKeyboardButton("📘 Help", callback_data="act:help"),
-            InlineKeyboardButton("💾 Saved", callback_data="act:saved"),
+            InlineKeyboardButton("ðŸ“˜ Help", callback_data="act:help"),
+            InlineKeyboardButton("ðŸ’¾ Saved", callback_data="act:saved"),
         ],
         [
-            InlineKeyboardButton("📞 Contact", callback_data="act:contact"),
+            InlineKeyboardButton("ðŸ“ž Contact", callback_data="act:contact"),
         ]
     ]
     if is_admin:
-        rows.append([InlineKeyboardButton("🔥 Admin", callback_data="act:admin")])
+        rows.append([InlineKeyboardButton("ðŸ”¥ Admin", callback_data="act:admin")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -46,26 +46,26 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trial_end_str = u.trial_end.strftime("%Y-%m-%d %H:%M UTC")
 
     text = (
-        "👋 <b>Welcome to Freelancer Alert Bot!</b>\n\n"
-        "🎁 <b>You have a 10-day free trial.</b>\n"
+        "ðŸ‘‹ <b>Welcome to Freelancer Alert Bot!</b>\n\n"
+        "ðŸŽ <b>You have a 10-day free trial.</b>\n"
         "Automatically finds matching freelance jobs from top platforms and sends you instant alerts with affiliate-safe links.\n"
         "Use /help to see how it works.\n"
         "________________________________________\n"
-        "🟩 <b>Keywords</b>  ⚙️ <b>Settings</b>\n"
-        "📘 <b>Help</b>  💾 <b>Saved</b>\n"
-        "📞 <b>Contact</b>\n"
-        "🔥 <b>Admin</b>\n"
+        "ðŸŸ© <b>Keywords</b>â€ƒâ€ƒâš™ï¸ <b>Settings</b>\n"
+        "ðŸ“˜ <b>Help</b>â€ƒâ€ƒðŸ’¾ <b>Saved</b>\n"
+        "ðŸ“ž <b>Contact</b>\n"
+        "ðŸ”¥ <b>Admin</b>\n"
         "________________________________________\n"
-        "✨ <b>Features</b>\n"
-        "• Realtime job alerts (Freelancer API)\n"
-        "• Affiliate-wrapped Proposal & Original links\n"
-        "• Budget shown + USD conversion\n"
-        "• ⭐ Keep / 🗑️ Delete buttons\n"
-        "• 10-day free trial, extend via admin\n"
-        "• Multi-keyword search (single/all modes)\n"
-        "• Platforms by country (incl. GR boards)\n"
+        "âœ¨ <b>Features</b>\n"
+        "â€¢ Realtime job alerts (Freelancer API)\n"
+        "â€¢ Affiliate-wrapped Proposal & Original links\n"
+        "â€¢ Budget shown + USD conversion\n"
+        "â€¢ â­ Keep / ðŸ—‘ï¸ Delete buttons\n"
+        "â€¢ 10-day free trial, extend via admin\n"
+        "â€¢ Multi-keyword search (single/all modes)\n"
+        "â€¢ Platforms by country (incl. GR boards)\n"
         f"________________________________________\n"
-        f"⏳ <b>Trial ends:</b> {trial_end_str}"
+        f"â³ <b>Trial ends:</b> {trial_end_str}"
     )
 
     await update.message.reply_text(
@@ -76,4 +76,5 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
     )
 
-    log.info("✅ /start executed for user %s", user.id)
+    log.info("âœ… /start executed for user %s", user.id)
+

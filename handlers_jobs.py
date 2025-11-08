@@ -1,4 +1,4 @@
-# handlers_jobs.py — FULL VERSION (no cuts) + selftest_jobs()
+﻿# handlers_jobs.py â€” FULL VERSION (no cuts) + selftest_jobs()
 
 import logging
 from datetime import datetime, timezone, timedelta
@@ -33,14 +33,14 @@ async def selftest_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Budget:</b> 30 GBP (~${usd1} USD)\n"
         "<b>Source:</b> PeoplePerHour\n"
         "<b>Match:</b> logo\n"
-        "🎨 Need a simple logo redesign for an app.\n"
+        "ðŸŽ¨ Need a simple logo redesign for an app.\n"
         f"<i>Posted: {posted_ago(now - timedelta(minutes=1))}</i>"
     )
     kb1 = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Proposal", url="https://peopleperhour.com/job/1"),
-         InlineKeyboardButton("🔗 Original", url="https://peopleperhour.com/job/1")],
-        [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
-         InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")]
+        [InlineKeyboardButton("ðŸ“„ Proposal", url="https://peopleperhour.com/job/1"),
+         InlineKeyboardButton("ðŸ”— Original", url="https://peopleperhour.com/job/1")],
+        [InlineKeyboardButton("â­ Save", callback_data="job:save"),
+         InlineKeyboardButton("ðŸ—‘ï¸ Delete", callback_data="job:delete")]
     ])
 
     msg2 = (
@@ -48,21 +48,21 @@ async def selftest_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Budget:</b> 50 EUR (~${usd2} USD)\n"
         "<b>Source:</b> Freelancer\n"
         "<b>Match:</b> design\n"
-        "🖥 Fix and optimize website interface.\n"
+        "ðŸ–¥ Fix and optimize website interface.\n"
         f"<i>Posted: {posted_ago(now - timedelta(minutes=5))}</i>"
     )
     kb2 = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Proposal", url="https://freelancer.com/job/2"),
-         InlineKeyboardButton("🔗 Original", url="https://freelancer.com/job/2")],
-        [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
-         InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")]
+        [InlineKeyboardButton("ðŸ“„ Proposal", url="https://freelancer.com/job/2"),
+         InlineKeyboardButton("ðŸ”— Original", url="https://freelancer.com/job/2")],
+        [InlineKeyboardButton("â­ Save", callback_data="job:save"),
+         InlineKeyboardButton("ðŸ—‘ï¸ Delete", callback_data="job:delete")]
     ])
 
     await update.message.reply_text(msg1, parse_mode=ParseMode.HTML, reply_markup=kb1)
     await update.message.reply_text(msg2, parse_mode=ParseMode.HTML, reply_markup=kb2)
     record_event("freelancer")
     record_event("peopleperhour")
-    log.info("✅ Selftest jobs sent successfully.")
+    log.info("âœ… Selftest jobs sent successfully.")
 
 async def handle_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles Save/Delete button callbacks."""
@@ -72,8 +72,9 @@ async def handle_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     action = query.data or ""
     if action == "job:save":
-        await query.message.reply_text("⭐ Saved to your list.")
+        await query.message.reply_text("â­ Saved to your list.")
     elif action == "job:delete":
-        await query.message.reply_text("🗑️ Deleted.")
+        await query.message.reply_text("ðŸ—‘ï¸ Deleted.")
     else:
         await query.message.reply_text("Unknown job action.")
+

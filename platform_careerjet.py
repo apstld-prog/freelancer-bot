@@ -1,4 +1,4 @@
-# platform_careerjet.py
+﻿# platform_careerjet.py
 import requests
 from xml.etree import ElementTree as ET
 from html import unescape
@@ -7,10 +7,10 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
 
 def fetch(rss_url: str):
     """
-    Παίρνει RSS από Careerjet (π.χ. Ελλάδα).
-    Παράδειγμα rss_url:
-      - https://www.careerjet.gr/rss?s=&l=Ελλάδα
-      - ή άλλο feed URL της Careerjet
+    Î Î±Î¯ÏÎ½ÎµÎ¹ RSS Î±Ï€ÏŒ Careerjet (Ï€.Ï‡. Î•Î»Î»Î¬Î´Î±).
+    Î Î±ÏÎ¬Î´ÎµÎ¹Î³Î¼Î± rss_url:
+      - https://www.careerjet.gr/rss?s=&l=Î•Î»Î»Î¬Î´Î±
+      - Î® Î¬Î»Î»Î¿ feed URL Ï„Î·Ï‚ Careerjet
     """
     out = []
     if not rss_url:
@@ -32,3 +32,4 @@ def fetch(rss_url: str):
             "platform": "careerjet",
         })
     return out
+

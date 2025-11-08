@@ -1,5 +1,5 @@
-# ==============================================================
-# app.py — FINAL WEBHOOK VERSION (Nov 2025)
+﻿# ==============================================================
+# app.py â€” FINAL WEBHOOK VERSION (Nov 2025)
 # ==============================================================
 
 import os
@@ -15,10 +15,10 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")  # Render gives this automatically
 
 if not BOT_TOKEN:
-    raise RuntimeError("❌ Missing TELEGRAM_BOT_TOKEN")
+    raise RuntimeError("âŒ Missing TELEGRAM_BOT_TOKEN")
 
 if not WEBHOOK_URL:
-    raise RuntimeError("❌ Missing RENDER_EXTERNAL_URL")
+    raise RuntimeError("âŒ Missing RENDER_EXTERNAL_URL")
 
 
 # --------------------------------------------------------------
@@ -30,11 +30,11 @@ telegram_app = build_application()
 
 
 # --------------------------------------------------------------
-# Startup — proper PTB initialization
+# Startup â€” proper PTB initialization
 # --------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
-    log.info("🚀 Starting Telegram bot…")
+    log.info("ðŸš€ Starting Telegram botâ€¦")
 
     await telegram_app.initialize()
     await telegram_app.start()
@@ -45,21 +45,21 @@ async def startup_event():
     await telegram_app.bot.delete_webhook()
     await telegram_app.bot.set_webhook(url=webhook_url)
 
-    log.info(f"✅ Webhook set: {webhook_url}")
+    log.info(f"âœ… Webhook set: {webhook_url}")
 
 
 # --------------------------------------------------------------
-# Shutdown — proper PTB cleanup
+# Shutdown â€” proper PTB cleanup
 # --------------------------------------------------------------
 @app.on_event("shutdown")
 async def shutdown_event():
-    log.info("🛑 Stopping Telegram bot…")
+    log.info("ðŸ›‘ Stopping Telegram botâ€¦")
 
     await telegram_app.stop()
     await telegram_app.shutdown()
     await bot_shutdown()
 
-    log.info("✅ Bot stopped.")
+    log.info("âœ… Bot stopped.")
 
 
 # --------------------------------------------------------------
@@ -83,3 +83,4 @@ async def telegram_webhook(request: Request, token: str):
 @app.get("/")
 async def health():
     return {"status": "running", "mode": "webhook"}
+

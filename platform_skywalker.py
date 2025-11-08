@@ -1,4 +1,4 @@
-import httpx, logging
+﻿import httpx, logging
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from utils_fx import convert_to_usd
@@ -30,3 +30,4 @@ def fetch_skywalker_jobs():
     except Exception as e:
         log.error(f"Fetch error: {e}")
     return jobs
+

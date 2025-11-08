@@ -1,4 +1,4 @@
-# server.py — FINAL FULL VERSION (Nov 2025)
+﻿# server.py â€” FINAL FULL VERSION (Nov 2025)
 
 import logging
 from fastapi import FastAPI, Request
@@ -20,7 +20,7 @@ async def on_startup():
     await application.initialize()
     await application.start()
     await application.bot.set_webhook(f"https://freelancer-bot-ns7s.onrender.com{WEBHOOK_PATH}")
-    log.info(f"✅ Webhook set: https://freelancer-bot-ns7s.onrender.com{WEBHOOK_PATH}")
+    log.info(f"âœ… Webhook set: https://freelancer-bot-ns7s.onrender.com{WEBHOOK_PATH}")
 
 
 @app.post(WEBHOOK_PATH)
@@ -32,8 +32,9 @@ async def telegram_webhook(req: Request):
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    log.info("🛑 Stopping bot...")
+    log.info("ðŸ›‘ Stopping bot...")
     await application.bot.delete_webhook()
     await application.stop()
     await application.shutdown()
-    log.info("✅ Bot stopped.")
+    log.info("âœ… Bot stopped.")
+
