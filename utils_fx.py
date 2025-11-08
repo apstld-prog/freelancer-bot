@@ -43,3 +43,4 @@ def posted_ago(created_dt, now_dt):
     else:
         return f"{int(seconds // 86400)} days ago"
 
+

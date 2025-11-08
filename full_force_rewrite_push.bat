@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 echo ======================================================
 echo   FULL FORCE REWRITE + GIT PUSH
 echo   (Rewrites all files so Git sees new content)
@@ -26,6 +26,7 @@ echo [+] Force pushing to remote...
 git push --force
 
 echo.
-echo ✅ DONE: All files rewritten and force pushed.
+echo âœ… DONE: All files rewritten and force pushed.
 echo ======================================================
 pause
+

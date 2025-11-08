@@ -81,3 +81,4 @@ echo
 echo "âœ… Full diagnostic complete."
 echo "======================================================"
 
+

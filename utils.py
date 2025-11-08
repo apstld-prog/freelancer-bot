@@ -1,4 +1,4 @@
-# utils.py
+﻿# utils.py
 
 from config import ADMIN_IDS
 from db import get_session, get_or_create_user_by_tid
@@ -14,3 +14,4 @@ def ensure_user(telegram_id: int):
     user = get_or_create_user_by_tid(session, telegram_id)
     session.close()
     return user
+

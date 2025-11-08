@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+﻿from fastapi import FastAPI, Request
 from telegram import Update
 from bot import application
 
@@ -10,3 +10,4 @@ async def webhook(token: str, request: Request):
     update = Update.de_json(data, application.bot)
     await application.process_update(update)
     return {"ok": True}
+

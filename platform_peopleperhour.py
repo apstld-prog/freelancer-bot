@@ -46,3 +46,4 @@ def parse_budget(txt: str):
     cur = "GBP" if "Â£" in txt else "EUR" if "â‚¬" in txt else "USD"
     return amount, cur
 
+

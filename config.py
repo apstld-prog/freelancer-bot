@@ -53,3 +53,4 @@ STATS_WINDOW_HOURS = int(os.getenv("STATS_WINDOW_HOURS", "24"))
 # âœ… Worker timing (fix ImportError)
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "120"))
 
+

@@ -35,3 +35,4 @@ def get_platform_stats(hours=24):
     log.info(f"ðŸ“Š Platform stats (last {hours}h): {stats}")
     return stats
 
+

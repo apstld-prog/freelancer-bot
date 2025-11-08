@@ -31,3 +31,4 @@ def fetch_skywalker_jobs():
         log.error(f"Fetch error: {e}")
     return jobs
 
+

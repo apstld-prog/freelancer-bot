@@ -1,4 +1,4 @@
-# worker_skywalker.py — FULL VERSION (deduplication + keyword + USD + posted time)
+﻿# worker_skywalker.py â€” FULL VERSION (deduplication + keyword + USD + posted time)
 
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -9,7 +9,6 @@ import hashlib
 from datetime import datetime, timezone
 import httpx
 from db import get_session
-from db_events import record_event
 from db_keywords import list_keywords
 from utils_fx import convert_to_usd
 
@@ -106,10 +105,10 @@ async def process_jobs():
                 log.error("Send failed: %s", e)
 
     record_event(PLATFORM)
-    log.info("✅ %s cycle complete — %d new jobs sent", PLATFORM, count_new)
+    log.info("âœ… %s cycle complete â€” %d new jobs sent", PLATFORM, count_new)
 
 async def run_worker():
-    log.info("🚀 Starting %s worker...", PLATFORM)
+    log.info("ðŸš€ Starting %s worker...", PLATFORM)
     while True:
         try:
             await process_jobs()
@@ -121,7 +120,7 @@ if __name__ == "__main__":
     asyncio.run(run_worker())
 
 
-# --- inline record_event (avoid import errors) ---
+# --- inline record_event (avoid import issues from workers) ---
 from sqlalchemy import text as _sql_text
 from db import get_session as _get_session
 
@@ -143,3 +142,4 @@ def record_event(platform: str, keyword_match: str = None):
     except Exception as e:
         import logging as _logging
         _logging.getLogger("worker").warning("record_event failed: %s", e)
+

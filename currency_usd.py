@@ -64,3 +64,4 @@ def usd_line(min_amount: Optional[float],
         return f"~ up to ${hi:,.2f} USD"
     return None
 
+

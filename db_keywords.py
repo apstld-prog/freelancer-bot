@@ -140,3 +140,4 @@ def get_all_user_keywords(db=None) -> Dict[int, List[str]]:
         db.close()
     return out
 
+

@@ -27,3 +27,4 @@ def fetch_freelancer_jobs():
         log.error(f"Fetch error: {e}")
     return jobs
 
+

@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 set -e
 
 echo "Starting workers..."
@@ -11,3 +11,4 @@ python3 -u bot.py &
 
 echo "Starting FastAPI server..."
 exec uvicorn server:app --host 0.0.0.0 --port ${PORT}
+

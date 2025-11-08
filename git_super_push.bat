@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 title GIT SUPER PUSH TOOL
 
 :menu
@@ -74,3 +74,4 @@ echo Force pushing...
 git push --force
 pause
 goto menu
+
