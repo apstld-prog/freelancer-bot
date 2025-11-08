@@ -1,6 +1,6 @@
 # worker_freelancer.py — FULL VERSION (deduplication + keyword + USD + posted time)
 
-import sys, os
+import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import os
 import asyncio
@@ -126,3 +126,27 @@ async def run_worker():
 
 if __name__ == "__main__":
     asyncio.run(run_worker())
+
+
+# --- inline record_event (avoid import errors) ---
+from sqlalchemy import text as _sql_text
+from db import get_session as _get_session
+
+def record_event(platform: str, keyword_match: str = None):
+    try:
+        with _get_session() as _s:
+            _s.execute(_sql_text("""
+                CREATE TABLE IF NOT EXISTS feed_event (
+                    id SERIAL PRIMARY KEY,
+                    platform TEXT,
+                    keyword_match TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+            """))
+            _s.execute(_sql_text(
+                "INSERT INTO feed_event(platform, keyword_match, created_at) VALUES (:p, :k, NOW())"
+            ), {"p": platform, "k": keyword_match or ""})
+            _s.commit()
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger("worker").warning("record_event failed: %s", e)

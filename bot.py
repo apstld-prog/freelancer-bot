@@ -1,29 +1,40 @@
-import asyncio
-from telegram.ext import ApplicationBuilder
-from config import BOT_TOKEN
 
-from handlers_start import setup as setup_start
-from handlers_ui import setup as setup_ui
-from handlers_help import setup as setup_help
-from handlers_settings import setup as setup_settings
-from handlers_jobs import setup as setup_jobs
+# bot.py — minimal, stable, webhook-friendly (5-file fix)
+import os, logging
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.constants import ParseMode
+
+from config import BOT_TOKEN
+from db import ensure_schema
+from db_events import ensure_feed_events_schema
+
+# use existing handlers (no setup() imports)
+from handlers_start import start_command
+from handlers_ui import handle_ui_callback, handle_user_message
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("bot")
+
+if not BOT_TOKEN:
+    raise RuntimeError("❌ Missing BOT_TOKEN in config.py / env")
 
 def build_application():
-    return application
+    ensure_schema()
+    ensure_feed_events_schema()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-application = ApplicationBuilder().token(BOT_TOKEN).build()
+    # /start
+    app.add_handler(CommandHandler("start", start_command))
+    # callbacks & generic text
+    app.add_handler(CallbackQueryHandler(handle_ui_callback, pattern=r"^(ui|act):"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
+    return app
 
-setup_start(application)
-setup_ui(application)
-setup_help(application)
-setup_settings(application)
-setup_jobs(application)
+# Compatibility: some imports expect 'application'
+application = build_application()
 
-async def main():
-    await application.initialize()
-    await application.start()
-    print("✅ Telegram bot running in webhook mode")
-    await asyncio.Event().wait()
+async def on_startup():
+    log.info("✅ Telegram bot startup")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+async def on_shutdown():
+    log.info("🛑 Telegram bot shutdown")
