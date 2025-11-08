@@ -1,88 +1,60 @@
 ﻿import logging
-from datetime import datetime, timedelta, timezone
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from datetime import datetime, timezone
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
-from db import get_session, get_or_create_user_by_tid
+from utils import get_or_create_user
 from config import TRIAL_DAYS
-from utils import is_admin_user
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger("handlers.start")
 
 
-def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
-    rows = [
+def start_menu():
+    return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("ðŸŸ© Add Keywords", callback_data="act:addkw"),
-            InlineKeyboardButton("âš™ï¸ Settings", callback_data="act:settings"),
+            InlineKeyboardButton("🟩 Keywords", callback_data="settings"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
         ],
         [
-            InlineKeyboardButton("ðŸ“˜ Help", callback_data="act:help"),
-            InlineKeyboardButton("ðŸ’¾ Saved", callback_data="act:saved"),
-        ],
-        [
-            InlineKeyboardButton("ðŸ“ž Contact", callback_data="act:contact"),
+            InlineKeyboardButton("📘 Help", callback_data="help"),
         ]
-    ]
-    if is_admin:
-        rows.append([InlineKeyboardButton("ðŸ”¥ Admin", callback_data="act:admin")])
-    return InlineKeyboardMarkup(rows)
+    ])
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_or_create_user(update)
 
-    with get_session() as s:
-        u = get_or_create_user_by_tid(s, user.id)
-
-        # Trial calculation
-        now = datetime.now(timezone.utc)
-
-        if u.trial_start is None:
-            u.trial_start = now
-            u.trial_end = now + timedelta(days=TRIAL_DAYS)
-            s.commit()
-
-        trial_end_str = u.trial_end.strftime("%Y-%m-%d %H:%M UTC")
+    # Trial
+    if user.trial_until is None:
+        user.trial_until = datetime.now(timezone.utc)
+        await update.message.reply_text("Initializing your free trial...")
+    else:
+        pass
 
     text = (
-        "ðŸ‘‹ <b>Welcome to Freelancer Alert Bot!</b>\n\n"
-        "ðŸŽ <b>You have a 10-day free trial.</b>\n"
-        "Automatically finds matching freelance jobs from top platforms and sends you instant alerts with affiliate-safe links.\n"
+        "👋 Welcome to Freelancer Alert Bot!\n"
+        f"🎁 You have a *{TRIAL_DAYS}-day free trial*.\n\n"
+        "Automatically finds matching freelance jobs from top platforms and sends\n"
+        "you instant alerts with affiliate-safe links.\n\n"
         "Use /help to see how it works.\n"
-        "________________________________________\n"
-        "ðŸŸ© <b>Keywords</b>â€ƒâ€ƒâš™ï¸ <b>Settings</b>\n"
-        "ðŸ“˜ <b>Help</b>â€ƒâ€ƒðŸ’¾ <b>Saved</b>\n"
-        "ðŸ“ž <b>Contact</b>\n"
-        "ðŸ”¥ <b>Admin</b>\n"
-        "________________________________________\n"
-        "âœ¨ <b>Features</b>\n"
-        "â€¢ Realtime job alerts (Freelancer API)\n"
-        "â€¢ Affiliate-wrapped Proposal & Original links\n"
-        "â€¢ Budget shown + USD conversion\n"
-        "â€¢ â­ Keep / ðŸ—‘ï¸ Delete buttons\n"
-        "â€¢ 10-day free trial, extend via admin\n"
-        "â€¢ Multi-keyword search (single/all modes)\n"
-        "â€¢ Platforms by country (incl. GR boards)\n"
-        f"________________________________________\n"
-        f"â³ <b>Trial ends:</b> {trial_end_str}"
+        "________________________________________\n\n"
+        "🟩 Keywords  ⚙️ Settings   📘 Help\n"
     )
 
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=main_menu_keyboard(
-            is_admin=is_admin_user(user.id)
-        ),
-    )
+    if update.message:
+        await update.message.reply_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=start_menu()
+        )
+    else:
+        await update.callback_query.edit_message_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=start_menu()
+        )
 
-    log.info("âœ… /start executed for user %s", user.id)
 
-
-
-# auto-wiring for /start
-from telegram.ext import CommandHandler
-def setup(app):
-    app.add_handler(CommandHandler("start", start_command))
-
+async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await start(update, context)
 

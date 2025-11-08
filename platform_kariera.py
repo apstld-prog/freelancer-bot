@@ -1,50 +1,76 @@
-﻿# platform_kariera.py
-import requests
+﻿import logging
+import httpx
+from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
+logger = logging.getLogger("platform.kariera")
 
-def fetch(listing_url: str):
+BASE_URL = "https://www.kariera.gr/el/jobs?keywords={query}"
+
+
+async def fetch_kariera_jobs(keywords: list[str]):
     """
-    Î‘Î½ Ï„Î¿ KARIERA_RSS Ï€Î¿Ï… Î´Î¯Î½ÎµÎ¹Ï‚ ÎµÎ¯Î½Î±Î¹ ÏƒÏ„Î·Î½ Ï€ÏÎ±Î³Î¼Î±Ï„Î¹ÎºÏŒÏ„Î·Ï„Î± listing ÏƒÎµÎ»Î¯Î´Î± HTML,
-    Ï€.Ï‡. https://www.kariera.gr/jobs , ÎºÎ¬Î½Î¿Ï…Î¼Îµ basic HTML scrape Î±Ï€ÏŒ Ï„Î± job-cards.
-    Î‘Î½ Î­Ï‡ÎµÎ¹Ï‚ Ï€ÏÎ±Î³Î¼Î±Ï„Î¹ÎºÏŒ RSS, Î¼Ï€Î¿ÏÎµÎ¯Ï‚ Î½Î± Î±Î»Î»Î¬Î¾ÎµÎ¹Ï‚ Î±Ï…Ï„ÏŒÎ½ Ï„Î¿Î½ parser Î¼Îµ XML parse.
+    Scrapes Kariera.gr job listings.
+
+    Normalized output:
+    {
+        "platform": "kariera",
+        "title": str,
+        "description": str,
+        "budget_amount": None,
+        "budget_currency": None,
+        "posted_at": datetime,
+        "url": str
+    }
     """
-    out = []
-    if not listing_url:
-        return out
-    resp = requests.get(listing_url, headers=HEADERS, timeout=20)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
 
-    # Î£Ï…Î½Î®Î¸Î· CSS selectors (ÎµÎ½Î´Î­Ï‡ÎµÏ„Î±Î¹ Î½Î± Î¸ÎµÏ‚ Ï€ÏÎ¿ÏƒÎ±ÏÎ¼Î¿Î³Î® Î±Î½ Î±Î»Î»Î¬Î¾ÎµÎ¹ markup)
-    cards = soup.select("[data-test='job-result'], .job-card, article")
-    for c in cards[:50]:  # safeguard
-        a = c.find("a", href=True)
-        if not a:
-            continue
-        url = a["href"]
-        if url.startswith("/"):
-            # Î±Ï€ÏŒÎ»Ï…Ï„Î¿ URL
-            url = "https://www.kariera.gr" + url
-        title = (a.get_text(strip=True) or "").strip()
-        if not title:
-            # Î´Î¿ÎºÎ¯Î¼Î±ÏƒÎµ header
-            h = c.find(["h2", "h3"])
-            if h:
-                title = h.get_text(strip=True)
-        desc_tag = c.find(["p", "div"], class_=lambda x: x and "description" in x.lower()) or c.find("p")
-        desc = desc_tag.get_text(strip=True) if desc_tag else ""
-        if not title or not url:
-            continue
-        out.append({
-            "title": title,
-            "url": url,
-            "description": desc,
-            "source": "Kariera",
-            "platform": "kariera",
-        })
-    return out
+    query = "+".join(keywords) if keywords else ""
+    url = BASE_URL.format(query=query)
 
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.get(url)
+            response.raise_for_status()
 
+        soup = BeautifulSoup(response.text, "html.parser")
+        jobs = []
+
+        for el in soup.select("article"):
+            a = el.select_one("a")
+            if not a:
+                continue
+
+            job_url = a.get("href")
+            if not job_url:
+                continue
+
+            if job_url.startswith("/"):
+                job_url = "https://www.kariera.gr" + job_url
+
+            title = a.get_text(strip=True)
+
+            # Description snippet
+            desc_el = el.select_one("p")
+            description = desc_el.get_text(strip=True) if desc_el else ""
+
+            # Kariera also rarely gives clean date → fallback now
+            posted_at = datetime.now(tz=timezone.utc)
+
+            jobs.append(
+                {
+                    "platform": "kariera",
+                    "title": title,
+                    "description": description,
+                    "budget_amount": None,
+                    "budget_currency": None,
+                    "posted_at": posted_at,
+                    "url": job_url,
+                }
+            )
+
+        return jobs
+
+    except Exception as e:
+        logger.error(f"Kariera fetch error: {e}")
+        return []
 

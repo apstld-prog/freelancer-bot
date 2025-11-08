@@ -1,14 +1,20 @@
-﻿from fastapi import FastAPI, Request
-from telegram import Update
+﻿from fastapi import FastAPI
 from bot import application
 
 app = FastAPI()
 
-@app.post("/webhook/{token}")
-async def webhook(token: str, request: Request):
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return {"ok": True}
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Freelancer Bot API running"}
 
+# ✅ Telegram webhook endpoint
+from fastapi import Request
+import json
+
+@app.post("/")
+async def telegram_webhook(req: Request):
+    data = await req.body()
+    update = json.loads(data.decode("utf-8"))
+    await application.update_queue.put(update)
+    return {"ok": True}
 

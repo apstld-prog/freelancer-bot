@@ -1,157 +1,81 @@
-﻿# handlers_ui.py â€” FINAL FULL VERSION (Nov 2025)
-
-import logging
-from datetime import datetime
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
+﻿import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from sqlalchemy import text
 
-from db import get_session
-from config import ADMIN_IDS
+from utils import get_keywords, add_keyword, remove_keyword, get_or_create_user
 
-log = logging.getLogger("handlers_ui")
+logger = logging.getLogger("handlers.ui")
 
 
-# ----------------------------------------------------------------------
-# Header always on top
-# ----------------------------------------------------------------------
-def user_header(s, uid):
-    row = s.execute(
-        text('SELECT trial_end FROM "user" WHERE id=:i'),
-        {"i": uid}
-    ).fetchone()
-
-    if not row or not row.trial_end:
-        return "â³ <b>Trial:</b> unknown\n"
-
-    dt = row.trial_end.strftime("%Y-%m-%d %H:%M UTC")
-    return f"â³ <b>Trial ends:</b> {dt}\n"
+def ui_menu():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("➕ Add Keyword", callback_data="add_kw"),
+            InlineKeyboardButton("➖ Remove Keyword", callback_data="remove_kw"),
+        ],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_start")],
+    ])
 
 
-# ----------------------------------------------------------------------
-# UI main callback
-# ----------------------------------------------------------------------
-async def handle_ui_callback(update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    uid = q.from_user.id
+async def ui_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_or_create_user(update)
+    keywords = get_keywords(user.id)
 
-    with get_session() as s:
-        header = user_header(s, uid)
+    text = "🟩 *Your Keywords*\n\n"
+    if not keywords:
+        text += "_No keywords yet._\n"
+    else:
+        for kw in keywords:
+            text += f"• `{kw}`\n"
 
-    action = q.data.replace("ui:", "")
-
-    # -------------------------
-    if action == "addkw":
-        msg = header + "âž• <b>Add Keywords</b>\nWrite keywords separated by comma."
-        await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
-        return
-
-    # -------------------------
-    if action == "settings":
-        with get_session() as s:
-            row = s.execute(
-                text('SELECT keywords, country, proposal FROM "user" WHERE id=:i'),
-                {"i": uid},
-            ).fetchone()
-        kws = row.keywords or "(none)"
-        msg = header + (
-            "âš™ <b>Your Settings</b>\n"
-            f"â€¢ Keywords: {kws}\n"
-            f"â€¢ Country: {row.country or 'ALL'}\n"
-            f"â€¢ Proposal: {row.proposal or '(none)'}"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=ui_menu()
         )
-        await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=ui_menu()
+        )
+
+
+async def add_keyword_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.edit_message_text(
+        "Send me the keyword you want to add:",
+        parse_mode="Markdown"
+    )
+    context.user_data["awaiting_kw_add"] = True
+
+
+async def remove_keyword_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.edit_message_text(
+        "Send me the keyword you want to remove:",
+        parse_mode="Markdown"
+    )
+    context.user_data["awaiting_kw_remove"] = True
+
+
+async def process_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_or_create_user(update)
+
+    if context.user_data.get("awaiting_kw_add"):
+        kw = update.message.text.strip()
+        add_keyword(user.id, kw)
+        context.user_data["awaiting_kw_add"] = False
+        await update.message.reply_text(f"✅ Added keyword: `{kw}`", parse_mode="Markdown")
         return
 
-    # -------------------------
-    if action == "saved":
-        with get_session() as s:
-            rows = s.execute(text("""
-                SELECT title, budget_amount, budget_currency, affiliate_url,
-                       platform, created_at
-                FROM job_event
-                ORDER BY created_at DESC
-                LIMIT 10
-            """)).fetchall()
+    if context.user_data.get("awaiting_kw_remove"):
+        kw = update.message.text.strip()
+        removed = remove_keyword(user.id, kw)
+        context.user_data["awaiting_kw_remove"] = False
 
-        msg = header + "<b>ðŸ’¾ Saved Jobs</b>\n"
-        if not rows:
-            msg += "(none)"
+        if removed:
+            await update.message.reply_text(f"✅ Removed keyword: `{kw}`", parse_mode="Markdown")
         else:
-            for r in rows:
-                msg += (
-                    f"\n<b>{r.title}</b>\n"
-                    f"ðŸª™ {r.budget_amount} {r.budget_currency}\n"
-                    f"ðŸŒ {r.platform}\n"
-                    f"â± {r.created_at}\n"
-                    f"{r.affiliate_url}\n"
-                    "______________________________\n"
-                )
-
-        await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
+            await update.message.reply_text(f"⚠️ Keyword not found: `{kw}`", parse_mode="Markdown")
         return
-
-    # -------------------------
-    if action == "feed":
-        msg = header + "ðŸ“Š <b>Feed Status</b>\nWorking normally."
-        await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
-        return
-
-    # -------------------------
-    if action == "contact":
-        msg = header + (
-            "ðŸ“¨ <b>Contact admin</b>\n"
-            "Send your message here."
-        )
-        await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
-        return
-
-    # -------------------------
-    if action == "help":
-        msg = header + "ðŸ†˜ <b>Help</b>\nUse menu buttons."
-        await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
-        return
-
-    # -------------------------
-    if action == "admin":
-        if uid not in ADMIN_IDS:
-            await q.message.edit_text("â›” No access.")
-            return
-
-        msg = header + (
-            "ðŸ‘‘ <b>Admin Panel</b>\n"
-            "/users\n"
-            "/grant <id> <days>\n"
-            "/block <id>\n"
-            "/unblock <id>\n"
-            "/broadcast <text>\n"
-            "/feedsstatus\n"
-        )
-        await q.message.edit_text(msg, parse_mode=ParseMode.HTML)
-        return
-
-
-# ----------------------------------------------------------------------
-# User text input (Add keywords, Contact, etc)
-# ----------------------------------------------------------------------
-async def handle_user_message(update, context):
-    uid = update.effective_user.id
-    txt = update.message.text
-
-    # Contact mode
-    if context.user_data.get("contact_mode"):
-        for admin in ADMIN_IDS:
-            await context.bot.send_message(
-                admin,
-                f"ðŸ“© From user {uid}:\n\n{text}",
-            )
-        context.user_data["contact_mode"] = False
-        return await update.message.reply_text("âœ… Sent.")
-
-    # Add keyword mode (if you want later)
-    return await update.message.reply_text("âœ… Saved.")
-
-
 

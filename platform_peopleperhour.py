@@ -1,50 +1,60 @@
-﻿import httpx, logging
-from bs4 import BeautifulSoup
+﻿import logging
+import httpx
 from datetime import datetime, timezone
-from utils_fx import convert_to_usd
+from bs4 import BeautifulSoup
 
-log = logging.getLogger("worker.pph")
-URL = "https://www.peopleperhour.com/freelance-jobs"
+logger = logging.getLogger("worker.pph")
 
-def fetch_pph_jobs():
-    jobs = []
+BASE_URL = "https://www.peopleperhour.com/freelance-jobs"
+
+
+async def fetch_peopleperhour_jobs():
+    """
+    Scrapes latest PeoplePerHour jobs (HTML).
+    Returns normalized list of dicts.
+    """
     try:
-        r = httpx.get(URL, timeout=20)
-        soup = BeautifulSoup(r.text, "html.parser")
-        cards = soup.select("section.project")
-        for c in cards:
-            title_el = c.select_one("h5 a")
-            desc_el = c.select_one(".project-about")
-            budget_el = c.select_one(".project-price")
-            title = title_el.get_text(strip=True) if title_el else "Untitled"
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(BASE_URL)
+            response.raise_for_status()
+            html = response.text
+
+        soup = BeautifulSoup(html, "html.parser")
+        job_cards = soup.select("section.job")
+        jobs = []
+
+        for card in job_cards:
+            title_el = card.select_one("h3.job-title")
+            desc_el = card.select_one("p.job-description")
+            url_el = card.select_one("a")
+
+            title = title_el.get_text(strip=True) if title_el else "No title"
             desc = desc_el.get_text(strip=True) if desc_el else ""
-            budget_text = budget_el.get_text(strip=True) if budget_el else ""
-            amount, currency = parse_budget(budget_text)
-            jobs.append({
-                "platform": "PeoplePerHour",
-                "title": title,
-                "description": desc,
-                "original_url": f"https://www.peopleperhour.com{title_el['href']}" if title_el else URL,
-                "budget_amount": amount,
-                "budget_currency": currency,
-                "budget_usd": convert_to_usd(amount, currency),
-                "created_at": datetime.now(timezone.utc)
-            })
+            url = (
+                "https://www.peopleperhour.com"
+                + url_el.get("href", "")
+                if url_el
+                else None
+            )
+
+            # Posted date (PPH does not expose exact timestamp; using current time)
+            posted_at = datetime.now(timezone.utc)
+
+            jobs.append(
+                {
+                    "platform": "peopleperhour",
+                    "title": title,
+                    "description": desc,
+                    "budget_amount": None,
+                    "budget_currency": None,
+                    "posted_at": posted_at,
+                    "url": url,
+                }
+            )
+
+        return jobs
+
     except Exception as e:
-        log.error(f"Fetch error: {e}")
-    return jobs
-
-def parse_budget(txt: str):
-    """Extract numeric and currency info."""
-    import re
-    if not txt:
-        return 0, "USD"
-    m = re.search(r"(\d+)", txt.replace(",", ""))
-    if not m:
-        return 0, "USD"
-    amount = int(m.group(1))
-    cur = "GBP" if "Â£" in txt else "EUR" if "â‚¬" in txt else "USD"
-    return amount, cur
-
-
+        logger.error(f"PPH fetch error: {e}")
+        return []
 
