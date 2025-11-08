@@ -1,54 +1,79 @@
 import logging
+from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+
 from db import get_session, get_or_create_user_by_tid
 from config import TRIAL_DAYS
 from utils import is_admin_user
 
 log = logging.getLogger(__name__)
 
+
 def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Builds main menu with all options and correct emojis."""
     rows = [
         [
-            InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
-            InlineKeyboardButton("⚙ Settings", callback_data="act:settings"),
+            InlineKeyboardButton("🟩 Add Keywords", callback_data="act:addkw"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="act:settings"),
         ],
         [
-            InlineKeyboardButton("📊 Feed Status", callback_data="act:feed"),
-            InlineKeyboardButton("💾 Saved Jobs", callback_data="act:saved"),
+            InlineKeyboardButton("📘 Help", callback_data="act:help"),
+            InlineKeyboardButton("💾 Saved", callback_data="act:saved"),
         ],
         [
-            InlineKeyboardButton("🆘 Help", callback_data="act:help"),
-            InlineKeyboardButton("📨 Contact", callback_data="act:contact"),
-        ],
+            InlineKeyboardButton("📞 Contact", callback_data="act:contact"),
+        ]
     ]
     if is_admin:
-        rows.append([InlineKeyboardButton("👑 Admin", callback_data="act:admin")])
+        rows.append([InlineKeyboardButton("🔥 Admin", callback_data="act:admin")])
     return InlineKeyboardMarkup(rows)
 
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Initial /start handler."""
     user = update.effective_user
+
     with get_session() as s:
         u = get_or_create_user_by_tid(s, user.id)
-        s.commit()
+
+        # Trial calculation
+        now = datetime.now(timezone.utc)
+
+        if u.trial_start is None:
+            u.trial_start = now
+            u.trial_end = now + timedelta(days=TRIAL_DAYS)
+            s.commit()
+
+        trial_end_str = u.trial_end.strftime("%Y-%m-%d %H:%M UTC")
 
     text = (
-        f"<b>👋 Welcome to Freelancer Alert Bot</b>\n\n"
-        f"You have <b>{TRIAL_DAYS} days</b> free trial to explore job alerts.\n"
-        "Use the buttons below to manage keywords, settings and alerts.\n\n"
-        "<b>🔹 Features</b>\n"
-        "• Instant job alerts from multiple freelance platforms\n"
-        "• Keyword-based filtering for precision\n"
-        "• Auto currency conversion to USD\n"
-        "• Save and manage favourite jobs easily\n"
-        "• Integrated admin & analytics dashboard\n"
+        "👋 <b>Welcome to Freelancer Alert Bot!</b>\n\n"
+        "🎁 <b>You have a 10-day free trial.</b>\n"
+        "Automatically finds matching freelance jobs from top platforms and sends you instant alerts with affiliate-safe links.\n"
+        "Use /help to see how it works.\n"
+        "________________________________________\n"
+        "🟩 <b>Keywords</b>  ⚙️ <b>Settings</b>\n"
+        "📘 <b>Help</b>  💾 <b>Saved</b>\n"
+        "📞 <b>Contact</b>\n"
+        "🔥 <b>Admin</b>\n"
+        "________________________________________\n"
+        "✨ <b>Features</b>\n"
+        "• Realtime job alerts (Freelancer API)\n"
+        "• Affiliate-wrapped Proposal & Original links\n"
+        "• Budget shown + USD conversion\n"
+        "• ⭐ Keep / 🗑️ Delete buttons\n"
+        "• 10-day free trial, extend via admin\n"
+        "• Multi-keyword search (single/all modes)\n"
+        "• Platforms by country (incl. GR boards)\n"
+        f"________________________________________\n"
+        f"⏳ <b>Trial ends:</b> {trial_end_str}"
     )
 
     await update.message.reply_text(
         text,
         parse_mode="HTML",
-        reply_markup=main_menu_keyboard(is_admin=is_admin_user(user.id)),
+        reply_markup=main_menu_keyboard(
+            is_admin=is_admin_user(user.id)
+        ),
     )
-    log.info("User %s started bot", user.id)
+
+    log.info("✅ /start executed for user %s", user.id)
