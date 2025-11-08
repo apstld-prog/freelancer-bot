@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
+mkdir -p logs
+
 echo "======================================================"
 echo "🚀 Starting Freelancer Alert Bot full service"
 echo "======================================================"
@@ -11,7 +13,6 @@ echo "KEYWORD_FILTER_MODE=$KEYWORD_FILTER_MODE"
 echo "Render Service: $RENDER_EXTERNAL_URL"
 echo "------------------------------------------------------"
 
-mkdir -p logs
 echo "✅ Logs directory ready."
 
 echo "👉 Cleaning any stale workers..."

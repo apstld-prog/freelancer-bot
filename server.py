@@ -1,20 +1,23 @@
-﻿from fastapi import FastAPI
+import logging
+from fastapi import FastAPI
 from bot import application
 
-app = FastAPI()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("app")
+
+app = FastAPI(title="Freelancer Bot API")
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Freelancer Bot API running"}
+    return {"status": "running"}
 
-# ✅ Telegram webhook endpoint
-from fastapi import Request
-import json
-
-@app.post("/")
-async def telegram_webhook(req: Request):
-    data = await req.body()
-    update = json.loads(data.decode("utf-8"))
-    await application.update_queue.put(update)
+@app.get("/health")
+def health():
     return {"ok": True}
 
+@app.post("/webhook/{token}")
+async def telegram_webhook(token: str, request: dict):
+    if token != application.bot.token:
+        return {"error": "unauthorized"}
+    await application.update_queue.put(request)
+    return {"ok": True}

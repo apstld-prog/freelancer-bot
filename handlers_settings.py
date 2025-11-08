@@ -1,43 +1,30 @@
-﻿from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+﻿import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from db_keywords import get_keywords_for_user
-from db import get_session, get_or_create_user_by_tid
+from utils import get_or_create_user
+
+log = logging.getLogger("handlers_settings")
 
 
-def settings_menu(user_settings):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔑 Keywords", callback_data="settings_keywords"),
-            InlineKeyboardButton("⏱ Interval", callback_data="settings_interval")
-        ],
-        [
-            InlineKeyboardButton("⬅️ Back", callback_data="back_start")
-        ]
-    ])
-
-
-async def settings_root(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query:
-        return
-
-    telegram_id = query.from_user.id
-
-    with get_session() as session:
-        user = get_or_create_user_by_tid(session, telegram_id)
-        keywords = get_keywords_for_user(session, user.id)
+# ---------------------------------------------------------
+# SETTINGS MENU HANDLER
+# ---------------------------------------------------------
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    telegram_id = update.effective_user.id
+    get_or_create_user(telegram_id)
 
     text = (
-        "*Settings*\n\n"
-        f"Your keywords: {', '.join(keywords) if keywords else 'None'}\n\n"
-        "Use the menu below to modify your settings."
+        "⚙️ **Settings**\n\n"
+        "Additional settings will become available soon."
     )
 
-    await query.edit_message_text(
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Back", callback_data="ui:back_main")]
+    ]
+
+    await update.message.reply_text(
         text,
         parse_mode="Markdown",
-        reply_markup=settings_menu(user),
-        disable_web_page_preview=True
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
