@@ -1,10 +1,17 @@
-# bot.py — stable version
-import os, logging
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+# bot.py — stable webhook version
+import os
+import logging
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters
+)
 
 from db_events import ensure_feed_events_schema
-
 from handlers_start import start_command
+
 try:
     from handlers_ui import handle_ui_callback, handle_user_message
 except Exception:
@@ -19,6 +26,10 @@ if not TOKEN:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or BOT_TOKEN")
 
 def build_application():
+    """
+    Build-only. No polling. No webhook start here.
+    server.py owns the webhook startup.
+    """
     ensure_feed_events_schema()
 
     app = ApplicationBuilder().token(TOKEN).build()
@@ -29,4 +40,5 @@ def build_application():
 
     return app
 
+# Export only the application object
 application = build_application()
