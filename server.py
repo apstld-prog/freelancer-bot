@@ -31,19 +31,21 @@ async def telegram_webhook(request: Request):
 
 @app.on_event("startup")
 async def startup_event():
-    log.info("Starting Telegram application...")
-    await application.initialize()
-    await application.start()
+    log.info("Starting Telegram webhook mode...")
+
+    # NO initialize() 
+    # NO start()
+
+    # Reset webhook
     await application.bot.delete_webhook()
     await application.bot.set_webhook(
         url=os.getenv("WEBHOOK_BASE_URL") + WEBHOOK_PATH
     )
+
     log.info(f"✅ Webhook set: {os.getenv('WEBHOOK_BASE_URL') + WEBHOOK_PATH}")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     log.info("Shutting down Telegram app...")
-    await application.stop()
     await application.shutdown()
-
