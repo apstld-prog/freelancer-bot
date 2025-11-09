@@ -74,3 +74,4 @@ async def fetch_kariera_jobs(keywords: list[str]):
         logger.error(f"Kariera fetch error: {e}")
         return []
 
+

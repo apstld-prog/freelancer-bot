@@ -47,3 +47,4 @@ async def jobs_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=jobs_menu()
     )
 
+

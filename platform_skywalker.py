@@ -83,3 +83,4 @@ async def fetch_skywalker_jobs(keywords: list[str]):
         logger.error(f"Skywalker fetch error: {e}")
         return []
 
+

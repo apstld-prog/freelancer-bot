@@ -31,3 +31,4 @@ def ensure_feed_events_schema():
         log.error(f"feed_event schema error: {e}")
     finally:
         close_session(db)
+

@@ -12,3 +12,4 @@ async def fetch_placeholder_jobs(keywords: list[str]):
     logger.info("Placeholder platform called — returning no jobs.")
     return []
 
+

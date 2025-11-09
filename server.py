@@ -1,4 +1,4 @@
-import os
+﻿import os
 import logging
 from fastapi import FastAPI, Request
 from telegram import Update
@@ -29,8 +29,8 @@ async def startup():
     # set webhook
     await application.bot.set_webhook(url=WEBHOOK_URL)
 
-    log.info(f"✅ Webhook set: {WEBHOOK_URL}")
-    log.info("✅ Application started with webhook mode")
+    log.info(f"âœ… Webhook set: {WEBHOOK_URL}")
+    log.info("âœ… Application started with webhook mode")
 
 
 @app.post("/{token}")
@@ -50,3 +50,4 @@ async def telegram_webhook(request: Request, token: str):
 @app.get("/")
 def root():
     return {"status": "ok"}
+

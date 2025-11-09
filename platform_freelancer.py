@@ -74,3 +74,4 @@ async def fetch_freelancer_jobs(keywords: list[str]):
         logger.error(f"Freelancer fetch error: {e}")
         return []
 
+

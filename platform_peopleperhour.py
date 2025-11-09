@@ -58,3 +58,4 @@ async def fetch_peopleperhour_jobs():
         logger.error(f"PPH fetch error: {e}")
         return []
 
+

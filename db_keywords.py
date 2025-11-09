@@ -47,3 +47,4 @@ def delete_keyword(user_id: int, value: str):
         db.commit()
     finally:
         close_session(db)
+

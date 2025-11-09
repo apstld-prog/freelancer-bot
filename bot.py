@@ -1,4 +1,4 @@
-# bot.py — stable webhook version
+﻿# bot.py â€” stable webhook version
 import os
 import logging
 from telegram.ext import (
@@ -42,3 +42,4 @@ def build_application():
 
 # Export only the application object
 application = build_application()
+

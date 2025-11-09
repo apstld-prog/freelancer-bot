@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from utils import get_or_create_user
@@ -6,8 +6,8 @@ from utils import get_or_create_user
 log = logging.getLogger("handlers_start")
 
 START_TEXT = (
-    "👋 Welcome to Freelancer Alert Bot!\n"
-    "🎁 You have a 10-day free trial.\n\n"
+    "ðŸ‘‹ Welcome to Freelancer Alert Bot!\n"
+    "ðŸŽ You have a 10-day free trial.\n\n"
     "Automatically finds matching freelance jobs from top platforms "
     "and sends you instant alerts with affiliate-safe links.\n\n"
     "Use /help to see how it works.\n"
@@ -20,8 +20,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("🟩 Keywords", callback_data="ui:keywords"),
-            InlineKeyboardButton("⚙️ Settings", callback_data="ui:settings"),
+            InlineKeyboardButton("ðŸŸ© Keywords", callback_data="ui:keywords"),
+            InlineKeyboardButton("âš™ï¸ Settings", callback_data="ui:settings"),
         ]
     ]
 
@@ -29,3 +29,4 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         START_TEXT,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+

@@ -103,3 +103,4 @@ async def fetch_careerjet_jobs(keywords: list[str]):
         logger.error(f"CareerJet error: {e}")
         return []
 
+
