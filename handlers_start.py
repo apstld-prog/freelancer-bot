@@ -30,8 +30,6 @@ START_MESSAGE = (
 
 
 def main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
-    """Generate the main menu inline keyboard exactly like your UI layout."""
-
     buttons = [
         [
             InlineKeyboardButton("🟩 Keywords", callback_data="ui:keywords"),
@@ -46,32 +44,33 @@ def main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
         ]
     ]
 
-    # Admin row only for admin users
     if is_admin:
-        buttons.append([
-            InlineKeyboardButton("🔥 Admin", callback_data="ui:admin")
-        ])
+        buttons.append([InlineKeyboardButton("🔥 Admin", callback_data="ui:admin")])
 
     return InlineKeyboardMarkup(buttons)
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles /start with exact UI layout and user creation."""
-    try:
-        tid = update.effective_user.id
 
-        # Ensure DB user exists
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /start correctly in webhook mode."""
+    try:
+        user = update.effective_user
+        tid = user.id
+
+        # DB ensure
         get_or_create_user_by_tid(tid)
 
-        # Determine if admin
+        # Load admin list from env -> bot_data
         admin_ids = context.bot_data.get("ADMIN_IDS", [])
-        is_admin = tid in admin_ids if admin_ids else False
+        is_admin = tid in admin_ids
 
-        await update.message.reply_markdown(
-            START_MESSAGE,
-            reply_markup=main_menu_keyboard(is_admin)
-        )
+        keyboard = main_menu_keyboard(is_admin)
+
+        # If webhook sends update without message
+        if update.message:
+            await update.message.reply_markdown(START_MESSAGE, reply_markup=keyboard)
+        else:
+            await context.bot.send_message(tid, START_MESSAGE, reply_markup=keyboard)
 
     except Exception as e:
         log.error(f"/start error: {e}", exc_info=True)
-
