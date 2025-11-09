@@ -75,3 +75,4 @@ async def fetch_kariera_jobs(keywords: list[str]):
         return []
 
 
+

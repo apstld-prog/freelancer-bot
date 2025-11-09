@@ -1,53 +1,49 @@
 ﻿import os
 import logging
 from fastapi import FastAPI, Request
-from telegram import Update
+from fastapi.responses import JSONResponse
+
 from bot import application
 
 log = logging.getLogger("server")
 
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
+WEBHOOK_PATH = f"/{WEBHOOK_SECRET}"
+
 app = FastAPI()
-
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-BASE_URL = os.getenv("WEBHOOK_BASE_URL")
-SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
-
-WEBHOOK_URL = f"{BASE_URL}/{SECRET}"
-
-
-@app.on_event("startup")
-async def startup():
-    log.info("Starting Telegram application...")
-
-    await application.initialize()
-
-    # VERY IMPORTANT: disable polling + drop pending updates
-    await application.bot.delete_webhook(drop_pending_updates=True)
-
-    await application.start()
-
-    # set webhook
-    await application.bot.set_webhook(url=WEBHOOK_URL)
-
-    log.info(f"âœ… Webhook set: {WEBHOOK_URL}")
-    log.info("âœ… Application started with webhook mode")
-
-
-@app.post("/{token}")
-async def telegram_webhook(request: Request, token: str):
-    if token != SECRET:
-        return {"status": "ignored"}
-
-    data = await request.json()
-
-    update = Update.de_json(data, application.bot)
-
-    await application.process_update(update)
-
-    return {"ok": True}
 
 
 @app.get("/")
-def root():
-    return {"status": "ok"}
+async def root():
+    return {"status": "Freelancer Bot is running"}
+
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    try:
+        update = await request.json()
+        await application.process_update(update)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        log.error(f"Webhook error: {e}", exc_info=True)
+        return JSONResponse({"ok": False})
+
+
+@app.on_event("startup")
+async def startup_event():
+    log.info("Starting Telegram application...")
+    await application.initialize()
+    await application.start()
+    await application.bot.delete_webhook()
+    await application.bot.set_webhook(
+        url=os.getenv("WEBHOOK_BASE_URL") + WEBHOOK_PATH
+    )
+    log.info(f"✅ Webhook set: {os.getenv('WEBHOOK_BASE_URL') + WEBHOOK_PATH}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    log.info("Shutting down Telegram app...")
+    await application.stop()
+    await application.shutdown()
 

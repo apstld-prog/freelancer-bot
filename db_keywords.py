@@ -1,48 +1,57 @@
-﻿from sqlalchemy import text
+﻿import logging
+from sqlalchemy import text
 from db import get_session, close_session
 
+log = logging.getLogger("db_keywords")
 
-def get_keywords_for_user(user_id: int):
-    """
-    Returns a list of keyword strings for the given user.
-    Used by all workers.
-    """
+
+def ensure_keywords_schema():
+    """Ensures keyword table exists."""
     db = get_session()
     try:
-        rows = db.execute(
-            text("SELECT value FROM keyword WHERE user_id = :uid ORDER BY id ASC"),
-            {"uid": user_id}
-        ).fetchall()
-
-        return [r[0] for r in rows if r[0]]
-    finally:
-        close_session(db)
-
-
-def add_keyword(user_id: int, value: str):
-    """
-    Insert a new keyword for a user.
-    """
-    db = get_session()
-    try:
-        db.execute(
-            text("INSERT INTO keyword (user_id, value) VALUES (:uid, :val)"),
-            {"uid": user_id, "val": value}
-        )
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS user_keywords (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                keyword TEXT NOT NULL
+            );
+        """))
         db.commit()
     finally:
         close_session(db)
 
 
-def delete_keyword(user_id: int, value: str):
-    """
-    Delete a keyword for a user.
-    """
+def get_keywords(user_id: int):
+    db = get_session()
+    try:
+        rows = db.execute(
+            text("SELECT keyword FROM user_keywords WHERE user_id=:u"),
+            {"u": user_id}
+        ).fetchall()
+        return [r[0] for r in rows]
+    finally:
+        close_session(db)
+
+
+def add_keywords(user_id: int, keywords):
+    db = get_session()
+    try:
+        for kw in keywords:
+            db.execute(
+                text("INSERT INTO user_keywords (user_id, keyword) VALUES (:u, :k)"),
+                {"u": user_id, "k": kw}
+            )
+        db.commit()
+    finally:
+        close_session(db)
+
+
+def delete_keyword(user_id: int, keyword: str):
     db = get_session()
     try:
         db.execute(
-            text("DELETE FROM keyword WHERE user_id = :uid AND value = :val"),
-            {"uid": user_id, "val": value}
+            text("DELETE FROM user_keywords WHERE user_id=:u AND keyword=:k"),
+            {"u": user_id, "k": keyword}
         )
         db.commit()
     finally:

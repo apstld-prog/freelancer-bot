@@ -104,3 +104,4 @@ async def fetch_careerjet_jobs(keywords: list[str]):
         return []
 
 
+

@@ -54,3 +54,4 @@ def get_or_create_user_by_tid(tid: int):
     finally:
         close_session(db)
 
+
