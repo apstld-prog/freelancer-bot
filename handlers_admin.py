@@ -23,7 +23,7 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         close_session(db)
 
-    await update.message.reply_text(f"👑 *Users:*\n{users}", parse_mode="Markdown")
+    await update.message.reply_text(f"ðŸ‘‘ *Users:*\n{users}", parse_mode="Markdown")
 
 
 async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -35,21 +35,21 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /grant <telegram_id> <days>")
         return
 
-    await update.message.reply_text("✅ License extended.")
+    await update.message.reply_text("âœ… License extended.")
 
 
 async def admin_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_only(update.effective_user.id):
         return
 
-    await update.message.reply_text("✅ User blocked.")
+    await update.message.reply_text("âœ… User blocked.")
 
 
 async def admin_unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_only(update.effective_user.id):
         return
 
-    await update.message.reply_text("✅ User unblocked.")
+    await update.message.reply_text("âœ… User unblocked.")
 
 
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -57,11 +57,12 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = update.message.text.replace("/broadcast", "").strip()
-    await update.message.reply_text("✅ Broadcast sent.")
+    await update.message.reply_text("âœ… Broadcast sent.")
 
 
 async def admin_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_only(update.effective_user.id):
         return
 
-    await update.message.reply_text("✅ Feed toggles ok.")
+    await update.message.reply_text("âœ… Feed toggles ok.")
+

@@ -48,3 +48,4 @@ def get_platform_stats(hours: int = 24):
     finally:
         close_session(db)
 
+

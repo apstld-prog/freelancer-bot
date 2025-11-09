@@ -12,7 +12,7 @@ WEBHOOK_PATH = f"/{WEBHOOK_SECRET}"
 
 app = FastAPI()
 
-# ✅ state flag – guarantees no update is processed early
+# âœ… state flag â€“ guarantees no update is processed early
 BOT_READY = False
 
 
@@ -24,7 +24,7 @@ async def root():
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     if not BOT_READY:
-        # Bot not initialized yet — ignore Telegram updates
+        # Bot not initialized yet â€” ignore Telegram updates
         return JSONResponse({"ok": False, "reason": "bot_not_ready"})
 
     try:
@@ -41,18 +41,18 @@ async def startup_event():
     global BOT_READY
     log.info("Starting Telegram webhook mode...")
 
-    # ✅ REQUIRED — MUST BE FIRST
+    # âœ… REQUIRED â€” MUST BE FIRST
     await application.initialize()
     await application.start()
 
-    # ✅ reset Telegram webhook
+    # âœ… reset Telegram webhook
     await application.bot.delete_webhook()
     await application.bot.set_webhook(
         url=os.getenv("WEBHOOK_BASE_URL") + WEBHOOK_PATH
     )
 
     BOT_READY = True
-    log.info(f"✅ Webhook set: {os.getenv('WEBHOOK_BASE_URL') + WEBHOOK_PATH}")
+    log.info(f"âœ… Webhook set: {os.getenv('WEBHOOK_BASE_URL') + WEBHOOK_PATH}")
 
 
 @app.on_event("shutdown")
@@ -63,3 +63,4 @@ async def shutdown_event():
 
     await application.stop()
     await application.shutdown()
+

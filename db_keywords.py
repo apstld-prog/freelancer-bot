@@ -57,3 +57,4 @@ def delete_keyword(user_id: int, keyword: str):
     finally:
         close_session(db)
 
+

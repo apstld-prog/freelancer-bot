@@ -9,7 +9,7 @@ BASE_URL = "https://www.careerjet.com/search/jobs?s={query}"
 
 
 def parse_relative_date(text: str) -> datetime:
-    """Converts '2 days ago', '5 hours ago' → datetime."""
+    """Converts '2 days ago', '5 hours ago' â†’ datetime."""
     text = text.lower().strip()
 
     now = datetime.now(tz=timezone.utc)
@@ -27,7 +27,7 @@ def parse_relative_date(text: str) -> datetime:
             num = int(text.split()[0])
             return now - timedelta(minutes=num)
 
-        # Unknown → fallback
+        # Unknown â†’ fallback
         return now
 
     except:
@@ -102,6 +102,7 @@ async def fetch_careerjet_jobs(keywords: list[str]):
     except Exception as e:
         logger.error(f"CareerJet error: {e}")
         return []
+
 
 
 

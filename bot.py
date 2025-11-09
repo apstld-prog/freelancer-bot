@@ -1,4 +1,4 @@
-﻿# bot.py — stable final version
+﻿# bot.py â€” stable final version
 
 import os
 import logging
@@ -35,18 +35,18 @@ def build_application():
 
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # ✅ Inject ADMIN IDS into bot_data
-    # Βάλε εδώ τους admin Telegram IDs
+    # âœ… Inject ADMIN IDS into bot_data
+    # Î’Î¬Î»Îµ ÎµÎ´ÏŽ Ï„Î¿Ï…Ï‚ admin Telegram IDs
     admin_ids_env = os.getenv("ADMIN_IDS", "")
     if admin_ids_env.strip():
         admin_list = [int(x.strip()) for x in admin_ids_env.split(",") if x.strip().isdigit()]
     else:
-        # Default: ο λογαριασμός σου — βάλε όποιο θες
+        # Default: Î¿ Î»Î¿Î³Î±ÏÎ¹Î±ÏƒÎ¼ÏŒÏ‚ ÏƒÎ¿Ï… â€” Î²Î¬Î»Îµ ÏŒÏ€Î¿Î¹Î¿ Î¸ÎµÏ‚
         admin_list = [5254014824]
 
     app.bot_data["ADMIN_IDS"] = admin_list
 
-    # ✅ Register handlers
+    # âœ… Register handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(handle_ui_callback, pattern=r"^(ui|act):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
@@ -55,3 +55,4 @@ def build_application():
 
 
 application = build_application()
+

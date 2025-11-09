@@ -126,3 +126,4 @@ def wrap_affiliate_link(url: str) -> str:
     if not url:
         return url
     return f"https://track.freelancer.com/c/YOUR_F_AFF_ID/?url={url}"
+

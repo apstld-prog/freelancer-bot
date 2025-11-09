@@ -98,7 +98,7 @@ def run_once():
 
 
 def main_loop():
-    log.info("🚀 Starting Skywalker worker...")
+    log.info("ðŸš€ Starting Skywalker worker...")
     while True:
         try:
             run_once()
@@ -109,5 +109,6 @@ def main_loop():
 
 if __name__ == "__main__":
     main_loop()
+
 
 

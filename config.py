@@ -2,7 +2,7 @@
 
 # --- Core env ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-TELEGRAM_BOT_TOKEN = BOT_TOKEN  # âœ… for worker compatibility
+TELEGRAM_BOT_TOKEN = BOT_TOKEN  # Ã¢Å“â€¦ for worker compatibility
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///freelancer.db")
@@ -50,8 +50,9 @@ KARIERA_RSS = os.getenv("KARIERA_RSS", "")
 # Platform stats window
 STATS_WINDOW_HOURS = int(os.getenv("STATS_WINDOW_HOURS", "24"))
 
-# âœ… Worker timing (fix ImportError)
+# Ã¢Å“â€¦ Worker timing (fix ImportError)
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "120"))
+
 
 
 

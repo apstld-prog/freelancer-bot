@@ -53,7 +53,7 @@ async def fetch_kariera_jobs(keywords: list[str]):
             desc_el = el.select_one("p")
             description = desc_el.get_text(strip=True) if desc_el else ""
 
-            # Kariera also rarely gives clean date → fallback now
+            # Kariera also rarely gives clean date â†’ fallback now
             posted_at = datetime.now(tz=timezone.utc)
 
             jobs.append(
@@ -73,6 +73,7 @@ async def fetch_kariera_jobs(keywords: list[str]):
     except Exception as e:
         logger.error(f"Kariera fetch error: {e}")
         return []
+
 
 
 

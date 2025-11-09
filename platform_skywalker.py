@@ -58,7 +58,7 @@ async def fetch_skywalker_jobs(keywords: list[str]):
             desc_el = item.select_one(".article-desc")
             description = desc_el.get_text(strip=True) if desc_el else ""
 
-            # Skywalker rarely shows post date — fallback to NOW
+            # Skywalker rarely shows post date â€” fallback to NOW
             posted_at = datetime.now(tz=timezone.utc)
 
             # No budget info
@@ -82,6 +82,7 @@ async def fetch_skywalker_jobs(keywords: list[str]):
     except Exception as e:
         logger.error(f"Skywalker fetch error: {e}")
         return []
+
 
 
 

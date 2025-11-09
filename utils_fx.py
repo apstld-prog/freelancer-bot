@@ -26,7 +26,7 @@ def format_budget(amount, currency):
     if not amount or not currency:
         return "Budget: N/A"
     usd = convert_to_usd(amount, currency)
-    return f"ðŸ’° <b>Budget:</b> {amount} {currency.upper()} (~${usd} USD)"
+    return f"Ã°Å¸â€™Â° <b>Budget:</b> {amount} {currency.upper()} (~${usd} USD)"
 
 def posted_ago(created_dt, now_dt):
     """Return time difference in human-readable form."""
@@ -42,6 +42,7 @@ def posted_ago(created_dt, now_dt):
         return f"{int(seconds // 3600)} hours ago"
     else:
         return f"{int(seconds // 86400)} days ago"
+
 
 
 

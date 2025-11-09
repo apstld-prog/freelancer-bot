@@ -57,7 +57,7 @@ def fetch_pph(keyword: str):
 
             if budget_text:
                 # Examples:
-                # "£50", "€120", "$300"
+                # "Â£50", "â‚¬120", "$300"
                 try:
                     currency = budget_text[0]
                     amount = int("".join(c for c in budget_text[1:] if c.isdigit()))
@@ -118,7 +118,7 @@ def run_once():
 
 
 def main_loop():
-    log.info("🚀 Starting PeoplePerHour worker...")
+    log.info("ðŸš€ Starting PeoplePerHour worker...")
     while True:
         try:
             run_once()
@@ -129,5 +129,6 @@ def main_loop():
 
 if __name__ == "__main__":
     main_loop()
+
 
 

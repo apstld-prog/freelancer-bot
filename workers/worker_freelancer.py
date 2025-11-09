@@ -73,18 +73,18 @@ def send_job_card(chat_id, job, match_kw):
     ts = job.get("time_submitted")
     ago = posted_ago(ts)
 
-    budget_text = f"{budget_min}–{budget_max} {currency}"
+    budget_text = f"{budget_min}â€“{budget_max} {currency}"
     usd = job.get("budget", {}).get("minimum_usd")
     if usd:
         budget_text += f" ({usd}$)"
 
     msg = (
         f"*{title}*\n"
-        f"🪙 *Budget:* {budget_text}\n"
-        f"🌐 *Source:* Freelancer\n"
-        f"🔍 *Match:* {match_kw}\n"
-        f"📝 {desc}\n"
-        f"🕒 {ago}"
+        f"ðŸª™ *Budget:* {budget_text}\n"
+        f"ðŸŒ *Source:* Freelancer\n"
+        f"ðŸ” *Match:* {match_kw}\n"
+        f"ðŸ“ {desc}\n"
+        f"ðŸ•’ {ago}"
     )
 
     jid = str(job["id"])
@@ -96,8 +96,8 @@ def send_job_card(chat_id, job, match_kw):
                 {"text": "Original", "url": wrap_affiliate_link(job["seo_url"])}
             ],
             [
-                {"text": "⭐ Save", "callback_data": f"act:save:{jid}"},
-                {"text": "🗑️ Delete", "callback_data": f"act:del:{jid}"}
+                {"text": "â­ Save", "callback_data": f"act:save:{jid}"},
+                {"text": "ðŸ—‘ï¸ Delete", "callback_data": f"act:del:{jid}"}
             ]
         ]
     }
@@ -147,7 +147,7 @@ def get_all_users():
 
 
 if __name__ == "__main__":
-    log.info("✅ Freelancer worker started")
+    log.info("âœ… Freelancer worker started")
 
     while True:
         try:
@@ -157,4 +157,5 @@ if __name__ == "__main__":
             log.error(f"Worker error: {e}")
 
         time.sleep(60)
+
 

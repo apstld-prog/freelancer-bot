@@ -76,3 +76,4 @@ async def fetch_freelancer_jobs(keywords: list[str]):
 
 
 
+

@@ -25,9 +25,10 @@ echo [+] Forcing push to remote...
 git push --force
 
 echo.
-echo âœ… Force refresh + push completed successfully.
+echo Ã¢Å“â€¦ Force refresh + push completed successfully.
 echo ======================================================
 pause
+
 
 
 

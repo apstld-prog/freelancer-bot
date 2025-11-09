@@ -19,15 +19,15 @@ def format_posted_ago(ts: datetime) -> str:
 
     seconds = diff.total_seconds()
     if seconds < 60:
-        return "πριν από λίγα δευτερόλεπτα"
+        return "Ï€ÏÎ¹Î½ Î±Ï€ÏŒ Î»Î¯Î³Î± Î´ÎµÏ…Ï„ÎµÏÏŒÎ»ÎµÏ€Ï„Î±"
     minutes = seconds // 60
     if minutes < 60:
-        return f"πριν από {int(minutes)} λεπτό(ά)"
+        return f"Ï€ÏÎ¹Î½ Î±Ï€ÏŒ {int(minutes)} Î»ÎµÏ€Ï„ÏŒ(Î¬)"
     hours = minutes // 60
     if hours < 24:
-        return f"πριν από {int(hours)} ώρα(ες)"
+        return f"Ï€ÏÎ¹Î½ Î±Ï€ÏŒ {int(hours)} ÏŽÏÎ±(ÎµÏ‚)"
     days = hours // 24
-    return f"πριν από {int(days)} ημέρα(ες)"
+    return f"Ï€ÏÎ¹Î½ Î±Ï€ÏŒ {int(days)} Î·Î¼Î­ÏÎ±(ÎµÏ‚)"
 
 
 # ---------------------------------------------------------
@@ -50,7 +50,7 @@ async def send_job_card(update: Update, context: ContextTypes.DEFAULT_TYPE, job)
 
     # Budget
     if job.budget_amount:
-        budget_str = f"{job.budget_amount}–{job.budget_amount} {job.budget_currency} ({job.budget_usd}$)"
+        budget_str = f"{job.budget_amount}â€“{job.budget_amount} {job.budget_currency} ({job.budget_usd}$)"
     else:
         budget_str = "N/A"
 
@@ -62,11 +62,11 @@ async def send_job_card(update: Update, context: ContextTypes.DEFAULT_TYPE, job)
     # --------------------------
     text = (
         f"*{title}*\n"
-        f"🪙 *Budget:* {budget_str}\n"
-        f"🌐 *Source:* {platform}\n"
-        f"🔍 *Match:* {match_kw}\n"
-        f"📝 {desc}\n"
-        f"🕒 {posted}\n"
+        f"ðŸª™ *Budget:* {budget_str}\n"
+        f"ðŸŒ *Source:* {platform}\n"
+        f"ðŸ” *Match:* {match_kw}\n"
+        f"ðŸ“ {desc}\n"
+        f"ðŸ•’ {posted}\n"
         "________________________________________"
     )
 
@@ -82,8 +82,8 @@ async def send_job_card(update: Update, context: ContextTypes.DEFAULT_TYPE, job)
             InlineKeyboardButton("Original", url=original_url)
         ],
         [
-            InlineKeyboardButton("⭐ Save", callback_data=f"act:save:{job.id}"),
-            InlineKeyboardButton("🗑️ Delete", callback_data=f"act:del:{job.id}")
+            InlineKeyboardButton("â­ Save", callback_data=f"act:save:{job.id}"),
+            InlineKeyboardButton("ðŸ—‘ï¸ Delete", callback_data=f"act:del:{job.id}")
         ]
     ]
 
@@ -110,11 +110,12 @@ async def handle_job_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "save":
             save_job(uid, job_id)
             await query.edit_message_reply_markup(reply_markup=None)
-            await query.edit_message_text("✅ Job saved.")
+            await query.edit_message_text("âœ… Job saved.")
         elif action == "del":
             delete_saved_job(uid, job_id)
             await query.edit_message_reply_markup(reply_markup=None)
-            await query.edit_message_text("🗑️ Job deleted.")
+            await query.edit_message_text("ðŸ—‘ï¸ Job deleted.")
     except Exception as e:
         log.error(f"Job action failed: {e}")
+
 

@@ -26,9 +26,10 @@ echo [+] Force pushing to remote...
 git push --force
 
 echo.
-echo âœ… DONE: All files rewritten and force pushed.
+echo Ã¢Å“â€¦ DONE: All files rewritten and force pushed.
 echo ======================================================
 pause
+
 
 
 

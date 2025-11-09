@@ -24,17 +24,17 @@ async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     proposal = user["proposal_template"] or "(none)"
 
     text = (
-        "🛠 *Your Settings*\n"
-        f"• Keywords: {keywords}\n"
-        f"• Countries: {countries}\n"
-        f"• Proposal template: {proposal}\n\n"
-        "🟢 Start date: —\n"
-        f"🟢 Trial ends: —\n"
-        f"🟢 License until: None\n"
-        f"✅ Active: { '✅' if user['active'] else '❌' }\n"
-        f"🚫 Blocked: { '✅' if user['blocked'] else '❌' }\n"
+        "ðŸ›  *Your Settings*\n"
+        f"â€¢ Keywords: {keywords}\n"
+        f"â€¢ Countries: {countries}\n"
+        f"â€¢ Proposal template: {proposal}\n\n"
+        "ðŸŸ¢ Start date: â€”\n"
+        f"ðŸŸ¢ Trial ends: â€”\n"
+        f"ðŸŸ¢ License until: None\n"
+        f"âœ… Active: { 'âœ…' if user['active'] else 'âŒ' }\n"
+        f"ðŸš« Blocked: { 'âœ…' if user['blocked'] else 'âŒ' }\n"
         "________________________________________\n"
-        "🌍 Platforms monitored:\n"
+        "ðŸŒ Platforms monitored:\n"
         "Global: Freelancer.com (affiliate links), PeoplePerHour, Malt, Workana, Guru, "
         "99designs, Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
         "(*referral/curated platforms)\n"
@@ -46,4 +46,5 @@ async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("Back", callback_data="ui:main")]]
 
     await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
 

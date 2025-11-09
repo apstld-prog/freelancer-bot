@@ -19,17 +19,17 @@ def build_settings_message(user):
     proposal = get_proposal_template(user.id) or "(none)"
 
     return (
-        "🛠 *Your Settings*\n"
-        f"• *Keywords:* {kw}\n"
-        f"• *Countries:* {countries}\n"
-        f"• *Proposal template:* {proposal}\n"
-        f"🟢 *Start date:* {user.created_at}\n"
-        f"🟢 *Trial ends:* {user.trial_until}\n"
-        f"🟢 *License until:* {user.license_until}\n"
-        f"✅ *Active:* {'☑️' if user.is_active else '❌'}\n"
-        f"🚫 *Blocked:* {'☑️' if user.is_blocked else '❌'}\n"
+        "ðŸ›  *Your Settings*\n"
+        f"â€¢ *Keywords:* {kw}\n"
+        f"â€¢ *Countries:* {countries}\n"
+        f"â€¢ *Proposal template:* {proposal}\n"
+        f"ðŸŸ¢ *Start date:* {user.created_at}\n"
+        f"ðŸŸ¢ *Trial ends:* {user.trial_until}\n"
+        f"ðŸŸ¢ *License until:* {user.license_until}\n"
+        f"âœ… *Active:* {'â˜‘ï¸' if user.is_active else 'âŒ'}\n"
+        f"ðŸš« *Blocked:* {'â˜‘ï¸' if user.is_blocked else 'âŒ'}\n"
         "________________________________________\n"
-        "🌍 *Platforms monitored:*\n"
+        "ðŸŒ *Platforms monitored:*\n"
         "Global: Freelancer.com, PeoplePerHour, Malt, Workana, Guru, 99designs,\n"
         "Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
         "(*referral/curated platforms)\n"
@@ -41,38 +41,38 @@ def build_settings_message(user):
 
 def build_settings_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add keyword", callback_data="act:addkw")],
-        [InlineKeyboardButton("➖ Remove keyword", callback_data="act:delkw")],
-        [InlineKeyboardButton("🌍 Set countries", callback_data="act:setcountries")],
-        [InlineKeyboardButton("📄 Set proposal template", callback_data="act:setproposal")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="ui:main")],
+        [InlineKeyboardButton("âž• Add keyword", callback_data="act:addkw")],
+        [InlineKeyboardButton("âž– Remove keyword", callback_data="act:delkw")],
+        [InlineKeyboardButton("ðŸŒ Set countries", callback_data="act:setcountries")],
+        [InlineKeyboardButton("ðŸ“„ Set proposal template", callback_data="act:setproposal")],
+        [InlineKeyboardButton("â¬…ï¸ Back", callback_data="ui:main")],
     ])
 
 
 def build_saved_jobs_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Back", callback_data="ui:main")]
+        [InlineKeyboardButton("â¬…ï¸ Back", callback_data="ui:main")]
     ])
 
 
 def build_help_message():
     return (
-        "🩵 *Help / How it works*\n"
-        "1️⃣ Add keywords with `/addkeyword python, telegram` (comma-separated).\n"
-        "2️⃣ Set your countries with `/setcountry US,UK` or `ALL`.\n"
-        "3️⃣ Save proposal template with `/setproposal <text>`.\n"
-        " Placeholders: {jobtitle}, {experience}, {stack}, {availability},\n"
-        " {step1}, {step2}, {step3}, {budgettime}, {portfolio}, {name}\n"
-        "4️⃣ When a job arrives you can:\n"
-        " ⭐ *Keep*\n"
-        " 🗑️ *Delete*\n"
-        " 📩 *Proposal* → affiliate job link\n"
-        " 🌐 *Original* → direct affiliate link\n"
-        "➡️ `/mysettings` anytime.\n"
-        "➡️ `/selftest` for a test job.\n"
-        "➡️ `/platforms CC` (e.g. `/platforms GR`).\n"
+        "ðŸ©µ *Help / How it works*\n"
+        "1ï¸âƒ£ Add keywords with `/addkeyword python, telegram` (comma-separated).\n"
+        "2ï¸âƒ£ Set your countries with `/setcountry US,UK` or `ALL`.\n"
+        "3ï¸âƒ£ Save proposal template with `/setproposal <text>`.\n"
+        "â€ƒPlaceholders: {jobtitle}, {experience}, {stack}, {availability},\n"
+        "â€ƒ{step1}, {step2}, {step3}, {budgettime}, {portfolio}, {name}\n"
+        "4ï¸âƒ£ When a job arrives you can:\n"
+        "â€ƒâ­ *Keep*\n"
+        "â€ƒðŸ—‘ï¸ *Delete*\n"
+        "â€ƒðŸ“© *Proposal* â†’ affiliate job link\n"
+        "â€ƒðŸŒ *Original* â†’ direct affiliate link\n"
+        "âž¡ï¸ `/mysettings` anytime.\n"
+        "âž¡ï¸ `/selftest` for a test job.\n"
+        "âž¡ï¸ `/platforms CC` (e.g. `/platforms GR`).\n"
         "________________________________________\n"
-        "🌍 Platforms monitored:\n"
+        "ðŸŒ Platforms monitored:\n"
         "Freelancer.com, PeoplePerHour, Malt, Workana, Guru,\n"
         "99designs, Toptal*, Codeable*, YunoJuno*, Worksome*,\n"
         "twago, freelancermap\n"
@@ -82,7 +82,7 @@ def build_help_message():
 
 def build_contact_message(user):
     return (
-        "📩 *Contact the Admin*\n"
+        "ðŸ“© *Contact the Admin*\n"
         "Send your message here and the admin will receive it.\n"
         "You will get a reply directly inside this chat.\n"
         "________________________________________\n"
@@ -92,12 +92,12 @@ def build_contact_message(user):
 
 def build_admin_message():
     return (
-        "👑 *Admin commands*\n"
-        "• `/users` – list users\n"
-        "• `/grant <telegram_id> <days>` – extend license\n"
-        "• `/block <telegram_id>` / `/unblock <telegram_id>`\n"
-        "• `/broadcast <text>` – send to all active users\n"
-        "• `/feedsstatus` – show feed toggles\n"
+        "ðŸ‘‘ *Admin commands*\n"
+        "â€¢ `/users` â€“ list users\n"
+        "â€¢ `/grant <telegram_id> <days>` â€“ extend license\n"
+        "â€¢ `/block <telegram_id>` / `/unblock <telegram_id>`\n"
+        "â€¢ `/broadcast <text>` â€“ send to all active users\n"
+        "â€¢ `/feedsstatus` â€“ show feed toggles\n"
         "/SELFTEST  \n"
         "/WORKERS TEST"
     )
@@ -106,17 +106,17 @@ def build_admin_message():
 def main_menu_keyboard(is_admin):
     rows = [
         [
-            InlineKeyboardButton("🟩 Keywords", callback_data="ui:keywords"),
-            InlineKeyboardButton("⚙️ Settings", callback_data="ui:settings"),
+            InlineKeyboardButton("ðŸŸ© Keywords", callback_data="ui:keywords"),
+            InlineKeyboardButton("âš™ï¸ Settings", callback_data="ui:settings"),
         ],
         [
-            InlineKeyboardButton("📘 Help", callback_data="ui:help"),
-            InlineKeyboardButton("💾 Saved", callback_data="ui:saved"),
+            InlineKeyboardButton("ðŸ“˜ Help", callback_data="ui:help"),
+            InlineKeyboardButton("ðŸ’¾ Saved", callback_data="ui:saved"),
         ],
-        [InlineKeyboardButton("📞 Contact", callback_data="ui:contact")],
+        [InlineKeyboardButton("ðŸ“ž Contact", callback_data="ui:contact")],
     ]
     if is_admin:
-        rows.append([InlineKeyboardButton("🔥 Admin", callback_data="ui:admin")])
+        rows.append([InlineKeyboardButton("ðŸ”¥ Admin", callback_data="ui:admin")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -142,7 +142,7 @@ async def handle_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # ========== MAIN ==========
         if data == "ui:main":
             await query.edit_message_text(
-                "👋 *Welcome back!*",
+                "ðŸ‘‹ *Welcome back!*",
                 reply_markup=main_menu_keyboard(is_admin),
                 parse_mode="Markdown"
             )
@@ -161,11 +161,11 @@ async def handle_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if data == "ui:keywords":
             kws = ", ".join(get_keywords(user.id)) or "(none)"
             await query.edit_message_text(
-                f"🟩 *Your Keywords*\n{kws}",
+                f"ðŸŸ© *Your Keywords*\n{kws}",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ Add", callback_data="act:addkw")],
-                    [InlineKeyboardButton("➖ Remove", callback_data="act:delkw")],
-                    [InlineKeyboardButton("⬅️ Back", callback_data="ui:main")],
+                    [InlineKeyboardButton("âž• Add", callback_data="act:addkw")],
+                    [InlineKeyboardButton("âž– Remove", callback_data="act:delkw")],
+                    [InlineKeyboardButton("â¬…ï¸ Back", callback_data="ui:main")],
                 ]),
                 parse_mode="Markdown"
             )
@@ -175,9 +175,9 @@ async def handle_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if data == "ui:saved":
             saved = fetch_saved_jobs(user.id)
             if not saved:
-                msg = "💾 *Saved Jobs*\nYou have no saved jobs."
+                msg = "ðŸ’¾ *Saved Jobs*\nYou have no saved jobs."
             else:
-                msg = "💾 *Saved Jobs*\n" + "\n".join(
+                msg = "ðŸ’¾ *Saved Jobs*\n" + "\n".join(
                     f"- {j.title} ({j.platform})" for j in saved
                 )
 
@@ -193,7 +193,7 @@ async def handle_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text(
                 build_help_message(),
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⬅️ Back", callback_data="ui:main")]
+                    [InlineKeyboardButton("â¬…ï¸ Back", callback_data="ui:main")]
                 ]),
                 parse_mode="Markdown"
             )
@@ -204,7 +204,7 @@ async def handle_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text(
                 build_contact_message(user),
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⬅️ Back", callback_data="ui:main")]
+                    [InlineKeyboardButton("â¬…ï¸ Back", callback_data="ui:main")]
                 ]),
                 parse_mode="Markdown"
             )
@@ -215,7 +215,7 @@ async def handle_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text(
                 build_admin_message(),
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⬅️ Back", callback_data="ui:main")]
+                    [InlineKeyboardButton("â¬…ï¸ Back", callback_data="ui:main")]
                 ]),
                 parse_mode="Markdown"
             )
@@ -234,7 +234,7 @@ async def handle_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ==================================
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles free messages (used for Contact → Admin inbox)."""
+    """Handles free messages (used for Contact â†’ Admin inbox)."""
     try:
         tid = update.effective_user.id
         user = get_user(tid)
@@ -249,17 +249,18 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=admin,
                 text=(
-                    "📩 *New message from user*\n"
+                    "ðŸ“© *New message from user*\n"
                     f"ID: `{tid}`\n"
                     f"{update.message.text}\n"
                     "________________________________________\n"
-                    "🕒 Sent just now"
+                    "ðŸ•’ Sent just now"
                 ),
                 parse_mode="Markdown"
             )
 
-        await update.message.reply_text("✅ Message sent to admin.")
+        await update.message.reply_text("âœ… Message sent to admin.")
 
     except Exception as e:
         log.error(f"Message handler error: {e}", exc_info=True)
+
 

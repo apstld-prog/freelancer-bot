@@ -9,8 +9,9 @@ async def fetch_placeholder_jobs(keywords: list[str]):
     Generic fallback loader when a platform is disabled or placeholder.
     Always returns an empty list.
     """
-    logger.info("Placeholder platform called — returning no jobs.")
+    logger.info("Placeholder platform called â€” returning no jobs.")
     return []
+
 
 
 
