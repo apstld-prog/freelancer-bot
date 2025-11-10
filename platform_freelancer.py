@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import requests
 from utils import wrap_affiliate_link
 

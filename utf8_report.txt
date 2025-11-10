@@ -1,4 +1,4 @@
-﻿UTF-8 Cleaner (Python version)
+UTF-8 Cleaner (Python version)
 ====================================
 OK      : .\app.py
 OK      : .\bot.py

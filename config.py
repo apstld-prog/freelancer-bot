@@ -1,4 +1,4 @@
-﻿import os
+import os
 
 # --- Core env ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")

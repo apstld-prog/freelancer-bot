@@ -1,4 +1,4 @@
-﻿# currency_usd.py
+# currency_usd.py
 # Helper for converting platform budget ranges into approximate USD values.
 # No external dependencies. Rates are mid-market and conservative.
 

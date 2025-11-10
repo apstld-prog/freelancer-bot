@@ -1,4 +1,4 @@
-﻿# bot.py Ã¢â‚¬â€ stable final version (clean UTF-8)
+# bot.py Ã¢â‚¬â€ stable final version (clean UTF-8)
 
 import os
 import logging

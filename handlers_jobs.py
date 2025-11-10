@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes

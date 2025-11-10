@@ -1,4 +1,4 @@
-﻿import os
+import os
 import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse

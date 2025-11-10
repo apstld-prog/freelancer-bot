@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 from sqlalchemy import text
 from db import get_session, close_session
 

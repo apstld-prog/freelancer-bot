@@ -1,85 +1,61 @@
-﻿@echo off
-setlocal ENABLEDELAYEDEXPANSION
-title GIT SUPER PUSH TOOL
-
-:: =====================================================
-:: FORCE SCRIPT TO RUN IN ITS OWN DIRECTORY
-:: This fixes the Ã¢â‚¬Å“fatal: not a git repositoryÃ¢â‚¬Â issue
-:: =====================================================
+@echo off
+title GIT SUPER PUSH TOOL (NO BOM SAFE VERSION)
 cd /d "%~dp0"
 
 :menu
 cls
 echo ======================================================
-echo              GIT SUPER PUSH TOOL
+echo                  GIT SUPER PUSH TOOL
+echo             SAFE - UTF8 WITHOUT BOM ONLY
 echo ======================================================
 echo.
 echo  Select mode:
 echo.
 echo    1) Normal Push
-echo    2) Force Refresh Push  (always creates commit)
-echo    3) Full Rewrite Push   (rewrites every file)
+echo    2) Force Refresh Push
+echo    3) Full Rewrite Push (No BOM)
 echo    4) Exit
 echo.
 set /p choice=Enter choice (1-4): 
 
 if "%choice%"=="1" goto normal
-if "%choice%"=="2" goto force_refresh
-if "%choice%"=="3" goto full_rewrite
+if "%choice%"=="2" goto refresh
+if "%choice%"=="3" goto rewrite
 if "%choice%"=="4" exit
 goto menu
 
 :normal
 cls
 echo [NORMAL PUSH]
-echo Staging changes...
 git add -A
-
-echo Committing...
-git commit -m "Normal sync commit" || echo (No changes to commit)
-
-echo Pushing...
+git commit -m "Normal sync commit" || echo (No changes)
 git push
 pause
 goto menu
 
-:force_refresh
+:refresh
 cls
-echo [FORCE REFRESH PUSH]
-echo Creating .force_git_sync...
+echo [FORCE REFRESH]
 echo %date% %time% > .force_git_sync
-
-echo Staging...
 git add -A
-
-echo Committing forced commit...
 git commit -m "Force refresh commit"
-
-echo Pushing...
 git push --force
 pause
 goto menu
 
-:full_rewrite
+:rewrite
 cls
-echo [FULL REWRITE PUSH]
-echo Rewriting ALL tracked files...
+echo [FULL REWRITE - UTF8 WITHOUT BOM]
 
 for /f "delims=" %%F in ('git ls-files') do (
     echo Rewriting %%F
     powershell -NoLogo -NoProfile -ExecutionPolicy Bypass ^
-      "(Get-Content -Raw '%%F') | Set-Content -Encoding UTF8 '%%F'"
+      "(Get-Content -Raw '%%F') | Set-Content -Encoding UTF8NoBOM '%%F'"
 )
 
-echo Staging...
 git add -A
-
-echo Committing full rewrite...
-git commit -m "FULL FORCE REWRITE - all files"
-
-echo Force pushing...
+git commit -m "Full rewrite (UTF8 without BOM)"
 git push --force
+
 pause
 goto menu
-
-

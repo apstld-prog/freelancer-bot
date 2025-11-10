@@ -1,4 +1,4 @@
-﻿from telegram import Update
+from telegram import Update
 from telegram.ext import ContextTypes
 
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):

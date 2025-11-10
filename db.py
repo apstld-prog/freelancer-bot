@@ -1,4 +1,4 @@
-﻿import os
+import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
 

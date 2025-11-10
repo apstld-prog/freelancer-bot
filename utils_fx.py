@@ -1,4 +1,4 @@
-﻿import math
+import math
 
 # --- Fixed currency conversion table ---
 CURRENCY_TO_USD = {
