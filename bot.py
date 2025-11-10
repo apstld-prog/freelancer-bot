@@ -1,4 +1,4 @@
-# bot.py — stable final version (clean UTF-8)
+﻿# bot.py â€” stable final version (clean UTF-8)
 
 import os
 import logging
@@ -56,3 +56,4 @@ def build_application():
 
 
 application = build_application()
+

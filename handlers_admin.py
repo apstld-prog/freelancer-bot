@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -19,6 +19,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["*Platform Stats (last 24h)*", "________________________________________"]
     for p, count in stats.items():
-        lines.append(f"• {p}: {count}")
+        lines.append(f"â€¢ {p}: {count}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+

@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
@@ -17,13 +17,13 @@ async def handle_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if data == "ui:back_home":
         await query.message.reply_text(
-            "🏠 Main Menu\nChoose an option:",
+            "ðŸ  Main Menu\nChoose an option:",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("🟩 Keywords", callback_data="ui:keywords"),
-                    InlineKeyboardButton("⚙️ Settings", callback_data="ui:settings"),
+                    InlineKeyboardButton("ðŸŸ© Keywords", callback_data="ui:keywords"),
+                    InlineKeyboardButton("âš™ï¸ Settings", callback_data="ui:settings"),
                 ],
-                [InlineKeyboardButton("❓ Help", callback_data="ui:help")],
+                [InlineKeyboardButton("â“ Help", callback_data="ui:help")],
             ]),
             parse_mode="Markdown"
         )
@@ -53,3 +53,4 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(
         "Use /start to return to the main menu.",
     )
+

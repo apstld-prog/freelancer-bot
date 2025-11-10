@@ -1,4 +1,4 @@
-import time
+﻿import time
 import logging
 import os
 import requests
@@ -109,3 +109,4 @@ def main_loop():
 
 if __name__ == "__main__":
     main_loop()
+

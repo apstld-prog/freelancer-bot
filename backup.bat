@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal ENABLEDELAYEDEXPANSION
 
 :: ======================================================
@@ -95,3 +95,4 @@ echo.
 echo Backup created: %ZIPFILE%
 pause
 exit
+

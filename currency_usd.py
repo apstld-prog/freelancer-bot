@@ -1,4 +1,4 @@
-# currency_usd.py
+﻿# currency_usd.py
 # Helper for converting platform budget ranges into approximate USD values.
 # No external dependencies. Rates are mid-market and conservative.
 
@@ -59,7 +59,7 @@ def usd_line(min_amount: Optional[float],
              max_amount: Optional[float],
              currency: Optional[str]) -> Optional[str]:
     """
-    Returns a printable USD range line, e.g. "~ $100.00–$300.00 USD".
+    Returns a printable USD range line, e.g. "~ $100.00â€“$300.00 USD".
     """
     rng = to_usd_range(min_amount, max_amount, currency)
     if not rng:
@@ -68,10 +68,11 @@ def usd_line(min_amount: Optional[float],
     lo, hi = rng
 
     if lo and hi:
-        return f"~ ${lo:,.2f}–${hi:,.2f} USD"
+        return f"~ ${lo:,.2f}â€“${hi:,.2f} USD"
     if lo and not hi:
         return f"~ from ${lo:,.2f} USD"
     if hi and not lo:
         return f"~ up to ${hi:,.2f} USD"
 
     return None
+

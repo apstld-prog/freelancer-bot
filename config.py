@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 # --- Core env ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -52,3 +52,4 @@ STATS_WINDOW_HOURS = int(os.getenv("STATS_WINDOW_HOURS", "24"))
 
 # Worker timing
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "120"))
+

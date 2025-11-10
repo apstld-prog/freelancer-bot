@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import os
 import time
 import logging
@@ -158,6 +158,7 @@ if __name__ == "__main__":
             log.error(f"Worker error: {e}")
 
         time.sleep(60)
+
 
 
 

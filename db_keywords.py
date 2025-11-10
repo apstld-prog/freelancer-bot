@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from sqlalchemy import text
 from db import get_session, close_session
 
@@ -56,3 +56,4 @@ def delete_keyword(user_id: int, keyword: str):
         db.commit()
     finally:
         close_session(db)
+

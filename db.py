@@ -1,4 +1,4 @@
-import os
+﻿import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
 
@@ -56,3 +56,4 @@ def get_or_create_user_by_tid(tid: int):
 
     finally:
         close_session(db)
+

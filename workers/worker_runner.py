@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import subprocess
 import time
 import sys
@@ -32,3 +32,4 @@ if __name__ == "__main__":
         for p in processes:
             p.terminate()
         sys.exit(0)
+

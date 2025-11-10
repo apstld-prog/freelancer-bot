@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from sqlalchemy import text
 from db import get_session, close_session
 
@@ -47,3 +47,4 @@ def get_platform_stats(hours: int = 24):
         return {r[0]: r[1] for r in rows}
     finally:
         close_session(db)
+

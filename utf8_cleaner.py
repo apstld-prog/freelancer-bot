@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 TARGET_EXT = {'.py', '.txt', '.md', '.sql', '.json', '.sh'}
 REPORT = "utf8_report.txt"
@@ -35,3 +35,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

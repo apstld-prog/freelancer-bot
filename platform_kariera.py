@@ -1,11 +1,11 @@
-import logging
+﻿import logging
 import requests
 from bs4 import BeautifulSoup
 from utils import wrap_affiliate_link
 
 log = logging.getLogger("platform.kariera")
 
-URL = "https://www.kariera.gr/θέσεις-εργασίας?keyword="
+URL = "https://www.kariera.gr/Î¸Î­ÏƒÎµÎ¹Ï‚-ÎµÏÎ³Î±ÏƒÎ¯Î±Ï‚?keyword="
 
 
 def search_kariera(keyword: str):
@@ -51,3 +51,4 @@ def search_kariera(keyword: str):
             continue
 
     return jobs
+

@@ -1,10 +1,10 @@
-@echo off
+﻿@echo off
 setlocal ENABLEDELAYEDEXPANSION
 title GIT SUPER PUSH TOOL
 
 :: =====================================================
 :: FORCE SCRIPT TO RUN IN ITS OWN DIRECTORY
-:: This fixes the “fatal: not a git repository” issue
+:: This fixes the â€œfatal: not a git repositoryâ€ issue
 :: =====================================================
 cd /d "%~dp0"
 
@@ -81,3 +81,4 @@ echo Force pushing...
 git push --force
 pause
 goto menu
+

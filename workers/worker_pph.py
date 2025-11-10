@@ -1,4 +1,4 @@
-import time
+﻿import time
 import logging
 import os
 import requests
@@ -57,7 +57,7 @@ def fetch_pph(keyword: str):
 
             if budget_text:
                 # Examples that originally may appear corrupted:
-                # "£50", "€120", "$300"
+                # "Â£50", "â‚¬120", "$300"
                 txt = budget_text.strip()
 
                 try:
@@ -131,3 +131,4 @@ def main_loop():
 
 if __name__ == "__main__":
     main_loop()
+

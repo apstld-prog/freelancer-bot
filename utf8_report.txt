@@ -1,4 +1,4 @@
-UTF-8 Cleaner (Python version)
+﻿UTF-8 Cleaner (Python version)
 ====================================
 CLEANED : .\app.py
 CLEANED : .\bot.py
@@ -35,3 +35,4 @@ CLEANED : .\workers\worker_runner.py
 CLEANED : .\workers\worker_skywalker.py
 
 Done.
+

@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import requests
 from utils import wrap_affiliate_link
 
@@ -62,3 +62,4 @@ def search_freelancer(keyword: str):
             continue
 
     return jobs
+
