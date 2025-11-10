@@ -1,0 +1,32 @@
+﻿# Enforce LF line endings everywhere
+* text=auto eol=lf
+
+# Shell scripts (must always be LF)
+*.sh text eol=lf
+
+# Python files
+*.py text eol=lf
+
+# Configuration & documentation
+*.md   text eol=lf
+*.txt  text eol=lf
+*.ini  text eol=lf
+*.env  text eol=lf
+*.cfg  text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+
+# Prevent BOM issues — disable encoding conversion
+*.sh   -working-tree-encoding
+*.py   -working-tree-encoding
+*.txt  -working-tree-encoding
+
+# Binary files (should not be modified)
+*.zip  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary

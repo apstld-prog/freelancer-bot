@@ -1,0 +1,37 @@
+UTF-8 Cleaner (Python version)
+====================================
+CLEANED : .\app.py
+CLEANED : .\bot.py
+CLEANED : .\config.py
+CLEANED : .\currency_usd.py
+CLEANED : .\db.py
+CLEANED : .\db_events.py
+CLEANED : .\db_keywords.py
+CLEANED : .\diagnostic.sh
+CLEANED : .\handlers_admin.py
+CLEANED : .\handlers_help.py
+CLEANED : .\handlers_jobs.py
+CLEANED : .\handlers_settings.py
+CLEANED : .\handlers_start.py
+CLEANED : .\handlers_ui.py
+CLEANED : .\platform_careerjet.py
+CLEANED : .\platform_freelancer.py
+CLEANED : .\platform_kariera.py
+CLEANED : .\platform_peopleperhour.py
+CLEANED : .\platform_placeholders.py
+CLEANED : .\platform_skywalker.py
+CLEANED : .\requirements.txt
+CLEANED : .\runtime.txt
+CLEANED : .\safe_restart.sh
+CLEANED : .\server.py
+CLEANED : .\start.sh
+OK      : .\utf8_cleaner.py
+OK      : .\utf8_report.txt
+CLEANED : .\utils.py
+CLEANED : .\utils_fx.py
+CLEANED : .\workers\worker_freelancer.py
+CLEANED : .\workers\worker_pph.py
+CLEANED : .\workers\worker_runner.py
+CLEANED : .\workers\worker_skywalker.py
+
+Done.
