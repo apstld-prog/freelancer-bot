@@ -73,3 +73,4 @@ async def shutdown_event():
     await application.stop()
     await application.shutdown()
 
+

@@ -42,7 +42,7 @@ async def send_job_card(update: Update, context: ContextTypes.DEFAULT_TYPE, job)
 
     # Budget
     if job.budget_amount:
-        budget_str = f"{job.budget_amount}â€“{job.budget_amount} {job.budget_currency} ({job.budget_usd}$)"
+        budget_str = f"{job.budget_amount}Ã¢â‚¬â€œ{job.budget_amount} {job.budget_currency} ({job.budget_usd}$)"
     else:
         budget_str = "N/A"
 
@@ -51,11 +51,11 @@ async def send_job_card(update: Update, context: ContextTypes.DEFAULT_TYPE, job)
     # CARD TEXT
     text = (
         f"*{title}*\n"
-        f"ðŸ’° *Budget:* {budget_str}\n"
-        f"ðŸŒ *Source:* {platform}\n"
-        f"ðŸ” *Match:* {match_kw}\n"
-        f"ðŸ“ {desc}\n"
-        f"â±ï¸ {posted}\n"
+        f"Ã°Å¸â€™Â° *Budget:* {budget_str}\n"
+        f"Ã°Å¸Å’Â *Source:* {platform}\n"
+        f"Ã°Å¸â€Â *Match:* {match_kw}\n"
+        f"Ã°Å¸â€œÂ {desc}\n"
+        f"Ã¢ÂÂ±Ã¯Â¸Â {posted}\n"
         "________________________________________"
     )
 
@@ -68,8 +68,8 @@ async def send_job_card(update: Update, context: ContextTypes.DEFAULT_TYPE, job)
             InlineKeyboardButton("Original", url=original_url)
         ],
         [
-            InlineKeyboardButton("â­ Save", callback_data=f"act:save:{job.id}"),
-            InlineKeyboardButton("ðŸ—‘ï¸ Delete", callback_data=f"act:del:{job.id}")
+            InlineKeyboardButton("Ã¢Â­Â Save", callback_data=f"act:save:{job.id}"),
+            InlineKeyboardButton("Ã°Å¸â€”â€˜Ã¯Â¸Â Delete", callback_data=f"act:del:{job.id}")
         ]
     ]
 
@@ -94,11 +94,12 @@ async def handle_job_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "save":
             save_job(uid, job_id)
             await query.edit_message_reply_markup(reply_markup=None)
-            await query.edit_message_text("âœ… Job saved.")
+            await query.edit_message_text("Ã¢Å“â€¦ Job saved.")
         elif action == "del":
             delete_saved_job(uid, job_id)
             await query.edit_message_reply_markup(reply_markup=None)
-            await query.edit_message_text("ðŸ—‘ï¸ Job deleted.")
+            await query.edit_message_text("Ã°Å¸â€”â€˜Ã¯Â¸Â Job deleted.")
     except Exception as e:
         log.error(f"Job action failed: {e}")
+
 

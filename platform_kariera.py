@@ -5,7 +5,7 @@ from utils import wrap_affiliate_link
 
 log = logging.getLogger("platform.kariera")
 
-URL = "https://www.kariera.gr/Î¸Î­ÏƒÎµÎ¹Ï‚-ÎµÏÎ³Î±ÏƒÎ¯Î±Ï‚?keyword="
+URL = "https://www.kariera.gr/ÃŽÂ¸ÃŽÂ­ÃÆ’ÃŽÂµÃŽÂ¹Ãâ€š-ÃŽÂµÃÂÃŽÂ³ÃŽÂ±ÃÆ’ÃŽÂ¯ÃŽÂ±Ãâ€š?keyword="
 
 
 def search_kariera(keyword: str):
@@ -51,4 +51,5 @@ def search_kariera(keyword: str):
             continue
 
     return jobs
+
 

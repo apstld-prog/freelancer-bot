@@ -4,7 +4,7 @@ title GIT SUPER PUSH TOOL
 
 :: =====================================================
 :: FORCE SCRIPT TO RUN IN ITS OWN DIRECTORY
-:: This fixes the â€œfatal: not a git repositoryâ€ issue
+:: This fixes the Ã¢â‚¬Å“fatal: not a git repositoryÃ¢â‚¬Â issue
 :: =====================================================
 cd /d "%~dp0"
 
@@ -81,4 +81,5 @@ echo Force pushing...
 git push --force
 pause
 goto menu
+
 

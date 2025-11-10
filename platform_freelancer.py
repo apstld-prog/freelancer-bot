@@ -63,3 +63,4 @@ def search_freelancer(keyword: str):
 
     return jobs
 
+

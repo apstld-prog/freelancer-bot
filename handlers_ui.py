@@ -17,13 +17,13 @@ async def handle_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if data == "ui:back_home":
         await query.message.reply_text(
-            "ðŸ  Main Menu\nChoose an option:",
+            "Ã°Å¸ÂÂ  Main Menu\nChoose an option:",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("ðŸŸ© Keywords", callback_data="ui:keywords"),
-                    InlineKeyboardButton("âš™ï¸ Settings", callback_data="ui:settings"),
+                    InlineKeyboardButton("Ã°Å¸Å¸Â© Keywords", callback_data="ui:keywords"),
+                    InlineKeyboardButton("Ã¢Å¡â„¢Ã¯Â¸Â Settings", callback_data="ui:settings"),
                 ],
-                [InlineKeyboardButton("â“ Help", callback_data="ui:help")],
+                [InlineKeyboardButton("Ã¢Ââ€œ Help", callback_data="ui:help")],
             ]),
             parse_mode="Markdown"
         )
@@ -53,4 +53,5 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(
         "Use /start to return to the main menu.",
     )
+
 

@@ -15,22 +15,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_or_create_user_by_tid(uid)
 
     text = (
-        "ðŸ‘‹ *Welcome to Freelancer Alert Bot!*\n\n"
-        f"ðŸŽ You have a *{TRIAL_DAYS}-day free trial*.\n"
+        "Ã°Å¸â€˜â€¹ *Welcome to Freelancer Alert Bot!*\n\n"
+        f"Ã°Å¸Å½Â You have a *{TRIAL_DAYS}-day free trial*.\n"
         "Automatically finds matching freelance jobs and sends instant alerts.\n\n"
         "Use /help to learn how it works.\n"
         "________________________________________\n"
-        "ðŸŸ© *Keywords*   âš™ï¸ *Settings*\n"
+        "Ã°Å¸Å¸Â© *Keywords*   Ã¢Å¡â„¢Ã¯Â¸Â *Settings*\n"
     )
 
     kb = [
         [
-            InlineKeyboardButton("ðŸŸ© Keywords", callback_data="ui:keywords"),
-            InlineKeyboardButton("âš™ï¸ Settings", callback_data="ui:settings"),
+            InlineKeyboardButton("Ã°Å¸Å¸Â© Keywords", callback_data="ui:keywords"),
+            InlineKeyboardButton("Ã¢Å¡â„¢Ã¯Â¸Â Settings", callback_data="ui:settings"),
         ]
     ]
 
     await update.message.reply_text(
         text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb)
     )
+
 

@@ -19,7 +19,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["*Platform Stats (last 24h)*", "________________________________________"]
     for p, count in stats.items():
-        lines.append(f"â€¢ {p}: {count}")
+        lines.append(f"Ã¢â‚¬Â¢ {p}: {count}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
 

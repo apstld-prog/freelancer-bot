@@ -57,7 +57,7 @@ def fetch_pph(keyword: str):
 
             if budget_text:
                 # Examples that originally may appear corrupted:
-                # "Â£50", "â‚¬120", "$300"
+                # "Ã‚Â£50", "Ã¢â€šÂ¬120", "$300"
                 txt = budget_text.strip()
 
                 try:
@@ -131,4 +131,5 @@ def main_loop():
 
 if __name__ == "__main__":
     main_loop()
+
 

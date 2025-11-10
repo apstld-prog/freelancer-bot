@@ -43,3 +43,4 @@ def search_careerjet(keyword: str):
 
     return jobs
 
+

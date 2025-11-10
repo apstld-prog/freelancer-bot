@@ -25,9 +25,9 @@ async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     kb = [
-        [InlineKeyboardButton("âž• Add Keyword", callback_data="ui:add_kw")],
-        [InlineKeyboardButton("âž– Delete Keyword", callback_data="ui:del_kw")],
-        [InlineKeyboardButton("â¬… Back", callback_data="ui:back_home")],
+        [InlineKeyboardButton("Ã¢Å¾â€¢ Add Keyword", callback_data="ui:add_kw")],
+        [InlineKeyboardButton("Ã¢Å¾â€“ Delete Keyword", callback_data="ui:del_kw")],
+        [InlineKeyboardButton("Ã¢Â¬â€¦ Back", callback_data="ui:back_home")],
     ]
 
     await update.message.reply_text(
@@ -58,14 +58,15 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Add keyword
     if context.user_data.get("awaiting_kw_add"):
         add_keywords(uid, [text])
-        await update.message.reply_text(f"âœ… Added keyword: *{text}*", parse_mode="Markdown")
+        await update.message.reply_text(f"Ã¢Å“â€¦ Added keyword: *{text}*", parse_mode="Markdown")
         context.user_data["awaiting_kw_add"] = False
         return
 
     # Delete keyword
     if context.user_data.get("awaiting_kw_delete"):
         delete_keyword(uid, text)
-        await update.message.reply_text(f"ðŸ—‘ï¸ Deleted keyword: *{text}*", parse_mode="Markdown")
+        await update.message.reply_text(f"Ã°Å¸â€”â€˜Ã¯Â¸Â Deleted keyword: *{text}*", parse_mode="Markdown")
         context.user_data["awaiting_kw_delete"] = False
         return
+
 

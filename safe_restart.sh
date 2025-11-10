@@ -2,7 +2,7 @@
 set -e
 
 echo "=========================================================="
-echo " SAFE RESTART â€” FREELANCER BOT WORKERS"
+echo " SAFE RESTART Ã¢â‚¬â€ FREELANCER BOT WORKERS"
 echo "=========================================================="
 date
 
@@ -26,6 +26,7 @@ ps aux | grep worker_ | grep -v grep
 
 echo
 echo "=========================================================="
-echo " SAFE RESTART COMPLETE â€” all workers running"
+echo " SAFE RESTART COMPLETE Ã¢â‚¬â€ all workers running"
 echo "=========================================================="
+
 
