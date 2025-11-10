@@ -1,54 +1,13 @@
-﻿# top-most EditorConfig file
 root = true
 
-# Default settings for all files
 [*]
 charset = utf-8
 end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
 
-# Shell scripts
-[*.sh]
-indent_style = space
-indent_size = 2
-charset = utf-8
-end_of_line = lf
+[*.{bat,cmd}]
+end_of_line = crlf
 
-# Python files
-[*.py]
-indent_style = space
-indent_size = 4
-charset = utf-8
-end_of_line = lf
-
-# Text files
-[*.txt]
-charset = utf-8
-end_of_line = lf
-
-# JSON
-[*.json]
-charset = utf-8
-end_of_line = lf
-
-# YAML
-[*.yml]
-charset = utf-8
-end_of_line = lf
-
-[*.yaml]
-charset = utf-8
-end_of_line = lf
-
-# INI
-[*.ini]
-charset = utf-8
-end_of_line = lf
-
-# TOML
-[*.toml]
-charset = utf-8
-end_of_line = lf
-
-
+[Makefile]
+indent_style = tab
