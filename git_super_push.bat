@@ -13,7 +13,7 @@ echo  Select mode:
 echo.
 echo    1) Normal Push
 echo    2) Force Refresh Push
-echo    3) Full Rewrite Push (No BOM)
+echo    3) Full Rewrite Push (UTF8 No BOM)
 echo    4) Exit
 echo.
 set /p choice=Enter choice (1-4): 
