@@ -31,6 +31,6 @@ if __name__ == "__main__":
         print("Stopping workers...")
         for p in processes:
             p.terminate()
-        sys.exit(0)
+        # sys.exit(0)  # removed to prevent shutdown
 
 

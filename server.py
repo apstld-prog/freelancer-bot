@@ -70,7 +70,7 @@ async def shutdown_event():
     log.info("Shutting down Telegram application...")
     BOT_READY = False
 
-    await application.stop()
-    await application.shutdown()
+    # await application.stop()  # removed to prevent shutdown
+    # await application.shutdown()  # removed to prevent shutdown
 
 
