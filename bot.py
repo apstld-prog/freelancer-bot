@@ -151,8 +151,16 @@ async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as s:
         u = get_or_create_user_by_tid(s, update.effective_user.id)
-        s.execute(text('UPDATE "user" SET trial_start=COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'), {"id": u.id})
-        s.execute(text(f'UPDATE "user" SET trial_end=COALESCE(trial_end, (NOW() AT TIME ZONE \'UTC\') + INTERVAL ':days days') WHERE id=:id').bindparams(days=TRIAL_DAYS), {"id": u.id})
+
+        s.execute(
+            text('UPDATE "user" SET trial_start = COALESCE(trial_start, NOW() AT TIME ZONE \'UTC\') WHERE id=:id'),
+            {"id": u.id}
+        )
+
+        s.execute(
+            text('UPDATE "user" SET trial_end = COALESCE(trial_end, (NOW() AT TIME ZONE \'UTC\') + (:days * INTERVAL \'1 day\')) WHERE id=:id'),
+        ).bindparams(days=TRIAL_DAYS)
+
         s.commit()
 
     await update.effective_chat.send_message(
@@ -161,7 +169,3 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_menu_kb(is_admin=is_admin_user(update.effective_user.id)),
         disable_web_page_preview=True,
     )
-
-# (For brevity below we keep the rest of handlers identical to user's previous working file.)
-
-# --- The rest of your bot.py remains unchanged in this patch ---
