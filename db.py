@@ -1,60 +1,55 @@
+# db.py - stable version
 import os
+from contextlib import contextmanager
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
+from sqlalchemy.orm import sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is missing")
+if DATABASE_URL and DATABASE_URL.startswith("postgresql+psycopg2"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg2", "postgresql")
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10
-)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine)
 
-SessionLocal = scoped_session(
-    sessionmaker(
-        autocommit=False,
-        autoflush=False,
-        bind=engine
-    )
-)
-
-Base = declarative_base()
-
-
+@contextmanager
 def get_session():
-    return SessionLocal()
-
-
-def close_session(db):
+    s = SessionLocal()
     try:
-        db.close()
-    except:
-        pass
-
-
-def get_or_create_user_by_tid(tid: int):
-    db = get_session()
-    try:
-        res = db.execute(
-            text("SELECT id FROM app_user WHERE telegram_id=:t"),
-            {"t": tid}
-        ).fetchone()
-
-        if res:
-            return res[0]
-
-        new = db.execute(
-            text("INSERT INTO app_user (telegram_id) VALUES (:t) RETURNING id"),
-            {"t": tid}
-        ).fetchone()[0]
-
-        db.commit()
-        return new
-
+        yield s
+        s.commit()
+    except Exception:
+        s.rollback()
+        raise
     finally:
-        close_session(db)
+        s.close()
 
+def ensure_schema():
+    with engine.connect() as conn:
+        conn.execute(text('CREATE TABLE IF NOT EXISTS "user" (LIKE "user" INCLUDING ALL)'))
+        conn.execute(text('CREATE TABLE IF NOT EXISTS keyword (LIKE keyword INCLUDING ALL)'))
+        conn.execute(text('CREATE TABLE IF NOT EXISTS feed_event (LIKE feed_event INCLUDING ALL)'))
 
+def get_or_create_user_by_tid(s, telegram_id: int):
+    r = s.execute(text('SELECT * FROM "user" WHERE telegram_id=:tid'), {"tid": telegram_id}).fetchone()
+    if r:
+        return r
+    s.execute(text('INSERT INTO "user" (telegram_id) VALUES (:tid)'), {"tid": telegram_id})
+    return s.execute(text('SELECT * FROM "user" WHERE telegram_id=:tid'), {"tid": telegram_id}).fetchone()
+
+def update_user_fields(s, user_id: int, **fields):
+    sets = ", ".join(f"{k}=:{k}" for k in fields)
+    params = fields.copy()
+    params["id"] = user_id
+    s.execute(text(f'UPDATE "user" SET {sets} WHERE id=:id'), params)
+
+def list_keywords(s, user_id: int):
+    return s.execute(text("SELECT keyword FROM keyword WHERE user_id=:id"), {"id": user_id}).fetchall()
+
+def add_keyword(s, user_id: int, keyword: str):
+    s.execute(text("INSERT INTO keyword (user_id, keyword) VALUES (:id, :kw)"), {"id": user_id, "kw": keyword})
+
+def delete_keyword(s, user_id: int, keyword: str):
+    s.execute(text("DELETE FROM keyword WHERE user_id=:id AND keyword=:kw"), {"id": user_id, "kw": keyword})
+
+def record_event(s, platform: str, sent: int):
+    s.execute(text("INSERT INTO feed_event (platform, sent) VALUES (:p, :s)"), {"p": platform, "s": sent})
