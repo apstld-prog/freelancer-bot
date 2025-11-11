@@ -1,4 +1,4 @@
-# db.py - stable version
+# db.py - final v2 with close_session
 import os
 from contextlib import contextmanager
 from sqlalchemy import create_engine, text
@@ -22,6 +22,12 @@ def get_session():
         raise
     finally:
         s.close()
+
+def close_session(s):
+    try:
+        s.close()
+    except:
+        pass
 
 def ensure_schema():
     with engine.connect() as conn:
