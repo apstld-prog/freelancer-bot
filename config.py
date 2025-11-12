@@ -54,3 +54,4 @@ STATS_WINDOW_HOURS = int(os.getenv("STATS_WINDOW_HOURS", "24"))
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "120"))
 
 
+WEBHOOK_BASE = os.getenv('RENDER_EXTERNAL_URL', '') or os.getenv('WEBHOOK_BASE','')
