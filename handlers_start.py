@@ -1,5 +1,5 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import ContextTypes
 
 from db import get_or_create_user_by_tid
@@ -15,23 +15,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_or_create_user_by_tid(uid)
 
     text = (
-        "Ã°Å¸â€˜â€¹ *Welcome to Freelancer Alert Bot!*\n\n"
-        f"Ã°Å¸Å½Â You have a *{TRIAL_DAYS}-day free trial*.\n"
-        "Automatically finds matching freelance jobs and sends instant alerts.\n\n"
-        "Use /help to learn how it works.\n"
+        "👋 *Welcome to Freelancer Alert Bot!*\n\n"
+        f"🎁 You have a *{TRIAL_DAYS}-day free trial*.\n"
+        "Automatically finds matching freelance jobs from top platforms and sends you instant alerts with affiliate-safe links.\n"
+        "Use /help to see how it works.\n"
         "________________________________________\n"
-        "Ã°Å¸Å¸Â© *Keywords*   Ã¢Å¡â„¢Ã¯Â¸Â *Settings*\n"
+        "⭐ *Features*\n"
+        "• Realtime job alerts (Freelancer API)\n"
+        "• Affiliate-wrapped Proposal & Original links\n"
+        "• Budget shown + USD conversion\n"
+        "• ⭐ Keep / 🗑️ Delete buttons\n"
+        "• 10-day free trial, extend via admin\n"
+        "• Multi-keyword search (single/all modes)\n"
+        "• Platforms by country (incl. GR boards)"
     )
 
-    kb = [
-        [
-            InlineKeyboardButton("Ã°Å¸Å¸Â© Keywords", callback_data="ui:keywords"),
-            InlineKeyboardButton("Ã¢Å¡â„¢Ã¯Â¸Â Settings", callback_data="ui:settings"),
-        ]
-    ]
-
-    await update.message.reply_text(
-        text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-
+    # Reply only with text — no inline buttons
+    await update.message.reply_text(text, parse_mode="Markdown")
