@@ -1,171 +1,121 @@
 import logging
+from datetime import datetime, timedelta
 from sqlalchemy import text
-from db import get_session, close_session
+from db import get_session
 
-log = logging.getLogger("utils")
+log = logging.getLogger(__name__)
 
-# ----------------------------------------------------------
-# CREATE OR FETCH USER
-# ----------------------------------------------------------
-def get_or_create_user_by_tid(tid: int):
-    db = get_session()
-    try:
-        row = db.execute(
-            text("SELECT id FROM app_user WHERE telegram_id=:t"),
-            {"t": tid}
-        ).fetchone()
+# ------------------------------------------------------
+# USER HELPERS
+# ------------------------------------------------------
 
-        if row:
-            return row[0]
-
-        new_id = db.execute(
-            text("""
-                INSERT INTO app_user (telegram_id)
-                VALUES (:t)
-                RETURNING id
-            """),
-            {"t": tid}
-        ).fetchone()[0]
-
-        db.commit()
-        return new_id
-    finally:
-        close_session(db)
-
-
-# Compatibility wrapper
-def get_user_id(tid: int):
-    return get_or_create_user_by_tid(tid)
-
-
-# ----------------------------------------------------------
-# LOAD USER SETTINGS
-# ----------------------------------------------------------
-def get_user(tid: int):
-    db = get_session()
-    try:
+def get_user(telegram_id: int):
+    """Return user row or None."""
+    with get_session() as db:
         row = db.execute(
             text("""
                 SELECT telegram_id, countries, proposal_template, active, blocked,
                        start_date, trial_until, license_until
                 FROM app_user
-                WHERE telegram_id=:u
+                WHERE telegram_id = :u
             """),
-            {"u": tid}
+            {"u": telegram_id}
+        ).fetchone()
+        return row
+
+
+def create_user_if_missing(telegram_id: int):
+    """
+    Creates a new user row if it does not exist.
+    Returns the user row afterwards.
+    """
+    with get_session() as db:
+        row = db.execute(
+            text("SELECT telegram_id FROM app_user WHERE telegram_id = :u"),
+            {"u": telegram_id}
         ).fetchone()
 
         if not row:
-            return None
+            log.info(f"Creating new user {telegram_id}")
 
-        return {
-            "telegram_id": row[0],
-            "countries": row[1],
-            "proposal_template": row[2],
-            "active": row[3],
-            "blocked": row[4],
-            "start_date": row[5],
-            "trial_until": row[6],
-            "license_until": row[7]
-        }
-    finally:
-        close_session(db)
+            db.execute(
+                text("""
+                    INSERT INTO app_user (
+                        telegram_id, countries, proposal_template,
+                        active, blocked, start_date,
+                        trial_until, license_until
+                    )
+                    VALUES (
+                        :u, '', '', TRUE, FALSE, NOW(),
+                        NOW() + INTERVAL '10 days', NULL
+                    )
+                """),
+                {"u": telegram_id}
+            )
+            db.commit()
 
-
-# ----------------------------------------------------------
-# UPDATE USER SETTINGS
-# ----------------------------------------------------------
-def set_user_setting(tid: int, field: str, value):
-    db = get_session()
-    try:
-        db.execute(
-            text(f"UPDATE app_user SET {field}=:v WHERE telegram_id=:u"),
-            {"v": value, "u": tid}
-        )
-        db.commit()
-    finally:
-        close_session(db)
-
-
-# ----------------------------------------------------------
-# SAVE / DELETE JOB
-# ----------------------------------------------------------
-def save_job(tid: int, job_id: str):
-    db = get_session()
-    try:
-        db.execute(
+        # Return full user row
+        row = db.execute(
             text("""
-                INSERT INTO saved_job (user_id, job_id)
-                VALUES (:u, :j)
-                ON CONFLICT DO NOTHING;
+                SELECT telegram_id, countries, proposal_template, active, blocked,
+                       start_date, trial_until, license_until
+                FROM app_user
+                WHERE telegram_id = :u
             """),
-            {"u": tid, "j": job_id}
-        )
+            {"u": telegram_id}
+        ).fetchone()
+
+        return row
+
+
+def update_user_settings(telegram_id: int, **kwargs):
+    """
+    Generic update function: update only the columns provided.
+    """
+    if not kwargs:
+        return
+
+    set_parts = []
+    params = {"u": telegram_id}
+
+    for key, value in kwargs.items():
+        set_parts.append(f"{key} = :{key}")
+        params[key] = value
+
+    sql = f"UPDATE app_user SET {', '.join(set_parts)} WHERE telegram_id = :u"
+
+    with get_session() as db:
+        db.execute(text(sql), params)
         db.commit()
-    finally:
-        close_session(db)
 
 
-def delete_saved_job(tid: int, job_id: str):
-    db = get_session()
-    try:
-        db.execute(
-            text("DELETE FROM saved_job WHERE user_id=:u AND job_id=:j"),
-            {"u": tid, "j": job_id}
-        )
-        db.commit()
-    finally:
-        close_session(db)
+def set_keywords(telegram_id: int, keywords: str):
+    """Store comma-separated keyword string."""
+    from db_keywords import save_keywords
+    save_keywords(telegram_id, keywords)
 
 
-# ----------------------------------------------------------
-# AFFILIATE WRAPPER
-# ----------------------------------------------------------
-def wrap_affiliate_link(url: str) -> str:
-    if not url:
-        return url
-    return f"https://track.freelancer.com/c/YOUR_F_AFF_ID/?url={url}"
+def get_keywords(telegram_id: int):
+    """Return list of saved keywords."""
+    from db_keywords import fetch_keywords
+    return fetch_keywords(telegram_id)
 
 
-# ----------------------------------------------------------
-# SEND JOB TO USER  (Used by PPH & SKYWORKER workers)
-# ----------------------------------------------------------
-import os
-import requests
+def is_admin_user(telegram_id: int):
+    """Check if user is admin via config."""
+    from config import ADMIN_IDS
+    return telegram_id in ADMIN_IDS
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-def send_job_to_user(telegram_id: int, event: dict):
-    """Send a simple job message to the user from PPH/Skywalker workers."""
+# ------------------------------------------------------
+# BASIC CLEAN FUNCTIONS
+# ------------------------------------------------------
 
-    title = event.get("title", "Untitled")
-    desc = event.get("description", "")
-    orig = wrap_affiliate_link(event.get("original_url"))
-    aff  = wrap_affiliate_link(event.get("affiliate_url"))
+def clean_text(s: str) -> str:
+    if not s:
+        return ""
+    return s.replace("\x00", "").strip()
 
-    budget = ""
-    if event.get("budget_amount"):
-        budget = f"{event['budget_amount']} {event.get('budget_currency','')}"
 
-    msg = (
-        f"*{title}*\n"
-        f"{desc}\n"
-        f"Budget: {budget}\n"
-        f"Source: {event.get('platform','').upper()}\n"
-    )
-
-    kb = {
-        "inline_keyboard": [
-            [{"text": "Open", "url": aff or orig}]
-        ]
-    }
-
-    try:
-        requests.post(CHAT_API, json={
-            "chat_id": telegram_id,
-            "text": msg,
-            "parse_mode": "Markdown",
-            "reply_markup": kb
-        })
-    except Exception as e:
-        log.error(f"Failed to send job to user {telegram_id}: {e}")
+def days_from_today(days: int):
+    return datetime.utcnow() + timedelta(days=days)
