@@ -1,79 +1,101 @@
 import os
 import logging
-import asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse
-from bot import build_application
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777")
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+from telegram.ext import ApplicationBuilder
+from telegram import Update
 
-app = FastAPI()
-application = None
+from config import TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET, RENDER_EXTERNAL_HOSTNAME
+from handlers_start import register_start_handlers
+from handlers_settings import register_settings_handlers
+from handlers_jobs import register_jobs_handlers
+from handlers_help import register_help_handlers
+from handlers_admin import register_admin_handlers
+from handlers_ui import register_ui_handlers
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("server")
 
+app = FastAPI()
 
+PORT = int(os.getenv("PORT", 10000))
+WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/{WEBHOOK_SECRET}"
+
+# Create Application
+application = (
+    ApplicationBuilder()
+    .token(TELEGRAM_BOT_TOKEN)
+    .concurrent_updates(True)
+    .build()
+)
+
+# Register handlers exactly as before
+register_start_handlers(application)
+register_settings_handlers(application)
+register_jobs_handlers(application)
+register_help_handlers(application)
+register_admin_handlers(application)
+register_ui_handlers(application)
+
+
+# --------------------------------------------------------
+# 🚀 Webhook Startup – This is correct for PTB 20+
+# --------------------------------------------------------
 @app.on_event("startup")
-async def on_startup():
-    global application
-    application = build_application()
+async def startup():
+    logger.info("🚀 FastAPI startup…")
 
-    # -----------------------------
-    # START THE BOT (CRITICAL)
-    # -----------------------------
-    try:
-        # prepare handlers, dispatcher etc.
-        await application.initialize()
+    # Remove old webhook
+    await application.bot.delete_webhook(drop_pending_updates=True)
 
-        # run application in background (Webhook mode)
-        asyncio.create_task(application.start())
-
-        logger.info("🤖 Telegram bot STARTED successfully in webhook mode.")
-    except Exception as e:
-        logger.error(f"❌ Bot failed to start: {e}")
-
-    # -----------------------------
-    # SET WEBHOOK (CRITICAL)
-    # -----------------------------
-    hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-    if not hostname:
-        raise RuntimeError("RENDER_EXTERNAL_HOSTNAME is missing. Webhook cannot be set.")
-
-    webhook_url = f"https://{hostname}/{WEBHOOK_SECRET}"
-
-    try:
-        await application.bot.delete_webhook()
-        ok = await application.bot.set_webhook(webhook_url)
-
-        logger.info("==================================================")
-        logger.info(f"🌍 Webhook URL set → {webhook_url}")
-        logger.info(f"Webhook result: {ok}")
-        logger.info("==================================================")
-    except Exception as e:
-        logger.error(f"❌ Failed to set webhook: {e}")
-
-    logger.info("✅ FastAPI app started")
-    logger.info(
-        f"🔎 ENV check — PORT={os.getenv('PORT', '10000')} "
-        f"WORKER_INTERVAL={os.getenv('WORKER_INTERVAL')} "
-        f"KEYWORD_FILTER_MODE={os.getenv('KEYWORD_FILTER_MODE')}"
+    # Set new webhook
+    result = await application.bot.set_webhook(
+        url=WEBHOOK_URL,
+        allowed_updates=["message", "callback_query"]
     )
 
+    logger.info("==================================================")
+    logger.info(f"🌍 Webhook URL set → {WEBHOOK_URL}")
+    logger.info(f"Webhook result: {result}")
+    logger.info("==================================================")
 
+    # Start application (dispatcher)
+    await application.initialize()
+    await application.start()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    logger.info("🔻 Shutting down bot…")
+    await application.stop()
+    await application.shutdown()
+
+
+# --------------------------------------------------------
+# 🌍 Root page (health check)
+# --------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return "<h3>✅ Freelancer Alert Bot is running properly.</h3>"
 
 
+# --------------------------------------------------------
+# 🔥 FIXED WEBHOOK ENDPOINT (WORKS 100% with PTB 20+)
+# --------------------------------------------------------
 @app.post(f"/{WEBHOOK_SECRET}")
 async def telegram_webhook(request: Request):
     try:
-        update = await request.json()
-        if application:
-            await application.update_queue.put(update)
+        data = await request.json()
+
+        # Convert JSON → Update object (official PTB setter)
+        update: Update = Update.de_json(data, application.bot)
+
+        # Process update through dispatcher
+        await application.process_update(update)
+
         return JSONResponse(content={"ok": True})
+
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return JSONResponse(content={"ok": False, "error": str(e)}, status_code=500)
