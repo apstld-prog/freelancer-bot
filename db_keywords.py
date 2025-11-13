@@ -58,3 +58,10 @@ def delete_keyword(user_id: int, keyword: str):
         close_session(db)
 
 
+
+
+def get_keywords_for_user(telegram_id: int):
+    """Compatibility alias for workers.
+    In your schema, user_id == telegram_id, so we reuse get_keywords().
+    """
+    return get_keywords(telegram_id)
