@@ -1,15 +1,18 @@
 from telegram import Update
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, CommandHandler
+
 
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "*Help Menu*\n"
         "________________________________________\n"
-        "Ã¢â‚¬Â¢ Add keywords to receive matching jobs.\n"
-        "Ã¢â‚¬Â¢ Jobs are scanned every few minutes.\n"
-        "Ã¢â‚¬Â¢ Use Settings to manage your alerts.\n"
-        "Ã¢â‚¬Â¢ Use /start to return to the main menu.\n"
+        "• Add keywords to receive matching jobs.\n"
+        "• Jobs are scanned every few minutes.\n"
+        "• Use Settings to manage your alerts.\n"
+        "• Use /start to return to the main menu.\n"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
+def register_help_handlers(app):
+    app.add_handler(CommandHandler("help", help_menu))
