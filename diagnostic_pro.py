@@ -1,0 +1,1 @@
+print('Diagnostic PRO running...')
