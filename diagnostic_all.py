@@ -1,14 +1,12 @@
-# ULTIMATE DIAGNOSTIC SCRIPT (Full Mode – Option B)
-# Compatible with Render + Windows
-import os, platform, subprocess, json, datetime, sys
+# ULTIMATE DIAGNOSTIC (Auto-generated)
+import os, platform, subprocess, json, re, importlib
 
 print("=== ULTIMATE DIAGNOSTIC REPORT ===")
 
 data = {}
-data["timestamp"] = datetime.datetime.utcnow().isoformat()
 data["cwd"] = os.getcwd()
 data["os"] = platform.system()
-data["python"] = sys.version
+data["python"] = platform.python_version()
 
 def run(cmd):
     try:
@@ -16,85 +14,71 @@ def run(cmd):
     except Exception as e:
         return str(e)
 
-# ----------------------------------
-# FILESYSTEM CHECKS
-# ----------------------------------
-required = [
-    "app.py","bot.py","server.py","config.py","db.py",
-    "db_events.py","db_keywords.py","start.sh","safe_restart.sh",
-    "utils.py","handlers_start.py","handlers_ui.py"
-]
-data["missing_files"] = [f for f in required if not os.path.exists(f)]
-data["render_ls"] = run("ls -la")
+# Load env
+env_keys = ["TELEGRAM_BOT_TOKEN","WEBHOOK_SECRET","RENDER_EXTERNAL_HOSTNAME","DATABASE_URL","PORT"]
+env = {k: os.environ.get(k,"") for k in env_keys}
+data["env"] = env
 
-# ----------------------------------
-# ENVIRONMENT CHECKS
-# ----------------------------------
-env_names = [
-    "TELEGRAM_BOT_TOKEN","WEBHOOK_SECRET","RENDER_EXTERNAL_HOSTNAME",
-    "DATABASE_URL","WORKER_INTERVAL","KEYWORD_FILTER_MODE","PORT"
-]
-data["env"] = {e: os.getenv(e) for e in env_names}
-
-# ----------------------------------
-# PROCESS CHECKS
-# ----------------------------------
-data["processes"] = run("ps aux")
-data["workers"] = run("ps aux | grep worker_")
-data["uvicorn"] = run("ps aux | grep uvicorn")
-data["bot_process"] = run("ps aux | grep bot.py")
-
-# ----------------------------------
-# TELEGRAM WEBHOOK STATUS
-# ----------------------------------
-token = os.getenv("TELEGRAM_BOT_TOKEN")
-if token:
-    data["webhook_info"] = run(f"curl -s https://api.telegram.org/bot{token}/getWebhookInfo")
-else:
-    data["webhook_info"] = "NO TELEGRAM TOKEN FOUND"
-
-# ----------------------------------
-# SERVER ENDPOINT CHECK
-# ----------------------------------
-data["server_root_test"] = run("curl -s http://127.0.0.1:10000/")
-secret = os.getenv("WEBHOOK_SECRET")
-if secret:
-    data["server_webhook_test"] = run(
-        f"curl -s -X POST http://127.0.0.1:10000/{secret} "
-        "-d '{{}}' -H 'Content-Type: application/json'"
-    )
-else:
-    data["server_webhook_test"] = "NO WEBHOOK_SECRET SET"
-
-# ----------------------------------
-# DB TABLES + SCHEMA CHECK
-# ----------------------------------
-dburl = os.getenv("DATABASE_URL")
-if dburl:
-    data["db_tables"] = run("psql \"$DATABASE_URL\" -c \"\\\\dt\"")
-    data["db_user_preview"] = run("psql \"$DATABASE_URL\" -c \"SELECT * FROM app_user LIMIT 5;\"")
-    data["db_keyword_preview"] = run("psql \"$DATABASE_URL\" -c \"SELECT * FROM keyword LIMIT 5;\"")
-    data["db_event_preview"] = run("psql \"$DATABASE_URL\" -c \"SELECT * FROM feed_event ORDER BY id DESC LIMIT 5;\"")
-else:
-    data["db_tables"] = "NO DATABASE_URL FOUND"
-
-# ----------------------------------
-# LOGS CHECK (LAST 20 LINES FOR EACH)
-# ----------------------------------
-def tail(path):
-    if not os.path.exists(path):
-        return "NOT FOUND"
-    return run(f"tail -n 20 {path}")
-
-data["logs"] = {
-    "server": tail("logs/server.log"),
-    "freelancer": tail("logs/worker_freelancer.log"),
-    "pph": tail("logs/worker_pph.log"),
-    "skywalker": tail("logs/worker_skywalker.log"),
+# Check handlers functions
+handler_requirements = {
+    "handlers_start":"register_start_handlers",
+    "handlers_settings":"register_settings_handlers",
+    "handlers_help":"register_help_handlers",
+    "handlers_jobs":"register_jobs_handlers",
+    "handlers_admin":"register_admin_handlers",
+    "handlers_ui":"register_ui_handlers"
 }
 
-# ----------------------------------
-# OUTPUT
-# ----------------------------------
-print(json.dumps(data, indent=2))
-print("=== END OF ULTIMATE DIAGNOSTIC ===")
+handler_status = {}
+for module, func in handler_requirements.items():
+    try:
+        m = importlib.import_module(module)
+        handler_status[module] = hasattr(m, func)
+    except Exception as e:
+        handler_status[module] = str(e)
+data["handler_functions"] = handler_status
+
+# Token format check
+token = env.get("TELEGRAM_BOT_TOKEN","")
+data["token_valid_format"] = bool(re.match(r"^\d+:[A-Za-z0-9_-]+$", token))
+
+# Secret check
+data["secret_not_empty"] = env.get("WEBHOOK_SECRET","") != ""
+
+# Public URL check
+pub = env.get("RENDER_EXTERNAL_HOSTNAME","")
+data["public_url_ok"] = bool(pub.strip())
+
+# Server listening
+port = env.get("PORT","10000")
+data["server_port_check"] = run(f"lsof -i:{port}")[:200]
+
+# Test imports
+imports = ["server","bot","handlers_start","handlers_settings","handlers_help"]
+import_status = {}
+for i in imports:
+    try:
+        importlib.import_module(i)
+        import_status[i] = True
+    except Exception as e:
+        import_status[i] = str(e)
+data["import_status"] = import_status
+
+# Worker processes
+data["workers"] = run("ps aux | grep worker_")
+
+# Uvicorn process
+data["uvicorn"] = run("ps aux | grep uvicorn")
+
+# Webhook info
+if token:
+    data["webhook_info"] = run(f"curl -s https://api.telegram.org/bot{token}/getWebhookInfo")
+
+# DB tables
+db_url = env.get("DATABASE_URL","")
+if db_url:
+    data["db_tables"] = run(f'psql "{db_url}" -c "\dt"')
+
+# Output
+print(json.dumps(data, indent=2, ensure_ascii=False))
+print("=== END ===")
