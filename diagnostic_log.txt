@@ -1,36 +1,8 @@
 === ULTIMATE DIAGNOSTIC REPORT ===
-{
-  "timestamp": "2025-11-13T18:46:35.990178",
-  "cwd": "C:\\Users\\chris\\Desktop\\\u0391\u03a0\u039f\u0394\u0395\u0399\u039e\u0397 \u039a\u0391\u0399 \u0392\u0395\u0392\u0391\u0399\u03a9\u03a3\u0397 \u0399\u0391\u039d\u039f\u03a5\u0391\u03a1\u0399\u039f\u03a5-\u03a6\u0395\u0392\u03a1\u039f\u03a5\u0391\u03a1\u0399\u039f\u03a5\\freelancer-bot",
-  "os": "Windows",
-  "python": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
-  "missing_files": [],
-  "render_ls": "Command 'ls -la' returned non-zero exit status 1.",
-  "env": {
-    "TELEGRAM_BOT_TOKEN": null,
-    "WEBHOOK_SECRET": null,
-    "RENDER_EXTERNAL_HOSTNAME": null,
-    "DATABASE_URL": "postgresql://freelancer_bot_db_user:nLgzwrBwiTdCeb77cuUdyCWiOI0iadrb@dpg-d39uff49c44c73frguv0-a:5432/freelancer_bot_db",
-    "WORKER_INTERVAL": null,
-    "KEYWORD_FILTER_MODE": null,
-    "PORT": null
-  },
-  "processes": "Command 'ps aux' returned non-zero exit status 1.",
-  "workers": "Command 'ps aux | grep worker_' returned non-zero exit status 255.",
-  "uvicorn": "Command 'ps aux | grep uvicorn' returned non-zero exit status 255.",
-  "bot_process": "Command 'ps aux | grep bot.py' returned non-zero exit status 255.",
-  "webhook_info": "NO TELEGRAM TOKEN FOUND",
-  "server_root_test": "Command 'curl -s http://127.0.0.1:10000/' returned non-zero exit status 7.",
-  "server_webhook_test": "NO WEBHOOK_SECRET SET",
-  "db_tables": "Command 'psql \"$DATABASE_URL\" -c \"\\\\dt\"' returned non-zero exit status 1.",
-  "db_user_preview": "Command 'psql \"$DATABASE_URL\" -c \"SELECT * FROM app_user LIMIT 5;\"' returned non-zero exit status 1.",
-  "db_keyword_preview": "Command 'psql \"$DATABASE_URL\" -c \"SELECT * FROM keyword LIMIT 5;\"' returned non-zero exit status 1.",
-  "db_event_preview": "Command 'psql \"$DATABASE_URL\" -c \"SELECT * FROM feed_event ORDER BY id DESC LIMIT 5;\"' returned non-zero exit status 1.",
-  "logs": {
-    "server": "NOT FOUND",
-    "freelancer": "NOT FOUND",
-    "pph": "NOT FOUND",
-    "skywalker": "NOT FOUND"
-  }
-}
-=== END OF ULTIMATE DIAGNOSTIC ===
+Traceback (most recent call last):
+  File "C:\Users\chris\Desktop\\u0391\u03a0\u039f\u0394\u0395\u0399\u039e\u0397 \u039a\u0391\u0399 \u0392\u0395\u0392\u0391\u0399\u03a9\u03a3\u0397 \u0399\u0391\u039d\u039f\u03a5\u0391\u03a1\u0399\u039f\u03a5-\u03a6\u0395\u0392\u03a1\u039f\u03a5\u0391\u03a1\u0399\u039f\u03a5\freelancer-bot\diagnostic_all.py", line 83, in <module>
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+  File "C:\Users\chris\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 40-47: character maps to <undefined>

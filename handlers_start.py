@@ -2,7 +2,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CommandHandler
 from datetime import datetime, timedelta
 
-from db import get_or_create_user_by_tid
+from utils import get_or_create_user_by_tid, get_user, set_user_setting
 from config import TRIAL_DAYS
 
 
@@ -10,13 +10,33 @@ from config import TRIAL_DAYS
 # /start command
 # -------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = await get_or_create_user_by_tid(update.effective_user.id)
+    """
+    Entry point for /start.
+    - Ensures the user exists in app_user table
+    - Ensures trial_until is set
+    - Shows the exact UI text/layout you requested
+    """
+    tid = update.effective_user.id
+
+    # 1) Ensure user row exists (app_user)
+    get_or_create_user_by_tid(tid)
+
+    # 2) Load user data (including trial_until)
+    user = get_user(tid)
+
     now = datetime.utcnow()
 
-    # Trial handling
-    trial_until = user.trial_until or (now + timedelta(days=TRIAL_DAYS))
-    user.trial_until = trial_until
-    remaining_days = (trial_until - now).days
+    # If no user or no trial_until, start / refresh trial
+    trial_until = None
+    if user:
+        trial_until = user.get("trial_until")
+
+    if not trial_until:
+        trial_until = now + timedelta(days=TRIAL_DAYS)
+        # store in DB
+        set_user_setting(tid, "trial_until", trial_until)
+
+    remaining_days = max((trial_until - now).days, 0)
 
     # UI TEXT — EXACTLY AS YOU WANT IT
     text = (
@@ -53,7 +73,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------
-# ABSOLUTELY REQUIRED BY SERVER.PY
+# Handler registration function (used by server.py)
 # -------------------------------------------------
 def register_start_handlers(application):
     application.add_handler(CommandHandler("start", start))
