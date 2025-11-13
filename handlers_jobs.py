@@ -1,8 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
-
+from telegram.ext import ContextTypes, CallbackQueryHandler
 from utils import save_job, delete_saved_job, wrap_affiliate_link
 from db_events import record_event
 
@@ -16,14 +15,17 @@ def format_posted_ago(ts: datetime) -> str:
 
     if seconds < 60:
         return "just now"
+
     minutes = seconds // 60
     if minutes < 60:
         return f"{int(minutes)} minutes ago"
+
     hours = minutes // 60
     if hours < 24:
         return f"{int(hours)} hours ago"
+
     days = hours // 24
-        return f"{int(days)} days ago"
+    return f"{int(days)} days ago"
 
 
 async def send_job_card(update: Update, context: ContextTypes.DEFAULT_TYPE, job):
