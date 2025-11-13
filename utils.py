@@ -126,3 +126,46 @@ def wrap_affiliate_link(url: str) -> str:
     return f"https://track.freelancer.com/c/YOUR_F_AFF_ID/?url={url}"
 
 
+# ----------------------------------------------------------
+# SEND JOB TO USER  (Used by PPH & SKYWORKER workers)
+# ----------------------------------------------------------
+import os
+import requests
+
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+def send_job_to_user(telegram_id: int, event: dict):
+    """Send a simple job message to the user from PPH/Skywalker workers."""
+
+    title = event.get("title", "Untitled")
+    desc = event.get("description", "")
+    orig = wrap_affiliate_link(event.get("original_url"))
+    aff  = wrap_affiliate_link(event.get("affiliate_url"))
+
+    budget = ""
+    if event.get("budget_amount"):
+        budget = f"{event['budget_amount']} {event.get('budget_currency','')}"
+
+    msg = (
+        f"*{title}*\n"
+        f"{desc}\n"
+        f"Budget: {budget}\n"
+        f"Source: {event.get('platform','').upper()}\n"
+    )
+
+    kb = {
+        "inline_keyboard": [
+            [{"text": "Open", "url": aff or orig}]
+        ]
+    }
+
+    try:
+        requests.post(CHAT_API, json={
+            "chat_id": telegram_id,
+            "text": msg,
+            "parse_mode": "Markdown",
+            "reply_markup": kb
+        })
+    except Exception as e:
+        log.error(f"Failed to send job to user {telegram_id}: {e}")
