@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from bot import build_application
@@ -18,6 +19,20 @@ logger = logging.getLogger("server")
 async def on_startup():
     global application
     application = build_application()
+
+    # -----------------------------
+    # START THE BOT (CRITICAL)
+    # -----------------------------
+    try:
+        # prepare handlers, dispatcher etc.
+        await application.initialize()
+
+        # run application in background (Webhook mode)
+        asyncio.create_task(application.start())
+
+        logger.info("🤖 Telegram bot STARTED successfully in webhook mode.")
+    except Exception as e:
+        logger.error(f"❌ Bot failed to start: {e}")
 
     # -----------------------------
     # SET WEBHOOK (CRITICAL)
