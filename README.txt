@@ -1,1 +1,1 @@
-Run run_diagnostic_PRO.bat
+Run run_diagnostic_PRO.bat — FULL MODE diagnostic tool.
