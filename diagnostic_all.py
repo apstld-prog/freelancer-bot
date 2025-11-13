@@ -1,28 +1,14 @@
-# diagnostic_all.py — FULL SYSTEM DIAGNOSTICS (ENHANCED)
+# ULTIMATE DIAGNOSTIC SCRIPT (Full Mode – Option B)
+# Compatible with Render + Windows
+import os, platform, subprocess, json, datetime, sys
 
-import os, platform, subprocess, json, sys, shutil
-from datetime import datetime
-
-print("=== FULL DIAGNOSTIC REPORT ===")
+print("=== ULTIMATE DIAGNOSTIC REPORT ===")
 
 data = {}
-data["timestamp"] = datetime.utcnow().isoformat()
+data["timestamp"] = datetime.datetime.utcnow().isoformat()
 data["cwd"] = os.getcwd()
 data["os"] = platform.system()
 data["python"] = sys.version
-
-required = [
-    "app.py","bot.py","server.py","config.py","db.py","db_events.py",
-    "db_keywords.py","handlers_start.py","handlers_ui.py","handlers_jobs.py",
-    "handlers_admin.py","platform_freelancer.py","platform_peopleperhour.py",
-    "platform_skywalker.py","start.sh","safe_restart.sh","requirements.txt"
-]
-data["missing_files"] = [f for f in required if not os.path.exists(f)]
-
-env_data = {}
-for f in [".env", "freelancer-bot.env"]:
-    env_data[f] = os.path.exists(f)
-data["env_files"] = env_data
 
 def run(cmd):
     try:
@@ -30,46 +16,82 @@ def run(cmd):
     except Exception as e:
         return str(e)
 
-inside_render = os.path.exists("/opt/render")
+# ----------------------------------
+# FILESYSTEM CHECKS
+# ----------------------------------
+required = [
+    "app.py","bot.py","server.py","config.py","db.py",
+    "db_events.py","db_keywords.py","start.sh","safe_restart.sh",
+    "utils.py","handlers_start.py","handlers_ui.py"
+]
+data["missing_files"] = [f for f in required if not os.path.exists(f)]
+data["render_ls"] = run("ls -la")
 
-if inside_render:
-    data["render_ls"] = run("ls -la")
-    data["render_ps"] = run("ps aux | grep python")
-    data["workers"] = run("ps aux | grep worker_")
-    data["uvicorn"] = run("ps aux | grep uvicorn")
+# ----------------------------------
+# ENVIRONMENT CHECKS
+# ----------------------------------
+env_names = [
+    "TELEGRAM_BOT_TOKEN","WEBHOOK_SECRET","RENDER_EXTERNAL_HOSTNAME",
+    "DATABASE_URL","WORKER_INTERVAL","KEYWORD_FILTER_MODE","PORT"
+]
+data["env"] = {e: os.getenv(e) for e in env_names}
 
-    port_script = "tmp_port_check.py"
-    with open(port_script, "w", encoding="utf-8") as f:
-        f.write(
-            "import psutil, json\n"
-            "out=[]\n"
-            "for p in psutil.process_iter(['pid','name']):\n"
-            "  try:\n"
-            "    for c in p.connections(kind='inet'):\n"
-            "      if c.laddr and c.laddr.port==10000:\n"
-            "        out.append({'pid':p.pid,'name':p.name()})\n"
-            "  except: pass\n"
-            "print(json.dumps(out))\n"
-        )
-    data["port_10000"] = run("python3 tmp_port_check.py")
-    os.remove(port_script)
+# ----------------------------------
+# PROCESS CHECKS
+# ----------------------------------
+data["processes"] = run("ps aux")
+data["workers"] = run("ps aux | grep worker_")
+data["uvicorn"] = run("ps aux | grep uvicorn")
+data["bot_process"] = run("ps aux | grep bot.py")
 
+# ----------------------------------
+# TELEGRAM WEBHOOK STATUS
+# ----------------------------------
+token = os.getenv("TELEGRAM_BOT_TOKEN")
+if token:
+    data["webhook_info"] = run(f"curl -s https://api.telegram.org/bot{token}/getWebhookInfo")
 else:
-    data["render"] = "Not in Render environment"
+    data["webhook_info"] = "NO TELEGRAM TOKEN FOUND"
 
-try:
-    import psycopg2
-    url = os.getenv("DATABASE_URL")
-    if url:
-        conn = psycopg2.connect(url)
-        cur = conn.cursor()
-        cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
-        data["db_tables"] = cur.fetchall()
-        conn.close()
-    else:
-        data["db_tables"] = "DATABASE_URL missing"
-except Exception as e:
-    data["db_error"] = str(e)
+# ----------------------------------
+# SERVER ENDPOINT CHECK
+# ----------------------------------
+data["server_root_test"] = run("curl -s http://127.0.0.1:10000/")
+secret = os.getenv("WEBHOOK_SECRET")
+if secret:
+    data["server_webhook_test"] = run(f"curl -s -X POST http://127.0.0.1:10000/{secret} -d '{}' -H 'Content-Type: application/json'")
+else:
+    data["server_webhook_test"] = "NO WEBHOOK_SECRET SET"
 
+# ----------------------------------
+# DB TABLES + SCHEMA CHECK
+# ----------------------------------
+dburl = os.getenv("DATABASE_URL")
+if dburl:
+    data["db_tables"] = run("psql "$DATABASE_URL" -c "\\dt"")
+    data["db_user_preview"] = run("psql "$DATABASE_URL" -c "SELECT * FROM app_user LIMIT 5;"")
+    data["db_keyword_preview"] = run("psql "$DATABASE_URL" -c "SELECT * FROM keyword LIMIT 5;"")
+    data["db_event_preview"] = run("psql "$DATABASE_URL" -c "SELECT * FROM feed_event ORDER BY id DESC LIMIT 5;"")
+else:
+    data["db_tables"] = "NO DATABASE_URL FOUND"
+
+# ----------------------------------
+# LOGS CHECK (LAST 20 LINES FOR EACH)
+# ----------------------------------
+def tail(path):
+    if not os.path.exists(path):
+        return "NOT FOUND"
+    return run(f"tail -n 20 {path}")
+
+data["logs"] = {
+    "server": tail("logs/server.log"),
+    "freelancer": tail("logs/worker_freelancer.log"),
+    "pph": tail("logs/worker_pph.log"),
+    "skywalker": tail("logs/worker_skywalker.log"),
+}
+
+# ----------------------------------
+# OUTPUT
+# ----------------------------------
 print(json.dumps(data, indent=2))
-print("=== END ===")
+print("=== END OF ULTIMATE DIAGNOSTIC ===")
