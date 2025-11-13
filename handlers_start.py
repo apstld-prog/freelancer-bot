@@ -1,6 +1,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CommandHandler
 from datetime import datetime, timedelta
+
 from db import get_or_create_user_by_tid
 from config import TRIAL_DAYS
 
@@ -11,13 +12,15 @@ from config import TRIAL_DAYS
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await get_or_create_user_by_tid(update.effective_user.id)
     now = datetime.utcnow()
+
+    # Trial handling
     trial_until = user.trial_until or (now + timedelta(days=TRIAL_DAYS))
     user.trial_until = trial_until
-
     remaining_days = (trial_until - now).days
 
+    # UI TEXT — EXACTLY AS YOU WANT IT
     text = (
-        f"👋 Welcome to *Freelancer Alert Bot!*\n\n"
+        "👋 Welcome to *Freelancer Alert Bot!*\n\n"
         f"🎁 You have a *{remaining_days}-day free trial*.\n"
         "Automatically finds matching freelance jobs from top platforms "
         "and sends you instant alerts with affiliate-safe links.\n\n"
@@ -36,11 +39,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # If start is called via button or app menu
+    # Normal message
     if update.message:
         await update.message.reply_text(
             text, parse_mode="Markdown", reply_markup=reply_markup
         )
+
+    # Button callback
     elif update.callback_query:
         await update.callback_query.message.reply_text(
             text, parse_mode="Markdown", reply_markup=reply_markup
@@ -48,7 +53,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------
-# Handler registration function (THIS WAS MISSING)
+# ABSOLUTELY REQUIRED BY SERVER.PY
 # -------------------------------------------------
 def register_start_handlers(application):
     application.add_handler(CommandHandler("start", start))
