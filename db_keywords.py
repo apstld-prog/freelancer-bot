@@ -5,12 +5,15 @@ from db import get_session, close_session
 log = logging.getLogger("db_keywords")
 
 
+# ----------------------------------------------------------
+# ENSURE SCHEMA — USES TABLE `keyword`, NOT `user_keywords`
+# ----------------------------------------------------------
 def ensure_keywords_schema():
     """Ensures keyword table exists."""
     db = get_session()
     try:
         db.execute(text("""
-            CREATE TABLE IF NOT EXISTS user_keywords (
+            CREATE TABLE IF NOT EXISTS keyword (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 keyword TEXT NOT NULL
@@ -21,11 +24,14 @@ def ensure_keywords_schema():
         close_session(db)
 
 
+# ----------------------------------------------------------
+# GET ALL KEYWORDS FOR A USER
+# ----------------------------------------------------------
 def get_keywords(user_id: int):
     db = get_session()
     try:
         rows = db.execute(
-            text("SELECT keyword FROM user_keywords WHERE user_id=:u"),
+            text("SELECT keyword FROM keyword WHERE user_id=:u"),
             {"u": user_id}
         ).fetchall()
         return [r[0] for r in rows]
@@ -33,12 +39,15 @@ def get_keywords(user_id: int):
         close_session(db)
 
 
+# ----------------------------------------------------------
+# ADD MULTIPLE KEYWORDS
+# ----------------------------------------------------------
 def add_keywords(user_id: int, keywords):
     db = get_session()
     try:
         for kw in keywords:
             db.execute(
-                text("INSERT INTO user_keywords (user_id, keyword) VALUES (:u, :k)"),
+                text("INSERT INTO keyword (user_id, keyword) VALUES (:u, :k)"),
                 {"u": user_id, "k": kw}
             )
         db.commit()
@@ -46,11 +55,14 @@ def add_keywords(user_id: int, keywords):
         close_session(db)
 
 
+# ----------------------------------------------------------
+# DELETE ONE KEYWORD
+# ----------------------------------------------------------
 def delete_keyword(user_id: int, keyword: str):
     db = get_session()
     try:
         db.execute(
-            text("DELETE FROM user_keywords WHERE user_id=:u AND keyword=:k"),
+            text("DELETE FROM keyword WHERE user_id=:u AND keyword=:k"),
             {"u": user_id, "k": keyword}
         )
         db.commit()
@@ -58,10 +70,9 @@ def delete_keyword(user_id: int, keyword: str):
         close_session(db)
 
 
-
-
+# ----------------------------------------------------------
+# WORKER COMPATIBILITY METHOD
+# ----------------------------------------------------------
 def get_keywords_for_user(telegram_id: int):
-    """Compatibility alias for workers.
-    In your schema, user_id == telegram_id, so we reuse get_keywords().
-    """
+    """Workers use this (same as get_keywords)."""
     return get_keywords(telegram_id)
