@@ -1,6 +1,6 @@
 import logging
 from telegram import Update
-from telegram.ext import ContextTypes, CommandHandler
+from telegram.ext import ContextTypes
 
 from config import ADMIN_IDS
 from db_events import get_platform_stats
@@ -19,10 +19,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["*Platform Stats (last 24h)*", "________________________________________"]
     for p, count in stats.items():
-        lines.append(f"• {p}: {count}")
+        lines.append(f"Ã¢â‚¬Â¢ {p}: {count}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-def register_admin_handlers(app):
-    app.add_handler(CommandHandler("admin", admin_stats))
