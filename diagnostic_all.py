@@ -59,7 +59,10 @@ else:
 data["server_root_test"] = run("curl -s http://127.0.0.1:10000/")
 secret = os.getenv("WEBHOOK_SECRET")
 if secret:
-    data["server_webhook_test"] = run(f"curl -s -X POST http://127.0.0.1:10000/{secret} -d '{}' -H 'Content-Type: application/json'")
+    data["server_webhook_test"] = run(
+        f"curl -s -X POST http://127.0.0.1:10000/{secret} "
+        "-d '{{}}' -H 'Content-Type: application/json'"
+    )
 else:
     data["server_webhook_test"] = "NO WEBHOOK_SECRET SET"
 
@@ -68,10 +71,10 @@ else:
 # ----------------------------------
 dburl = os.getenv("DATABASE_URL")
 if dburl:
-    data["db_tables"] = run("psql "$DATABASE_URL" -c "\\dt"")
-    data["db_user_preview"] = run("psql "$DATABASE_URL" -c "SELECT * FROM app_user LIMIT 5;"")
-    data["db_keyword_preview"] = run("psql "$DATABASE_URL" -c "SELECT * FROM keyword LIMIT 5;"")
-    data["db_event_preview"] = run("psql "$DATABASE_URL" -c "SELECT * FROM feed_event ORDER BY id DESC LIMIT 5;"")
+    data["db_tables"] = run("psql \"$DATABASE_URL\" -c \"\\\\dt\"")
+    data["db_user_preview"] = run("psql \"$DATABASE_URL\" -c \"SELECT * FROM app_user LIMIT 5;\"")
+    data["db_keyword_preview"] = run("psql \"$DATABASE_URL\" -c \"SELECT * FROM keyword LIMIT 5;\"")
+    data["db_event_preview"] = run("psql \"$DATABASE_URL\" -c \"SELECT * FROM feed_event ORDER BY id DESC LIMIT 5;\"")
 else:
     data["db_tables"] = "NO DATABASE_URL FOUND"
 

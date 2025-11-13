@@ -1,15 +1,4 @@
-=== FULL DIAGNOSTIC REPORT ===
-{
-  "timestamp": "2025-11-13T13:32:38.441297",
-  "cwd": "C:\\Users\\chris\\Desktop\\\u0391\u03a0\u039f\u0394\u0395\u0399\u039e\u0397 \u039a\u0391\u0399 \u0392\u0395\u0392\u0391\u0399\u03a9\u03a3\u0397 \u0399\u0391\u039d\u039f\u03a5\u0391\u03a1\u0399\u039f\u03a5-\u03a6\u0395\u0392\u03a1\u039f\u03a5\u0391\u03a1\u0399\u039f\u03a5\\freelancer-bot",
-  "os": "Windows",
-  "python": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
-  "missing_files": [],
-  "env_files": {
-    ".env": false,
-    "freelancer-bot.env": false
-  },
-  "render": "Not in Render environment",
-  "db_error": "could not translate host name \"dpg-d39uff49c44c73frguv0-a\" to address: No such host is known. \n"
-}
-=== END ===
+  File "C:\Users\chris\Desktop\\u0391\u03a0\u039f\u0394\u0395\u0399\u039e\u0397 \u039a\u0391\u0399 \u0392\u0395\u0392\u0391\u0399\u03a9\u03a3\u0397 \u0399\u0391\u039d\u039f\u03a5\u0391\u03a1\u0399\u039f\u03a5-\u03a6\u0395\u0392\u03a1\u039f\u03a5\u0391\u03a1\u0399\u039f\u03a5\freelancer-bot\diagnostic_all.py", line 62
+    data["server_webhook_test"] = run(f"curl -s -X POST http://127.0.0.1:10000/{secret} -d '{}' -H 'Content-Type: application/json'")
+                                                                                                                                    ^
+SyntaxError: f-string: empty expression not allowed
