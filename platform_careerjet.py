@@ -1,46 +1,34 @@
-import logging
+# platform_careerjet.py
 import requests
-from bs4 import BeautifulSoup
-from utils import wrap_affiliate_link
+from xml.etree import ElementTree as ET
+from html import unescape
 
-log = logging.getLogger("platform.careerjet")
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
 
-RSS_URL = "https://www.careerjet.gr/search/rss?l=Greece&q="
-
-
-def search_careerjet(keyword: str):
-    url = RSS_URL + requests.utils.quote(keyword)
-
-    try:
-        r = requests.get(url, timeout=15)
-        if r.status_code != 200:
-            return []
-    except:
-        return []
-
-    soup = BeautifulSoup(r.text, "xml")
-    items = soup.find_all("item")
-    jobs = []
-
-    for item in items:
-        try:
-            title = item.title.text.strip()
-            desc = item.description.text.strip() if item.description else ""
-            link = item.link.text.strip()
-
-            jobs.append({
-                "platform": "careerjet",
-                "title": title,
-                "description": desc,
-                "original_url": link,
-                "affiliate_url": wrap_affiliate_link(link),
-                "job_id": link.split("/")[-1],
-                "budget_amount": None,
-                "budget_currency": None,
-            })
-        except Exception:
+def fetch(rss_url: str):
+    """
+    Παίρνει RSS από Careerjet (π.χ. Ελλάδα).
+    Παράδειγμα rss_url:
+      - https://www.careerjet.gr/rss?s=&l=Ελλάδα
+      - ή άλλο feed URL της Careerjet
+    """
+    out = []
+    if not rss_url:
+        return out
+    resp = requests.get(rss_url, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    tree = ET.fromstring(resp.content)
+    for item in tree.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        desc = unescape((item.findtext("description") or "").strip())
+        if not title or not link:
             continue
-
-    return jobs
-
-
+        out.append({
+            "title": title,
+            "url": link,
+            "description": desc,
+            "source": "Careerjet",
+            "platform": "careerjet",
+        })
+    return out

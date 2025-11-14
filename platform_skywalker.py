@@ -1,55 +1,40 @@
-import logging
+
+import re
+import html
+import xml.etree.ElementTree as ET
 import requests
-from bs4 import BeautifulSoup
-from utils import wrap_affiliate_link
+from typing import List, Dict
 
-log = logging.getLogger("platform.skywalker")
-
-URL = "https://www.skywalker.gr/el/aggelies-ergasias?keywords="
-
-
-def search_skywalker(keyword: str):
-    url = URL + requests.utils.quote(keyword)
-    headers = {"User-Agent": "Mozilla/5.0"}
-
+def parse_rss(xml_text: str) -> List[Dict]:
+    items = []
     try:
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code != 200:
-            return []
-    except:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return items
+    channel = root.find('channel') or root
+    for it in channel.findall('item'):
+        title = (it.findtext('title') or '').strip()
+        link = (it.findtext('link') or '').strip()
+        desc = html.unescape((it.findtext('description') or '').strip())
+        clean_desc = re.sub('<[^<]+?>', '', desc)
+        item = {
+            "external_id": link or title,
+            "title": title,
+            "description": clean_desc,
+            "url": link,
+            "budget_min": None,
+            "budget_max": None,
+            "currency": "EUR",
+            "source": "skywalker",
+            "affiliate": False,
+        }
+        items.append(item)
+    return items
+
+def fetch(feed_url: str, timeout: int = 10) -> List[Dict]:
+    try:
+        resp = requests.get(feed_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        return parse_rss(resp.text)
+    except Exception:
         return []
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    items = soup.select("div.job-item")
-    jobs = []
-
-    for item in items:
-        try:
-            title_el = item.select_one("a.job-title")
-            if not title_el:
-                continue
-
-            title = title_el.get_text(strip=True)
-            link = "https://www.skywalker.gr" + title_el.get("href", "")
-
-            desc_el = item.select_one("div.job-description")
-            desc = desc_el.get_text(strip=True) if desc_el else ""
-
-            job_id = link.split("/")[-1].split("-")[0]
-
-            jobs.append({
-                "platform": "skywalker",
-                "title": title,
-                "description": desc,
-                "original_url": link,
-                "affiliate_url": wrap_affiliate_link(link),
-                "job_id": job_id,
-                "budget_amount": None,
-                "budget_currency": None,
-            })
-        except Exception:
-            continue
-
-    return jobs
-
-

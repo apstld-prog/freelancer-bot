@@ -1,37 +1,25 @@
 @echo off
-set PATH=%PATH%;C:\Program Files\Git\bin
-
-echo.
-echo ===============================
-echo   GIT AUTO PUSH (SUPER MODE)
-echo ===============================
+echo ==========================================
+echo   GIT SUPER PUSH - DOUBLE CLICK ENGINE
+echo ==========================================
 echo.
 
-:: ΠΗΓΑΙΝΕ ΣΤΟΝ ΦΑΚΕΛΟ ΤΟΥ SCRIPT
+REM Move to the script folder
 cd /d "%~dp0"
 
-:: ΕΛΕΓΧΟΣ ΑΝ ΥΠΑΡΧΕΙ .git
-if not exist ".git" (
-    echo [ERROR] Δεν βρέθηκε φάκελος .git στο:
-    echo %~dp0
-    pause
-    exit /b
-)
-
-:: AUTO ADD ALL
+echo [1] Adding all changes...
 git add -A
 
-:: AUTO COMMIT ΜΕ TIMESTAMP
-set NOW=%DATE%_%TIME%
-set NOW=%NOW::=-%
-set NOW=%NOW:/=-%
-set NOW=%NOW: =_%
-git commit -m "AUTO-PUSH %NOW%"
+echo [2] Creating commit...
+git commit -m "Auto push by double-click"
 
-:: AUTO PUSH
-git push -f
+echo [3] Pulling latest with rebase...
+git pull --rebase
 
-echo.
-echo ✅ ΤΕΛΟΣ — Ο ΚΩΔΙΚΑΣ ΕΞΕΠΕΜΦΘΗ ΣΤΟ GITHUB
-echo.
+echo [4] Pushing to Render...
+git push
+
+echo ------------------------------------------
+echo DONE! Files successfully pushed.
+echo Close this window.
 pause

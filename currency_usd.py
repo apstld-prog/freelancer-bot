@@ -1,10 +1,12 @@
 # currency_usd.py
-# Helper for converting platform budget ranges into approximate USD values.
-# No external dependencies. Rates are mid-market and conservative.
+# Drop-in helper for showing "~ $min–$max USD" lines.
+# Δεν έχει εξωτερικά dependencies. Rates είναι conservative,
+# με fallback σε 1:1 αν δεν βρεθεί νόμισμα (οπότε απλά δεν θα τυπώσει USD).
+# Τελευταία ενημέρωση πινάκα: 2025-10-01 (προσεγγιστικά mid-market).
 
 from typing import Optional, Tuple
 
-# Base currency conversion table -> USD
+# Προσεγγιστικές ισοτιμίες -> USD
 _RATES_TO_USD = {
     "USD": 1.0,
     "EUR": 1.08,
@@ -24,56 +26,40 @@ _RATES_TO_USD = {
     "HUF": 0.0027,
     "JPY": 0.0066,
     "ZAR": 0.055,
-    # Additional currencies can be added here.
+    # πρόσθεσε αν χρειαστείς κι άλλα
 }
-
 
 def to_usd_range(min_amount: Optional[float],
                  max_amount: Optional[float],
                  currency: Optional[str]) -> Optional[Tuple[float, float]]:
-    """
-    Converts (min_amount, max_amount, currency_code) to approximate USD values.
-    Returns: (min_usd, max_usd) or None if conversion is not possible.
-    """
+    """Μετατρέπει προαιρετικό range σε USD. Επιστρέφει (min_usd, max_usd) ή None."""
     if not currency:
         return None
-
     cur = currency.upper().strip()
     rate = _RATES_TO_USD.get(cur)
     if not rate:
         return None
-
     def conv(x: Optional[float]) -> Optional[float]:
         return round(float(x) * rate, 2) if x is not None else None
-
     min_usd = conv(min_amount)
     max_usd = conv(max_amount)
-
+    # Αν και τα δύο None, δεν τυπώνουμε τίποτα
     if min_usd is None and max_usd is None:
         return None
-
     return (min_usd or 0.0, max_usd or 0.0)
-
 
 def usd_line(min_amount: Optional[float],
              max_amount: Optional[float],
              currency: Optional[str]) -> Optional[str]:
-    """
-    Returns a printable USD range line, e.g. "~ $100.00Ã¢â‚¬â€œ$300.00 USD".
-    """
+    """Επιστρέφει την έτοιμη γραμμή π.χ. '~ $100.00–$300.00 USD' ή None."""
     rng = to_usd_range(min_amount, max_amount, currency)
     if not rng:
         return None
-
     lo, hi = rng
-
     if lo and hi:
-        return f"~ ${lo:,.2f}Ã¢â‚¬â€œ${hi:,.2f} USD"
+        return f"~ ${lo:,.2f}–${hi:,.2f} USD"
     if lo and not hi:
         return f"~ from ${lo:,.2f} USD"
     if hi and not lo:
         return f"~ up to ${hi:,.2f} USD"
-
     return None
-
-

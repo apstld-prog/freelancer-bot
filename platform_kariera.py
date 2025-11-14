@@ -1,55 +1,47 @@
-import logging
+# platform_kariera.py
 import requests
 from bs4 import BeautifulSoup
-from utils import wrap_affiliate_link
 
-log = logging.getLogger("platform.kariera")
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
 
-URL = "https://www.kariera.gr/ÃŽÂ¸ÃŽÂ­ÃÆ’ÃŽÂµÃŽÂ¹Ãâ€š-ÃŽÂµÃÂÃŽÂ³ÃŽÂ±ÃÆ’ÃŽÂ¯ÃŽÂ±Ãâ€š?keyword="
+def fetch(listing_url: str):
+    """
+    Αν το KARIERA_RSS που δίνεις είναι στην πραγματικότητα listing σελίδα HTML,
+    π.χ. https://www.kariera.gr/jobs , κάνουμε basic HTML scrape από τα job-cards.
+    Αν έχεις πραγματικό RSS, μπορείς να αλλάξεις αυτόν τον parser με XML parse.
+    """
+    out = []
+    if not listing_url:
+        return out
+    resp = requests.get(listing_url, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-
-def search_kariera(keyword: str):
-    url = URL + requests.utils.quote(keyword)
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        if r.status_code != 200:
-            return []
-    except:
-        return []
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    items = soup.select("div.position-card")
-
-    jobs = []
-    for item in items:
-        try:
-            title_el = item.select_one("a.position-card-link")
-            if not title_el:
-                continue
-
-            title = title_el.get_text(strip=True)
-            link = "https://www.kariera.gr" + title_el.get("href", "")
-
-            desc_el = item.select_one(".position-card-description")
-            desc = desc_el.get_text(strip=True) if desc_el else ""
-
-            job_id = link.split("/")[-1]
-
-            jobs.append({
-                "platform": "kariera",
-                "title": title,
-                "description": desc,
-                "original_url": link,
-                "affiliate_url": wrap_affiliate_link(link),
-                "job_id": job_id,
-                "budget_amount": None,
-                "budget_currency": None,
-            })
-        except:
+    # Συνήθη CSS selectors (ενδέχεται να θες προσαρμογή αν αλλάξει markup)
+    cards = soup.select("[data-test='job-result'], .job-card, article")
+    for c in cards[:50]:  # safeguard
+        a = c.find("a", href=True)
+        if not a:
             continue
-
-    return jobs
-
-
+        url = a["href"]
+        if url.startswith("/"):
+            # απόλυτο URL
+            url = "https://www.kariera.gr" + url
+        title = (a.get_text(strip=True) or "").strip()
+        if not title:
+            # δοκίμασε header
+            h = c.find(["h2", "h3"])
+            if h:
+                title = h.get_text(strip=True)
+        desc_tag = c.find(["p", "div"], class_=lambda x: x and "description" in x.lower()) or c.find("p")
+        desc = desc_tag.get_text(strip=True) if desc_tag else ""
+        if not title or not url:
+            continue
+        out.append({
+            "title": title,
+            "url": url,
+            "description": desc,
+            "source": "Kariera",
+            "platform": "kariera",
+        })
+    return out
