@@ -1,46 +1,50 @@
-import asyncio
-from playwright.async_api import async_playwright
+import httpx
+from bs4 import BeautifulSoup
 import re
 
 # ---------------------------------------------------------
-# Clean helper
+# Helpers
 # ---------------------------------------------------------
 def _clean(s):
     return (s or "").strip()
 
-# ---------------------------------------------------------
-# Budget extractor
-# ---------------------------------------------------------
 def _extract_budget(text):
     """
-    Converts prices like:
+    Detects:
       $40
       £50 - £200
       €120
-    into:
+      $1.2k
+    Returns:
       min, max, currency
     """
     if not text:
         return None, None, None
 
-    txt = text.replace(",", "").strip()
+    t = text.lower().replace(",", "").strip()
 
-    if "£" in txt:
+    # Currency
+    if "£" in t:
         cur = "GBP"
-    elif "€" in txt:
+    elif "€" in t:
         cur = "EUR"
-    elif "$" in txt:
+    elif "$" in t:
         cur = "USD"
     else:
         cur = None
 
-    cleaned = txt.replace("£", "").replace("€", "").replace("$", "")
-    numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
+    # Remove currency symbols
+    cleaned = t.replace("£", "").replace("€", "").replace("$", "")
 
-    if not numbers:
+    # Convert shorthand like 1.3k → 1300
+    cleaned = re.sub(r"(\d+(?:\.\d+)?)k", lambda m: str(float(m.group(1)) * 1000), cleaned)
+
+    nums = re.findall(r"\d+(?:\.\d+)?", cleaned)
+
+    if not nums:
         return None, None, cur
 
-    nums = list(map(float, numbers))
+    nums = list(map(float, nums))
 
     if len(nums) == 1:
         return nums[0], nums[0], cur
@@ -49,58 +53,62 @@ def _extract_budget(text):
 
 
 # ---------------------------------------------------------
-# MAIN SCRAPER
+# MAIN SCRAPER (no Playwright)
 # ---------------------------------------------------------
-async def _scrape_keyword(kw):
-    """
-    Scrape one keyword from:
-    https://www.peopleperhour.com/freelance-jobs?q=KEYWORD
-    """
+def get_items(keywords):
+    results = []
 
-    items = []
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-gpu"]
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
         )
-        page = await browser.new_page()
+    }
+
+    for kw in keywords:
 
         url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
-        await page.goto(url, timeout=60000)
 
-        await page.wait_for_selector("li.list__item", timeout=60000)
+        try:
+            r = httpx.get(url, headers=headers, timeout=25)
+        except Exception:
+            continue
 
-        cards = await page.query_selector_all("li.list__item")
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Find item cards
+        cards = soup.select("li.list__item")
 
         for card in cards:
-            # Title
-            a = await card.query_selector("a.item__url")
+
+            # Title + URL
+            a = card.select_one("a.item__url")
             if not a:
                 continue
 
-            title = _clean(await a.inner_text())
-            href = await a.get_attribute("href")
+            title = _clean(a.text)
+            href = a.get("href", "")
             if href.startswith("/"):
                 href = "https://www.peopleperhour.com" + href
 
             # Description
-            desc_tag = await card.query_selector("p.item__desc")
-            description = _clean(await desc_tag.inner_text()) if desc_tag else ""
+            desc_tag = card.select_one("p.item__desc")
+            description = _clean(desc_tag.text) if desc_tag else ""
 
-            full_text = f"{title} {description}".lower()
-            if kw.lower() not in full_text:
+            # Keyword filter
+            hay = f"{title} {description}".lower()
+            if kw.lower() not in hay:
                 continue
 
             # Price
-            price_span = await card.query_selector("div.card__price span span")
-            price = ""
-            if price_span:
-                price = _clean(await price_span.inner_text())
+            # PeoplePerHour always puts price inside this selector
+            price_tag = card.select_one("div.card__price span span")
+            price = _clean(price_tag.text) if price_tag else ""
 
             bmin, bmax, cur = _extract_budget(price)
 
-            item = {
+            # Save
+            results.append({
                 "source": "peopleperhour",
                 "matched_keyword": kw,
                 "title": title,
@@ -109,27 +117,6 @@ async def _scrape_keyword(kw):
                 "budget_min": bmin,
                 "budget_max": bmax,
                 "original_currency": cur
-            }
+            })
 
-            items.append(item)
-
-        await browser.close()
-        return items
-
-
-# ---------------------------------------------------------
-# Public API
-# ---------------------------------------------------------
-def get_items(keywords):
-    """
-    Synchronous wrapper so workers can call it normally.
-    """
-
-    async def runner():
-        all_items = []
-        for kw in keywords:
-            batch = await _scrape_keyword(kw)
-            all_items.extend(batch)
-        return all_items
-
-    return asyncio.run(runner())
+    return results
