@@ -45,7 +45,7 @@ def fetch_all(keywords_query: Optional[str] = None) -> List[Dict]:
         except Exception:
             pass
     try:
-        if PLATFORMS.get("peopleperhour"): out += ph.fetch_peopleperhour()
+
         if PLATFORMS.get("malt"): out += ph.fetch_malt()
         if PLATFORMS.get("workana"): out += ph.fetch_workana()
         if PLATFORMS.get("wripple"): out += ph.fetch_wripple()
