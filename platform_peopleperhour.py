@@ -20,7 +20,6 @@ def _extract_budget(text):
 
     txt = text.replace(",", "").strip()
 
-    # detect currency
     if "£" in txt:
         cur = "GBP"
     elif "€" in txt:
@@ -30,7 +29,6 @@ def _extract_budget(text):
     else:
         cur = None
 
-    # remove symbols for parsing
     cleaned = txt.replace("£", "").replace("€", "").replace("$", "")
     numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
 
@@ -41,8 +39,7 @@ def _extract_budget(text):
 
     if len(nums) == 1:
         return nums[0], nums[0], cur
-    else:
-        return nums[0], nums[-1], cur
+    return nums[0], nums[-1], cur
 
 
 # ---------------------------------------------------------
@@ -71,50 +68,46 @@ def get_items(keywords):
         if not kw:
             continue
 
-        url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
+        search_url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
 
         try:
-            r = httpx.get(url, headers=headers, timeout=25)
+            r = httpx.get(search_url, headers=headers, timeout=25)
             soup = BeautifulSoup(r.text, "html.parser")
 
             # ---------------------------------------------------------
-            # Βρίσκουμε όλες τις κάρτες αγγελιών
+            # Οι PPH αγγελίες βρίσκονται μέσα σε sections με αυτό το class
             # ---------------------------------------------------------
-            cards = soup.select("div.card, div.listing, div")  # fallback
+            cards = soup.select("section.css-1qb12g8")
 
             for card in cards:
 
-                # ------------------------- Title -------------------------
-                a = card.find("a", href=True)
+                # -------------------- ΤΙΤΛΟΣ --------------------
+                a = card.select_one("a.css-10klw3m, a.css-1wr6c27")
                 if not a:
                     continue
+
                 title = _clean(a.text)
-                href = a["href"]
+                href = a.get("href") or ""
+
                 if href.startswith("/"):
                     href = "https://www.peopleperhour.com" + href
 
-                # keyword match check
-                if kw.lower() not in (title.lower()):
-                    # Expand: include description text later
-                    pass
-
-                # ------------------------- Description -------------------------
-                desc_tag = card.find("p")
+                # -------------------- DESCRIPTION --------------------
+                desc_tag = card.select_one("p")
                 description = _clean(desc_tag.text) if desc_tag else ""
 
-                # strict keyword filter (όπως freelancer)
+                # -------------------- STRICT KEYWORD MATCH --------------------
                 hay = f"{title} {description}".lower()
                 if kw.lower() not in hay:
                     continue
 
-                # ------------------------- Budget -------------------------
-                # Many PPH listings place price inside <span>$40</span>
-                price_tag = card.find("span")
+                # -------------------- BUDGET --------------------
+                price_tag = card.find("span", string=re.compile(r"[\$£€]\s*\d+"))
                 price = _clean(price_tag.text) if price_tag else ""
 
                 bmin, bmax, currency = _extract_budget(price)
 
-                # ------------------------- Item -------------------------
+                # -------------------- BUILD ITEM --------------------
                 item = {
                     "source": "peopleperhour",
                     "title": title,
