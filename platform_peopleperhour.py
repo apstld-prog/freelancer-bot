@@ -1,3 +1,4 @@
+# patch-pph-2025-11-15
 # platform_peopleperhour.py — minimal always-on scraper
 import httpx, re, random, time
 from datetime import datetime, timezone
