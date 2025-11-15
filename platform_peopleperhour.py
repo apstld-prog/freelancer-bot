@@ -1,11 +1,25 @@
-import httpx
-from bs4 import BeautifulSoup
+import asyncio
+from playwright.async_api import async_playwright
 import re
 
+# ---------------------------------------------------------
+# Clean helper
+# ---------------------------------------------------------
 def _clean(s):
     return (s or "").strip()
 
+# ---------------------------------------------------------
+# Budget extractor
+# ---------------------------------------------------------
 def _extract_budget(text):
+    """
+    Converts prices like:
+      $40
+      £50 - £200
+      €120
+    into:
+      min, max, currency
+    """
     if not text:
         return None, None, None
 
@@ -27,78 +41,95 @@ def _extract_budget(text):
         return None, None, cur
 
     nums = list(map(float, numbers))
+
     if len(nums) == 1:
         return nums[0], nums[0], cur
     else:
         return nums[0], nums[-1], cur
 
 
-def get_items(keywords):
-    results = []
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+# ---------------------------------------------------------
+# MAIN SCRAPER
+# ---------------------------------------------------------
+async def _scrape_keyword(kw):
+    """
+    Scrape one keyword from:
+    https://www.peopleperhour.com/freelance-jobs?q=KEYWORD
+    """
 
-    for kw in keywords or []:
+    items = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-gpu"]
+        )
+        page = await browser.new_page()
+
         url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
+        await page.goto(url, timeout=60000)
 
-        try:
-            r = httpx.get(url, headers=headers, timeout=20)
-            soup = BeautifulSoup(r.text, "html.parser")
+        await page.wait_for_selector("li.list__item", timeout=60000)
 
-            # CORRECT SELECTOR
-            cards = soup.select("li.list__item")
+        cards = await page.query_selector_all("li.list__item")
 
-            for card in cards:
+        for card in cards:
+            # Title
+            a = await card.query_selector("a.item__url")
+            if not a:
+                continue
 
-                # Title
-                a = card.select_one("h6 a")
-                if not a:
-                    continue
-                title = _clean(a.text)
-                href = a["href"]
-                if href.startswith("/"):
-                    href = "https://www.peopleperhour.com" + href
+            title = _clean(await a.inner_text())
+            href = await a.get_attribute("href")
+            if href.startswith("/"):
+                href = "https://www.peopleperhour.com" + href
 
-                # Description
-                desc_tag = card.select_one("p")
-                description = _clean(desc_tag.text) if desc_tag else ""
+            # Description
+            desc_tag = await card.query_selector("p.item__desc")
+            description = _clean(await desc_tag.inner_text()) if desc_tag else ""
 
-                # Keyword match
-                hay = f"{title} {description}".lower()
-                if kw.lower() not in hay:
-                    continue
+            full_text = f"{title} {description}".lower()
+            if kw.lower() not in full_text:
+                continue
 
-                # Budget
-                price_tag = card.select_one(".card__price span span")
-                if not price_tag:
-                    price_tag = card.select_one(".card__price span")
+            # Price
+            price_span = await card.query_selector("div.card__price span span")
+            price = ""
+            if price_span:
+                price = _clean(await price_span.inner_text())
 
-                price = _clean(price_tag.text) if price_tag else ""
-                bmin, bmax, cur = _extract_budget(price)
+            bmin, bmax, cur = _extract_budget(price)
 
-                # Convert to USD like freelancer
-                rate = {"EUR":1.08, "GBP":1.27, "USD":1.0}
-                if cur in rate:
-                    bmin_usd = round(bmin * rate[cur], 2) if bmin else None
-                    bmax_usd = round(bmax * rate[cur], 2) if bmax else None
-                else:
-                    bmin_usd = bmin
-                    bmax_usd = bmax
+            item = {
+                "source": "peopleperhour",
+                "matched_keyword": kw,
+                "title": title,
+                "description": description,
+                "original_url": href,
+                "budget_min": bmin,
+                "budget_max": bmax,
+                "original_currency": cur
+            }
 
-                item = {
-                    "source": "peopleperhour",
-                    "title": title,
-                    "description": description,
-                    "original_url": href,
-                    "budget_min": bmin_usd,
-                    "budget_max": bmax_usd,
-                    "original_currency": cur,
-                    "matched_keyword": kw,
-                }
-                results.append(item)
+            items.append(item)
 
-        except Exception as e:
-            print("PPH ERROR:", e)
+        await browser.close()
+        return items
 
-    return results
+
+# ---------------------------------------------------------
+# Public API
+# ---------------------------------------------------------
+def get_items(keywords):
+    """
+    Synchronous wrapper so workers can call it normally.
+    """
+
+    async def runner():
+        all_items = []
+        for kw in keywords:
+            batch = await _scrape_keyword(kw)
+            all_items.extend(batch)
+        return all_items
+
+    return asyncio.run(runner())
