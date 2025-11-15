@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: freelancer-bot
+    env: python
+    plan: starter
+    buildCommand: |
+      pip install -r requirements.txt
+      playwright install chromium
+    startCommand: |
+      ./start.sh
+    envVars:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      DATABASE_URL: ${DATABASE_URL}
+    autoDeploy: true
