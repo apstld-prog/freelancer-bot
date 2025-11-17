@@ -1,4 +1,5 @@
-import feedparser
+import httpx
+from bs4 import BeautifulSoup
 import re
 
 # ---------------------------------------------------------
@@ -10,7 +11,7 @@ def _clean(s):
 
 def _extract_budget(text):
     """
-    Converts prices like:
+    Converts values like:
       $40
       £50 - £200
       €120
@@ -22,7 +23,6 @@ def _extract_budget(text):
 
     txt = text.replace(",", "").strip()
 
-    # Currency detection
     if "£" in txt:
         cur = "GBP"
     elif "€" in txt:
@@ -32,7 +32,6 @@ def _extract_budget(text):
     else:
         cur = None
 
-    # Extract numbers
     cleaned = txt.replace("£", "").replace("€", "").replace("$", "")
     numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
 
@@ -47,81 +46,92 @@ def _extract_budget(text):
         return nums[0], nums[-1], cur
 
 
-# ---------------------------------------------------------
-# Optional: convert to USD like Freelancer
-# ---------------------------------------------------------
 def convert_to_usd(amount, currency):
     if not amount or not currency:
         return None
     currency = currency.upper()
-    
     rates = {
         "USD": 1,
         "EUR": 1.08,
         "GBP": 1.27,
     }
-    
     rate = rates.get(currency)
     if not rate:
         return None
-
     return round(amount * rate, 2)
 
 
 # ---------------------------------------------------------
-# MAIN FUNCTION — RSS SCRAPER
+# MAIN SCRAPER — HTML PARSER
 # ---------------------------------------------------------
 
 def get_items(keywords):
-    """
-    Scrapes PPH RSS:
-    https://www.peopleperhour.com/freelance-jobs.rss
-
-    Returns list of:
-      source="peopleperhour"
-      title, description, original_url
-      budget_min, budget_max, original_currency
-      usd_min, usd_max
-      matched_keyword
-    """
-
-    rss_url = "https://www.peopleperhour.com/freelance-jobs.rss"
-    parsed = feedparser.parse(rss_url)
 
     results = []
 
-    for entry in parsed.entries:
-        title = _clean(entry.get("title", ""))
-        description = _clean(entry.get("summary", ""))
-        link = entry.get("link", "")
+    url = "https://www.peopleperhour.com/freelance-jobs?q=" + ",".join(keywords)
 
-        full_text = f"{title} {description}".lower()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        )
+    }
 
+    r = httpx.get(url, headers=headers, timeout=30)
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    cards = soup.select("li.list__item")
+
+    for card in cards:
+
+        # Title
+        a = card.select_one("a.item__url")
+        if not a:
+            continue
+
+        title = _clean(a.text)
+        href = a.get("href", "")
+        if href.startswith("/"):
+            href = "https://www.peopleperhour.com" + href
+
+        # Description
+        desc_tag = card.select_one("p.item__desc")
+        description = _clean(desc_tag.text) if desc_tag else ""
+
+        hay = f"{title} {description}".lower()
+
+        matched_kw = None
         for kw in keywords:
-            if kw.lower() not in full_text:
-                continue
+            if kw.lower() in hay:
+                matched_kw = kw
+                break
 
-            # Extract budget
-            # PPH RSS often contains price inside title (e.g. "$30 Logo Design")
-            bmin, bmax, cur = _extract_budget(title)
+        if not matched_kw:
+            continue
 
-            # Convert to USD
-            usd_min = convert_to_usd(bmin, cur) if bmin else None
-            usd_max = convert_to_usd(bmax, cur) if bmax else None
+        # Budget
+        price_div = card.select_one("div.card__price span span")
+        price_text = _clean(price_div.text) if price_div else ""
 
-            item = {
-                "source": "peopleperhour",
-                "matched_keyword": kw,
-                "title": title,
-                "description": description,
-                "original_url": link,
-                "budget_min": bmin,
-                "budget_max": bmax,
-                "original_currency": cur,
-                "usd_min": usd_min,
-                "usd_max": usd_max,
-            }
+        bmin, bmax, cur = _extract_budget(price_text)
 
-            results.append(item)
+        usd_min = convert_to_usd(bmin, cur) if bmin else None
+        usd_max = convert_to_usd(bmax, cur) if bmax else None
+
+        item = {
+            "source": "peopleperhour",
+            "matched_keyword": matched_kw,
+            "title": title,
+            "description": description,
+            "original_url": href,
+            "budget_min": bmin,
+            "budget_max": bmax,
+            "original_currency": cur,
+            "usd_min": usd_min,
+            "usd_max": usd_max,
+        }
+
+        results.append(item)
 
     return results
