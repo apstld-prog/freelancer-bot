@@ -1,4 +1,4 @@
-# bot.py — EN-only, add via /addkeyword only, robust keywords, admin panel, selftest 
+# bot.py — EN-only, add via /addkeyword only, robust keywords, admin panel, selftest
 import os, logging, asyncio, re
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -29,6 +29,16 @@ from db_keywords import (
 
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
+
+def welcome_text(expiry):
+    extra = f"\n<b>Free trial ends:</b> {expiry.strftime('%Y-%m-%d %H:%M UTC')}" if expiry else ""
+    return (
+        "<b>👋 Welcome to Freelancer Alert Bot!</b>\n\n"
+        "🎁 You have a <b>10-day free trial</b>.\n"
+        "The bot finds matching freelance jobs from top platforms and sends instant alerts."
+        f"{extra}\n\nUse <code>/help</code> for instructions.\n"
+    )
+
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 if not BOT_TOKEN:
