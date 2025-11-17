@@ -10,3 +10,4 @@ beautifulsoup4==4.12.3
 playwright
 bs4
 httpx
+feedparser
