@@ -101,7 +101,6 @@ def get_items(keywords):
                 continue
 
             # Price
-            # PeoplePerHour always puts price inside this selector
             price_tag = card.select_one("div.card__price span span")
             price = _clean(price_tag.text) if price_tag else ""
 
