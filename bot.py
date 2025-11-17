@@ -1,4 +1,4 @@
-# bot.py — EN-only, add via /addkeyword only, robust keywords, admin panel, selftest
+# bot.py — EN-only, add via /addkeyword only, robust keywords, admin panel, selftest 
 import os, logging, asyncio, re
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
