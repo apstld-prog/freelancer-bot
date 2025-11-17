@@ -1,23 +1,28 @@
-import httpx
+import feedparser
 import re
 
-RSS_URL = "https://www.peopleperhour.com/freelance-jobs.rss"
-
-# -------------------------------------
+# ---------------------------------------------------------
 # Helpers
-# -------------------------------------
+# ---------------------------------------------------------
+
 def _clean(s):
     return (s or "").strip()
 
 def _extract_budget(text):
     """
-    Extract min,max,currency from: $40, £50-£120, €100 etc.
+    Converts prices like:
+      $40
+      £50 - £200
+      €120
+    into:
+      min, max, currency
     """
     if not text:
         return None, None, None
 
     txt = text.replace(",", "").strip()
 
+    # Currency detection
     if "£" in txt:
         cur = "GBP"
     elif "€" in txt:
@@ -27,98 +32,96 @@ def _extract_budget(text):
     else:
         cur = None
 
+    # Extract numbers
     cleaned = txt.replace("£", "").replace("€", "").replace("$", "")
-    nums = re.findall(r"\d+(?:\.\d+)?", cleaned)
-    if not nums:
+    numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
+
+    if not numbers:
         return None, None, cur
 
-    nums = list(map(float, nums))
+    nums = list(map(float, numbers))
 
     if len(nums) == 1:
         return nums[0], nums[0], cur
-    return nums[0], nums[-1], cur
+    else:
+        return nums[0], nums[-1], cur
 
 
-# -------------------------------------
-# USD conversion (όπως Freelancer)
-# -------------------------------------
-async def convert_to_usd(amount, currency):
-    if amount is None or not currency:
+# ---------------------------------------------------------
+# Optional: convert to USD like Freelancer
+# ---------------------------------------------------------
+def convert_to_usd(amount, currency):
+    if not amount or not currency:
         return None
-
     currency = currency.upper()
-    if currency == "USD":
-        return amount
-
-    try:
-        url = f"https://api.exchangerate.host/convert?from={currency}&to=USD&amount={amount}"
-        r = httpx.get(url, timeout=10)
-        data = r.json()
-        return float(data.get("result"))
-    except:
+    
+    rates = {
+        "USD": 1,
+        "EUR": 1.08,
+        "GBP": 1.27,
+    }
+    
+    rate = rates.get(currency)
+    if not rate:
         return None
 
+    return round(amount * rate, 2)
 
-# -------------------------------------
-# Main PeoplePerHour fetch
-# -------------------------------------
+
+# ---------------------------------------------------------
+# MAIN FUNCTION — RSS SCRAPER
+# ---------------------------------------------------------
+
 def get_items(keywords):
     """
-    Scrapes the PeoplePerHour RSS feed.
-    Works 100% reliably on Render.
+    Scrapes PPH RSS:
+    https://www.peopleperhour.com/freelance-jobs.rss
+
+    Returns list of:
+      source="peopleperhour"
+      title, description, original_url
+      budget_min, budget_max, original_currency
+      usd_min, usd_max
+      matched_keyword
     """
 
-    keywords = [k.lower().strip() for k in keywords if k.strip()]
+    rss_url = "https://www.peopleperhour.com/freelance-jobs.rss"
+    parsed = feedparser.parse(rss_url)
+
     results = []
 
-    try:
-        r = httpx.get(RSS_URL, timeout=20)
-        xml = r.text
-    except Exception:
-        return []
+    for entry in parsed.entries:
+        title = _clean(entry.get("title", ""))
+        description = _clean(entry.get("summary", ""))
+        link = entry.get("link", "")
 
-    # Parse items manually (safe)
-    blocks = xml.split("<item>")
-    for b in blocks[1:]:
-        try:
-            title = _clean(b.split("<title>")[1].split("</title>")[0])
-            link = _clean(b.split("<link>")[1].split("</link>")[0])
-            desc = _clean(b.split("<description>")[1].split("</description>")[0])
-        except:
-            continue
+        full_text = f"{title} {description}".lower()
 
-        text_full = (title + " " + desc).lower()
-
-        matched_kw = None
         for kw in keywords:
-            if kw in text_full:
-                matched_kw = kw
-                break
+            if kw.lower() not in full_text:
+                continue
 
-        if not matched_kw:
-            continue
+            # Extract budget
+            # PPH RSS often contains price inside title (e.g. "$30 Logo Design")
+            bmin, bmax, cur = _extract_budget(title)
 
-        # Extract price inside the description
-        price_match = re.search(r"[\$£€]\s?\d+(?:\s?-\s?[\$£€]?\d+)?", desc)
-        if price_match:
-            price_text = price_match.group(0)
-        else:
-            price_text = ""
+            # Convert to USD
+            usd_min = convert_to_usd(bmin, cur) if bmin else None
+            usd_max = convert_to_usd(bmax, cur) if bmax else None
 
-        bmin, bmax, cur = _extract_budget(price_text)
+            item = {
+                "source": "peopleperhour",
+                "matched_keyword": kw,
+                "title": title,
+                "description": description,
+                "original_url": link,
+                "budget_min": bmin,
+                "budget_max": bmax,
+                "original_currency": cur,
+                "usd_min": usd_min,
+                "usd_max": usd_max,
+            }
 
-        # Build base structure
-        item = {
-            "source": "peopleperhour",
-            "matched_keyword": matched_kw,
-            "title": title,
-            "description": desc,
-            "original_url": link,
-            "budget_min": bmin,
-            "budget_max": bmax,
-            "original_currency": cur,
-        }
-
-        results.append(item)
+            results.append(item)
 
     return results
