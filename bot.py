@@ -30,16 +30,6 @@ from db_keywords import (
 log = logging.getLogger("bot")
 logging.basicConfig(level=logging.INFO)
 
-def welcome_text(expiry):
-    extra = f"\n<b>Free trial ends:</b> {expiry.strftime('%Y-%m-%d %H:%M UTC')}" if expiry else ""
-    return (
-        "<b>👋 Welcome to Freelancer Alert Bot!</b>\n\n"
-        "🎁 You have a <b>10-day free trial</b>.\n"
-        "The bot finds matching freelance jobs from top platforms and sends instant alerts."
-        f"{extra}\n\nUse <code>/help</code> for instructions.\n"
-    )
-
-
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
@@ -57,11 +47,116 @@ def get_db_admin_ids() -> Set[int]:
 def all_admin_ids() -> Set[int]:
     return set(int(x) for x in (ADMIN_IDS or [])) | get_db_admin_ids()
 
-def is_admin(update):
-    tid = update.effective_user.id
-    from config import ADMIN_IDS
-    return tid in ADMIN_IDS
+def is_admin_user(tid: int) -> bool:
+    return tid in all_admin_ids()
 
+# ---------- UI ----------
+def main_menu_kb(is_admin: bool=False) -> InlineKeyboardMarkup:
+    kb = [
+        [InlineKeyboardButton("➕ Add Keywords", callback_data="act:addkw"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="act:settings")],
+        [InlineKeyboardButton("🆘 Help", callback_data="act:help"),
+         InlineKeyboardButton("💾 Saved", callback_data="act:saved")],
+        [InlineKeyboardButton("📨 Contact", callback_data="act:contact")],
+    ]
+    if is_admin: kb.append([InlineKeyboardButton("🔥 Admin", callback_data="act:admin")])
+    return InlineKeyboardMarkup(kb)
+
+HELP_EN = (
+    "<b>🧭 Help / How it works</b>\n\n"
+    "<b>Keywords</b>\n"
+    "• Add: <code>/addkeyword logo, lighting, sales</code>\n"
+    "• Remove: <code>/delkeyword logo, sales</code>\n"
+    "• Clear all: <code>/clearkeywords</code>\n\n"
+    "<b>Other</b>\n"
+    "• Set countries: <code>/setcountry US,UK</code> or <code>ALL</code>\n"
+    "• Save proposal: <code>/setproposal &lt;text&gt;</code>\n"
+    "• Test card: <code>/selftest</code>\n"
+)
+
+def help_footer(hours: int) -> str:
+    return (
+        "\n<b>🛰 Platforms monitored:</b>\n"
+        "• Global: Freelancer.com (affiliate), PeoplePerHour, Malt, Workana, Guru, 99designs, "
+        "Toptal*, Codeable*, YunoJuno*, Worksome*, twago, freelancermap\n"
+        "• Greece: JobFind.gr, Skywalker.gr, Kariera.gr\n\n"
+        "<b>👑 Admin:</b> <code>/users</code> <code>/grant &lt;id&gt; &lt;days&gt;</code> "
+        "<code>/block &lt;id&gt;</code> <code>/unblock &lt;id&gt;</code> <code>/broadcast &lt;text&gt;</code> "
+        "<code>/feedstatus</code> (alias <code>/feetstatus</code>)\n"
+        "<i>Link previews are disabled for this message.</i>\n"
+    )
+
+def welcome_text(expiry: Optional[datetime]) -> str:
+    extra = f"\n<b>Free trial ends:</b> {expiry.strftime('%Y-%m-%d %H:%M UTC')}" if expiry else ""
+    return (
+        "<b>👋 Welcome to Freelancer Alert Bot!</b>\n\n"
+        "🎁 You have a <b>10-day free trial</b>.\n"
+        "The bot finds matching freelance jobs from top platforms and sends instant alerts."
+        f"{extra}\n\nUse <code>/help</code> for instructions.\n"
+    )
+
+def settings_text(keywords: List[str], countries: str|None, proposal_template: str|None,
+                  trial_start, trial_end, license_until, active: bool, blocked: bool) -> str:
+    def b(v: bool) -> str: return "✅" if v else "❌"
+    k = ", ".join(keywords) if keywords else "(none)"
+    c = countries if countries else "ALL"
+    pt = "(none)" if not proposal_template else "(saved)"
+    ts = trial_start.isoformat().replace("+00:00","Z") if trial_start else "—"
+    te = trial_end.isoformat().replace("+00:00","Z") if trial_end else "—"
+    lic = "None" if not license_until else license_until.isoformat().replace("+00:00","Z")
+    return (
+        "<b>🛠 Your Settings</b>\n"
+        f"• <b>Keywords:</b> {k}\n"
+        f"• <b>Countries:</b> {c}\n"
+        f"• <b>Proposal template:</b> {pt}\n\n"
+        f"<b>●</b> Start date: {ts}\n"
+        f"<b>●</b> Trial ends: {te} UTC\n"
+        f"<b>🔑</b> License until: {lic}\n"
+        f"<b>✅ Active:</b> {b(active)}    <b>⛔ Blocked:</b> {b(blocked)}\n\n"
+        "<b>🛰 Platforms monitored:</b> Global & GR boards.\n"
+        "<i>For extension, contact the admin.</i>"
+    )
+
+# ---------- Contact helpers ----------
+def admin_contact_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Reply", callback_data=f"adm:reply:{user_id}"),
+         InlineKeyboardButton("❌ Decline", callback_data=f"adm:decline:{user_id}")],
+        [InlineKeyboardButton("+30d", callback_data=f"adm:grant:{user_id}:30"),
+         InlineKeyboardButton("+90d", callback_data=f"adm:grant:{user_id}:90"),
+         InlineKeyboardButton("+180d", callback_data=f"adm:grant:{user_id}:180"),
+         InlineKeyboardButton("+365d", callback_data=f"adm:grant:{user_id}:365")],
+    ])
+
+def pair_admin_user(app: Application, admin_id: int, user_id: int) -> None:
+    pairs = app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})
+    pairs["user_to_admin"][user_id] = admin_id
+    pairs["admin_to_user"][admin_id] = user_id
+
+def get_paired_admin(app: Application, user_id: int) -> Optional[int]:
+    return app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})["user_to_admin"].get(user_id)
+
+def get_paired_user(app: Application, admin_id: int) -> Optional[int]:
+    return app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})["admin_to_user"].get(admin_id)
+
+def unpair(app: Application, admin_id: Optional[int]=None, user_id: Optional[int]=None):
+    pairs = app.bot_data.setdefault("contact_pairs", {"user_to_admin": {}, "admin_to_user": {}})
+    if admin_id is not None:
+        uid = pairs["admin_to_user"].pop(admin_id, None)
+        if uid is not None: pairs["user_to_admin"].pop(uid, None)
+    if user_id is not None:
+        aid = pairs["user_to_admin"].pop(user_id, None)
+        if aid is not None: pairs["admin_to_user"].pop(aid, None)
+
+# ---------- Commands ----------
+def _parse_keywords(raw: str) -> List[str]:
+    parts = [p.strip() for chunk in raw.split(",") for p in chunk.split() if p.strip()]
+    seen, out = set(), []
+    for p in parts:
+        lp = p.lower()
+        if lp not in seen:
+            seen.add(lp); out.append(p)
+    return out
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Your Telegram ID: <code>{update.effective_user.id}</code>", parse_mode=ParseMode.HTML)
