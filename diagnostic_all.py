@@ -14,12 +14,10 @@ def run(cmd):
     except Exception as e:
         return str(e)
 
-# Load env
 env_keys = ["TELEGRAM_BOT_TOKEN","WEBHOOK_SECRET","RENDER_EXTERNAL_HOSTNAME","DATABASE_URL","PORT"]
 env = {k: os.environ.get(k,"") for k in env_keys}
 data["env"] = env
 
-# Check handlers functions
 handler_requirements = {
     "handlers_start":"register_start_handlers",
     "handlers_settings":"register_settings_handlers",
@@ -38,22 +36,17 @@ for module, func in handler_requirements.items():
         handler_status[module] = str(e)
 data["handler_functions"] = handler_status
 
-# Token format check
 token = env.get("TELEGRAM_BOT_TOKEN","")
 data["token_valid_format"] = bool(re.match(r"^\d+:[A-Za-z0-9_-]+$", token))
 
-# Secret check
 data["secret_not_empty"] = env.get("WEBHOOK_SECRET","") != ""
 
-# Public URL check
 pub = env.get("RENDER_EXTERNAL_HOSTNAME","")
 data["public_url_ok"] = bool(pub.strip())
 
-# Server listening
 port = env.get("PORT","10000")
 data["server_port_check"] = run(f"lsof -i:{port}")[:200]
 
-# Test imports
 imports = ["server","bot","handlers_start","handlers_settings","handlers_help"]
 import_status = {}
 for i in imports:
@@ -64,23 +57,27 @@ for i in imports:
         import_status[i] = str(e)
 data["import_status"] = import_status
 
-# Worker processes
 data["workers"] = run("ps aux | grep worker_")
-
-# Uvicorn process
 data["uvicorn"] = run("ps aux | grep uvicorn")
 
-# Webhook info
 if token:
     data["webhook_info"] = run(f"curl -s https://api.telegram.org/bot{token}/getWebhookInfo")
 
-# DB tables
 db_url = env.get("DATABASE_URL","")
 if db_url:
     data["db_tables"] = run(f'psql "{db_url}" -c "\dt"')
 
-# Output
 print(json.dumps(data, indent=2, ensure_ascii=False))
+
+# --- SKYTEST BLOCK ---
+try:
+    import platform_skywalker as sky
+    url = os.getenv("SKYWALKER_RSS","https://www.skywalker.gr/jobs/feed")
+    items = sky.fetch(url)
+    print("SKYWALKER:", len(items))
+    if items:
+        print("SKYWALKER FIRST:", items[0].get("title"))
+except Exception as e:
+    print("SKYWALKER ERROR:", e)
+
 print("=== END ===")
-+++ SKYTEST: <count>
-First: <title>
