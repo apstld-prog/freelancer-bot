@@ -1,4 +1,3 @@
-# admin_feedsstatus.py
 from __future__ import annotations
 import os
 from typing import Optional, Dict, Any
@@ -7,6 +6,7 @@ from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes, Application
 
 from feedstats import read_stats
+from config import PLATFORMS  # <-- include all platforms
 
 def _is_admin(tg_user_id: Optional[int]) -> bool:
     admin_env = os.getenv("ADMIN_ID") or os.getenv("TELEGRAM_ADMIN_ID")
@@ -20,28 +20,28 @@ def _is_admin(tg_user_id: Optional[int]) -> bool:
 def _format_stats() -> str:
     s: Dict[str, Any] = read_stats()
     feeds: Dict[str, Any] = s.get("feeds", {})
-    if not feeds:
-        # Fallback μήνυμα αν δεν έχει γραφτεί ακόμα snapshot
-        lines = [
-            "🩺 *Feeds health*",
-            "_No snapshot yet — worker may be starting up._",
-        ]
-        return "\n".join(lines)
 
     lines = []
     lines.append("🩺 *Feeds health (last cycle)*")
     cs = s.get("cycle_seconds")
     sent = s.get("sent_this_cycle", 0)
+
     meta = []
-    if cs:   meta.append(f"⏱ `{cs}s`")
+    if cs:
+        meta.append(f"⏱ `{cs}s`")
     meta.append(f"📨 sent: `{sent}`")
     lines.append(" ".join(meta))
     lines.append("")
 
-    for name, data in sorted(feeds.items()):
+    # MODE A (your choice): minimal lines per platform
+    for name, enabled in sorted(PLATFORMS.items()):
+        data = feeds.get(name, {})
         cnt = data.get("count") or 0
         err = data.get("error")
-        if err:
+
+        if not enabled:
+            lines.append(f"• `{name}` → {cnt}  ⚠️ disabled")
+        elif err:
             lines.append(f"• `{name}` → {cnt}  ⚠️ `{err}`")
         else:
             lines.append(f"• `{name}` → {cnt}  ✅")
