@@ -260,6 +260,37 @@ async def selftest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         await update.effective_chat.send_message(pph_text, parse_mode=ParseMode.HTML, reply_markup=pph_kb)
 
+        # --- Skywalker dynamic test ---
+        try:
+            import platform_skywalker as sky
+            url_sw = os.getenv("SKYWALKER_RSS", "https://www.skywalker.gr/jobs/feed")
+            items_sw = sky.fetch(url_sw)
+            if items_sw:
+                first = items_sw[0]
+                sw_title = first.get("title","Skywalker Job")
+                sw_budget_min = first.get("budget_min")
+                sw_budget_max = first.get("budget_max")
+                sw_cur = first.get("original_currency","")
+                sw_desc = first.get("description","")
+                sw_url = first.get("proposal_url") or first.get("original_url")
+                sw_budget_txt = f"{sw_budget_min}–{sw_budget_max} {sw_cur}" if sw_budget_min else "N/A"
+                sw_text = (
+                    f"<b>{sw_title}</b>\n"
+                    f"<b>Budget:</b> {sw_budget_txt}\n"
+                    f"<b>Source:</b> Skywalker\n"
+                    f"<b>Match:</b> auto\n"
+                    f"{sw_desc}"
+                )
+                sw_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📄 Proposal", url=sw_url),
+                     InlineKeyboardButton("🔗 Original", url=sw_url)],
+                    [InlineKeyboardButton("⭐ Save", callback_data="job:save"),
+                     InlineKeyboardButton("🗑️ Delete", callback_data="job:delete")],
+                ])
+                await update.effective_chat.send_message(sw_text, parse_mode=ParseMode.HTML, reply_markup=sw_kb)
+        except Exception as e:
+            log.exception("Skywalker selftest error: %s", e)
+
         try:
             ensure_feed_events_schema()
             record_event('freelancer')
