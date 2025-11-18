@@ -1,40 +1,70 @@
-
-import re
 import html
 import xml.etree.ElementTree as ET
 import requests
 from typing import List, Dict
 
-def parse_rss(xml_text: str) -> List[Dict]:
+def parse_atom(xml_text: str) -> List[Dict]:
     items = []
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return items
-    channel = root.find('channel') or root
-    for it in channel.findall('item'):
-        title = (it.findtext('title') or '').strip()
-        link = (it.findtext('link') or '').strip()
-        desc = html.unescape((it.findtext('description') or '').strip())
-        clean_desc = re.sub('<[^<]+?>', '', desc)
+
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+
+    for entry in root.findall("a:entry", ns):
+        title = (entry.findtext("a:title", default="", namespaces=ns) or "").strip()
+        link_el = entry.find("a:link", ns)
+        link = link_el.get("href") if link_el is not None else ""
+
+        work_type = entry.findtext("workType", default="", namespaces={})
+        publish = entry.findtext("publishDate", default="", namespaces={})
+
+        emps = []
+        emp_root = entry.find("employmentTypes")
+        if emp_root is not None:
+            for e in emp_root.findall("employmentType"):
+                if e.text:
+                    emps.append(e.text.strip())
+
+        desc_parts = []
+        if work_type:
+            desc_parts.append(work_type)
+        desc_parts.extend(emps)
+        description = "\n".join(desc_parts)
+
         item = {
             "external_id": link or title,
             "title": title,
-            "description": clean_desc,
+            "description": description,
             "url": link,
+            "proposal_url": link,
+            "original_url": link,
             "budget_min": None,
             "budget_max": None,
             "currency": "EUR",
+            "original_currency": "EUR",
             "source": "skywalker",
+            "time_submitted": None,
             "affiliate": False,
         }
+
+        if publish:
+            import datetime
+            try:
+                dt = datetime.datetime.fromisoformat(publish.replace("Z","+00:00"))
+                item["time_submitted"] = int(dt.timestamp())
+            except:
+                pass
+
         items.append(item)
+
     return items
 
 def fetch(feed_url: str, timeout: int = 10) -> List[Dict]:
     try:
         resp = requests.get(feed_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
-        return parse_rss(resp.text)
+        return parse_atom(resp.text)
     except Exception:
         return []

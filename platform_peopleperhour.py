@@ -2,31 +2,13 @@ import httpx
 from bs4 import BeautifulSoup
 import re
 
-# ---------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------
-
-
 def _clean(s: str) -> str:
     return (s or "").strip()
 
-
 def _extract_budget(text):
-    """
-    Παίρνει κάτι όπως:
-      "$40"
-      "£50 - £200"
-      "€120"
-      "$37/hr"
-    και επιστρέφει:
-      (min, max, currency)
-    """
     if not text:
         return None, None, None
-
     txt = text.replace(",", "").strip()
-
-    # currency detection
     if "£" in txt:
         cur = "GBP"
     elif "€" in txt:
@@ -35,8 +17,6 @@ def _extract_budget(text):
         cur = "USD"
     else:
         cur = None
-
-    # βγάζουμε σύμβολα και /hr κτλ.
     cleaned = (
         txt.replace("£", "")
         .replace("€", "")
@@ -44,37 +24,19 @@ def _extract_budget(text):
         .replace("/hr", "")
         .replace("/HR", "")
     )
-
     numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
     if not numbers:
         return None, None, cur
-
     nums = list(map(float, numbers))
-
     if len(nums) == 1:
         return nums[0], nums[0], cur
     else:
         return nums[0], nums[-1], cur
 
-
-# ---------------------------------------------------------
-# HTML parsing για μία σελίδα
-# ---------------------------------------------------------
-
-
 def _parse_cards(html: str, kw: str):
-    """
-    Διαβάζει το HTML της:
-      https://www.peopleperhour.com/freelance-jobs?q=KEYWORD
-
-    και γυρνάει λίστα από items με:
-      title, description, original_url, budget_min, budget_max,
-      original_currency, matched_keyword, source="peopleperhour"
-    """
     soup = BeautifulSoup(html, "html.parser")
     items = []
 
-    # Τα <li> έχουν class σαν "list__item⤍List⤚2ytmm"
     cards = []
     for li in soup.find_all("li"):
         classes = " ".join(li.get("class") or [])
@@ -82,11 +44,9 @@ def _parse_cards(html: str, kw: str):
             cards.append(li)
 
     for card in cards:
-        # ------------------------- URL & Title -------------------------
         job_link = None
         for a in card.find_all("a", href=True):
             href = a["href"]
-            # πραγματικά job links
             if "/freelance-jobs/" in href:
                 job_link = a
                 break
@@ -99,20 +59,15 @@ def _parse_cards(html: str, kw: str):
         if href.startswith("/"):
             href = "https://www.peopleperhour.com" + href
 
-        # ------------------------- Description -------------------------
-        # Συνήθως το τελευταίο <p> μέσα στην κάρτα είναι η περιγραφή
         p_tags = card.find_all("p")
         description = ""
         if p_tags:
             description = _clean(p_tags[-1].get_text())
 
-        # Strict keyword filter όπως στο Freelancer:
-        # κρατάμε μόνο αν το kw υπάρχει σε title+description
         hay = f"{title} {description}".lower()
         if kw and kw.lower() not in hay:
             continue
 
-        # ------------------------- Budget / Price -------------------------
         price_text = ""
         for div in card.find_all("div"):
             classes = " ".join(div.get("class") or [])
@@ -122,34 +77,26 @@ def _parse_cards(html: str, kw: str):
 
         bmin, bmax, cur = _extract_budget(price_text)
 
-        item = {
+        items.append({
             "source": "peopleperhour",
             "matched_keyword": kw,
             "title": title,
             "description": description,
+            "external_id": href,
+            "url": href,
+            "proposal_url": href,
             "original_url": href,
             "budget_min": bmin,
             "budget_max": bmax,
             "original_currency": cur,
-        }
-        items.append(item)
+            "currency": cur,
+            "time_submitted": None,
+            "affiliate": False,
+        })
 
     return items
 
-
-# ---------------------------------------------------------
-# Public API (όπως το καλεί ο worker)
-# ---------------------------------------------------------
-
-
 def get_items(keywords):
-    """
-    Scrapes PeoplePerHour search results:
-      https://www.peopleperhour.com/freelance-jobs?q=KEYWORD
-
-    και επιστρέφει items όπως ο freelancer scraper.
-    """
-
     if not keywords:
         return []
 
@@ -172,9 +119,7 @@ def get_items(keywords):
         try:
             resp = httpx.get(url, headers=headers, timeout=30)
             resp.raise_for_status()
-        except Exception as e:
-            # Σε αποτυχία, απλά συνεχίζουμε με επόμενο keyword
-            print(f"[PPH] Error for kw={kw}: {e}")
+        except Exception:
             continue
 
         batch = _parse_cards(resp.text, kw)
