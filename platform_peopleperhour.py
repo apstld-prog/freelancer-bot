@@ -3,6 +3,22 @@ from datetime import datetime, timezone
 
 API_URL = "https://www.peopleperhour.com/api/projects"
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.peopleperhour.com/freelance-jobs",
+    "Origin": "https://www.peopleperhour.com",
+    "X-Requested-With": "XMLHttpRequest",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+}
+
 def _clean(x):
     return (x or "").strip()
 
@@ -12,16 +28,17 @@ def build_url(project):
     return f"https://www.peopleperhour.com/freelance-jobs/{slug}-{pid}"
 
 def get_items(keywords):
-    """
-    Scraper που χρησιμοποιεί το κανονικό API του PPH.
-    Δεν χρειάζεται keywords εδώ — το worker θα φιλτράρει.
-    """
     out = []
     page = 1
 
-    while page <= 3:  # 150 jobs max
+    while page <= 3:
         try:
-            r = requests.get(API_URL, params={"page": page, "per_page": 50}, timeout=10)
+            r = requests.get(
+                API_URL,
+                params={"page": page, "per_page": 50},
+                headers=HEADERS,
+                timeout=10,
+            )
             data = r.json()
         except Exception:
             break
