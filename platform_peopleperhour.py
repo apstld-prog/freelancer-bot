@@ -1,101 +1,128 @@
-
-# NEW PeoplePerHour Smart Scraper (Categories + Search + 24h filter)
-
 import httpx
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
 import re
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+def _clean(s: str) -> str:
+    return (s or "").strip()
 
-CATEGORY_MAP = {
-    "logo": "https://www.peopleperhour.com/freelance-logo-jobs",
-    "design": "https://www.peopleperhour.com/freelance-design-jobs",
-    "branding": "https://www.peopleperhour.com/marketing-branding-jobs",
-    "marketing": "https://www.peopleperhour.com/marketing-branding-jobs",
-    "seo": "https://www.peopleperhour.com/digital-marketing-jobs",
-    "developer": "https://www.peopleperhour.com/technology-programming-jobs",
-    "website": "https://www.peopleperhour.com/technology-programming-jobs",
-    "web": "https://www.peopleperhour.com/technology-programming-jobs",
-    "ecommerce": "https://www.peopleperhour.com/technology-programming-jobs",
-    "writing": "https://www.peopleperhour.com/writing-translation-jobs",
-}
-
-def parse_relative_time(text: str):
+def _extract_budget(text):
     if not text:
-        return None
-    t = text.lower()
-    now = datetime.utcnow()
-    nums = re.findall(r"\d+", t)
-    if "hour" in t and nums:
-        return now - timedelta(hours=int(nums[0]))
-    if "minute" in t and nums:
-        return now - timedelta(minutes=int(nums[0]))
-    if "day" in t and nums:
-        return now - timedelta(days=int(nums[0]))
-    if "just now" in t or t.strip()=="now":
-        return now
-    return None
+        return None, None, None
+    txt = text.replace(",", "").strip()
+    if "£" in txt:
+        cur = "GBP"
+    elif "€" in txt:
+        cur = "EUR"
+    elif "$" in txt:
+        cur = "USD"
+    else:
+        cur = None
+    cleaned = (
+        txt.replace("£", "")
+        .replace("€", "")
+        .replace("$", "")
+        .replace("/hr", "")
+        .replace("/HR", "")
+    )
+    numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
+    if not numbers:
+        return None, None, cur
+    nums = list(map(float, numbers))
+    if len(nums) == 1:
+        return nums[0], nums[0], cur
+    else:
+        return nums[0], nums[-1], cur
 
-def fetch_from_page(url: str, keyword: str):
-    try:
-        r = httpx.get(url, headers=HEADERS, timeout=20)
-        if r.status_code != 200:
-            return []
-    except:
-        return []
-    soup = BeautifulSoup(r.text, "html.parser")
-    items=[]
-    now = datetime.utcnow()
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if "/freelance-jobs/" not in href:
+def _parse_cards(html: str, kw: str):
+    soup = BeautifulSoup(html, "html.parser")
+    items = []
+
+    cards = []
+    for li in soup.find_all("li"):
+        classes = " ".join(li.get("class") or [])
+        if "list__item" in classes:
+            cards.append(li)
+
+    for card in cards:
+        job_link = None
+        for a in card.find_all("a", href=True):
+            href = a["href"]
+            if "/freelance-jobs/" in href:
+                job_link = a
+                break
+
+        if not job_link:
             continue
-        title = a.get_text(strip=True)
-        # find relative time nearby
-        time_tag = a.find_next("span")
-        timestamp=None
-        if time_tag:
-            timestamp = parse_relative_time(time_tag.get_text(strip=True))
-        if not timestamp:
+
+        title = _clean(job_link.get_text())
+        href = job_link["href"]
+        if href.startswith("/"):
+            href = "https://www.peopleperhour.com" + href
+
+        p_tags = card.find_all("p")
+        description = ""
+        if p_tags:
+            description = _clean(p_tags[-1].get_text())
+
+        hay = f"{title} {description}".lower()
+        if kw and kw.lower() not in hay:
             continue
-        if timestamp < now - timedelta(hours=24):
-            continue
-        full_url = href if href.startswith("http") else "https://www.peopleperhour.com"+href
+
+        price_text = ""
+        for div in card.find_all("div"):
+            classes = " ".join(div.get("class") or [])
+            if "card__price" in classes:
+                price_text = _clean(div.get_text())
+                break
+
+        bmin, bmax, cur = _extract_budget(price_text)
+
         items.append({
-            "source":"peopleperhour",
-            "matched_keyword":keyword,
-            "title":title,
-            "description":"",
-            "external_id":full_url,
-            "url":full_url,
-            "proposal_url":full_url,
-            "original_url":full_url,
-            "budget_min":None,
-            "budget_max":None,
-            "original_currency":None,
-            "currency":None,
-            "affiliate":False,
-            "time_submitted":timestamp.isoformat()
+            "source": "peopleperhour",
+            "matched_keyword": kw,
+            "title": title,
+            "description": description,
+            "external_id": href,
+            "url": href,
+            "proposal_url": href,
+            "original_url": href,
+            "budget_min": bmin,
+            "budget_max": bmax,
+            "original_currency": cur,
+            "currency": cur,
+            "time_submitted": None,
+            "affiliate": False,
         })
+
     return items
 
-def fetch_search(keyword: str):
-    url = f"https://www.peopleperhour.com/freelance-jobs?q={keyword}"
-    return fetch_from_page(url, keyword)
-
 def get_items(keywords):
-    seen=set()
-    out=[]
+    if not keywords:
+        return []
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        )
+    }
+
+    all_items = []
+
     for kw in keywords:
-        kl = kw.lower()
-        if kl in CATEGORY_MAP:
-            for it in fetch_from_page(CATEGORY_MAP[kl], kl):
-                if it["external_id"] not in seen:
-                    seen.add(it["external_id"])
-                    out.append(it)
-        for it in fetch_search(kl):
-            if it["external_id"] not in seen:
-                seen.add(it["external_id"])
-                out.append(it)
-    return out
+        if not kw:
+            continue
+
+        url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
+
+        try:
+            resp = httpx.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+        except Exception:
+            continue
+
+        batch = _parse_cards(resp.text, kw)
+        all_items.extend(batch)
+
+    return all_items
