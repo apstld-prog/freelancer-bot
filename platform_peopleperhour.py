@@ -1,128 +1,65 @@
-import httpx
+# platform_peopleperhour.py — clean, stable, freelancer-like structure
+import requests
 from bs4 import BeautifulSoup
+from datetime import datetime
 import re
 
-def _clean(s: str) -> str:
-    return (s or "").strip()
+BASE_URL = "https://www.peopleperhour.com"
+SEARCH_URL = BASE_URL + "/freelance-jobs"
 
-def _extract_budget(text):
+def parse_budget(text):
     if not text:
         return None, None, None
-    txt = text.replace(",", "").strip()
-    if "£" in txt:
-        cur = "GBP"
-    elif "€" in txt:
-        cur = "EUR"
-    elif "$" in txt:
-        cur = "USD"
-    else:
-        cur = None
-    cleaned = (
-        txt.replace("£", "")
-        .replace("€", "")
-        .replace("$", "")
-        .replace("/hr", "")
-        .replace("/HR", "")
-    )
-    numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
-    if not numbers:
-        return None, None, cur
-    nums = list(map(float, numbers))
-    if len(nums) == 1:
+    text = text.replace(",", "").strip()
+    m = re.findall(r"(\d+)", text)
+    if not m:
+        return None, None, None
+    nums = list(map(float, m))
+    if "£" in text: cur = "GBP"
+    elif "€" in text: cur = "EUR"
+    elif "$" in text: cur = "USD"
+    else: cur = None
+    if len(nums)==1:
         return nums[0], nums[0], cur
-    else:
-        return nums[0], nums[-1], cur
-
-def _parse_cards(html: str, kw: str):
-    soup = BeautifulSoup(html, "html.parser")
-    items = []
-
-    cards = []
-    for li in soup.find_all("li"):
-        classes = " ".join(li.get("class") or [])
-        if "list__item" in classes:
-            cards.append(li)
-
-    for card in cards:
-        job_link = None
-        for a in card.find_all("a", href=True):
-            href = a["href"]
-            if "/freelance-jobs/" in href:
-                job_link = a
-                break
-
-        if not job_link:
-            continue
-
-        title = _clean(job_link.get_text())
-        href = job_link["href"]
-        if href.startswith("/"):
-            href = "https://www.peopleperhour.com" + href
-
-        p_tags = card.find_all("p")
-        description = ""
-        if p_tags:
-            description = _clean(p_tags[-1].get_text())
-
-        hay = f"{title} {description}".lower()
-        if kw and kw.lower() not in hay:
-            continue
-
-        price_text = ""
-        for div in card.find_all("div"):
-            classes = " ".join(div.get("class") or [])
-            if "card__price" in classes:
-                price_text = _clean(div.get_text())
-                break
-
-        bmin, bmax, cur = _extract_budget(price_text)
-
-        items.append({
-            "source": "peopleperhour",
-            "matched_keyword": kw,
-            "title": title,
-            "description": description,
-            "external_id": href,
-            "url": href,
-            "proposal_url": href,
-            "original_url": href,
-            "budget_min": bmin,
-            "budget_max": bmax,
-            "original_currency": cur,
-            "currency": cur,
-            "time_submitted": None,
-            "affiliate": False,
-        })
-
-    return items
+    return nums[0], nums[-1], cur
 
 def get_items(keywords):
-    if not keywords:
-        return []
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        )
-    }
-
-    all_items = []
-
-    for kw in keywords:
-        if not kw:
-            continue
-
-        url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
-
-        try:
-            resp = httpx.get(url, headers=headers, timeout=30)
-            resp.raise_for_status()
-        except Exception:
-            continue
-
-        batch = _parse_cards(resp.text, kw)
-        all_items.extend(batch)
-
-    return all_items
+    items = []
+    try:
+        for kw in keywords:
+            resp = requests.get(SEARCH_URL, params={"filter": kw}, timeout=10)
+            if resp.status_code != 200:
+                continue
+            soup = BeautifulSoup(resp.text, "html.parser")
+            cards = soup.select("div.job-listing-card")
+            for c in cards:
+                title_el = c.select_one("h3")
+                title = title_el.get_text(strip=True) if title_el else ""
+                link = title_el.a["href"] if title_el and title_el.a else None
+                if link and not link.startswith("http"):
+                    link = BASE_URL + link
+                desc_el = c.select_one("p.description")
+                desc = desc_el.get_text(" ", strip=True) if desc_el else ""
+                budget_el = c.select_one(".budget")
+                btxt = budget_el.get_text(" ", strip=True) if budget_el else ""
+                bmin,bmax,cur = parse_budget(btxt)
+                ts = int(datetime.utcnow().timestamp())
+                items.append({
+                    "source": "peopleperhour",
+                    "matched_keyword": kw,
+                    "title": title,
+                    "description": desc,
+                    "external_id": link,
+                    "url": link,
+                    "proposal_url": link,
+                    "original_url": link,
+                    "budget_min": bmin,
+                    "budget_max": bmax,
+                    "original_currency": cur,
+                    "currency": cur,
+                    "time_submitted": ts,
+                    "affiliate": False
+                })
+    except Exception:
+        pass
+    return items
