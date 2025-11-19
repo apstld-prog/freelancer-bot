@@ -38,16 +38,16 @@ def fetch_all(keywords_query: Optional[str] = None) -> List[Dict]:
         except Exception:
             pass
 
-# --- PEOPLEPERHOUR ---
-import platform_peopleperhour as pph
-if PLATFORMS.get("peopleperhour"):
-    try:
-        kws = _normalize_kw_list(keywords_query.split(",") if keywords_query else [])
-        for i in pph.get_items(kws):
-            i["affiliate"] = False
-            out.append(i)
-    except Exception:
-        pass
+    # --- PEOPLEPERHOUR ---
+    import platform_peopleperhour as pph
+    if PLATFORMS.get("peopleperhour"):
+        try:
+            kws = _normalize_kw_list(keywords_query.split(",") if keywords_query else [])
+            for i in pph.get_items(kws):
+                i["affiliate"] = False
+                out.append(i)
+        except Exception:
+            pass
 
 
     if PLATFORMS.get("skywalker"):
