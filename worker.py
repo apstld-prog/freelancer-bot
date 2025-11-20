@@ -1,5 +1,5 @@
 # worker.py — fetch, per-user filter, annotate match, dedup, currency prepare (prefers non-USD)
-# NEW: Add humanized "posted_ago" from time_submitted (if available)
+# NEW: Add humanized "posted_ago" from time_submitted (if available) 
 
 from typing import List, Dict, Optional, Tuple
 from config import (

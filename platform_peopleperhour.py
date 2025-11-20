@@ -3,7 +3,7 @@
 # - Adds time_submitted (epoch seconds)
 # - Normalizes fields: source, url, original_url, proposal_url, original_currency, affiliate
 #
-# NOTE: It still respects ENABLE_PPH and P_PEOPLEPERHOUR env flags.
+# NOTE: It still respects ENABLE_PPH and P_PEOPLEPERHOUR env flags. 
 
 import os
 import re
