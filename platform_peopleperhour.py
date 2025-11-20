@@ -1,54 +1,57 @@
-# platform_peopleperhour.py — FULL CIRCUMVENT MODE
+# platform_peopleperhour.py — TOR TEST MODE + Fallback
 import httpx, random, time, re
 from typing import List, Dict, Optional
 
-# FULL bypass-style pool (placeholders)
+# TOR Exit Nodes (free, testing only)
 PROXY_POOL = [
-    "http://pph-exit-1.resi:8000",
-    "http://pph-exit-2.resi:8000",
-    "http://pph-exit-3.resi:8000",
-    "http://pph-exit-4.resi:8000",
-    "http://pph-exit-5.resi:8000",
+    "http://185.220.101.4:80",
+    "http://185.220.101.5:80",
+    "http://185.220.101.6:80",
+    "http://185.220.101.7:80",
+    "http://185.220.102.4:80",
+    "http://185.220.102.6:80",
 ]
 
 _UAS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605 Safari/605.1.15",
 ]
 
 BASE = "https://www.peopleperhour.com"
 
-def _proxy_get(url: str, timeout=12.0) -> Optional[str]:
-    for attempt in range(6):
-        proxy = random.choice(PROXY_POOL)
-        headers = {
-            "User-Agent": random.choice(_UAS),
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": BASE,
-            "Connection": "keep-alive",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        }
-        try:
-            with httpx.Client(
-                proxies=proxy,
-                headers=headers,
-                timeout=timeout,
-                follow_redirects=True,
-                verify=False
-            ) as c:
-                r = c.get(url)
-                if r.status_code in (403,429):
-                    time.sleep(1.2 + attempt*0.8)
-                    continue
-                if r.status_code >= 400:
-                    return None
-                return r.text
-        except:
-            time.sleep(0.5 + attempt*0.6)
+def _proxy_get(url: str, timeout=14.0) -> Optional[str]:
+    # Tor fallback logic
+    random.shuffle(PROXY_POOL)
+    for proxy in PROXY_POOL:
+        for attempt in range(3):
+            headers = {
+                "User-Agent": random.choice(_UAS),
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Connection": "keep-alive",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Referer": BASE,
+            }
+            try:
+                with httpx.Client(
+                    proxies=proxy,
+                    headers=headers,
+                    timeout=timeout,
+                    follow_redirects=True,
+                    verify=False
+                ) as c:
+                    r = c.get(url)
+                    if r.status_code in (403,429):
+                        time.sleep(1.2 + attempt*0.8)
+                        continue
+                    if r.status_code < 400:
+                        return r.text
+            except:
+                time.sleep(0.5 + attempt)
     return None
 
+# RSS patterns
 RE_ITEM = re.compile(r"<item>(.*?)</item>", re.S)
 RE_TITLE = re.compile(r"<title>(.*?)</title>", re.S)
 RE_LINK = re.compile(r"<link>(.*?)</link>", re.S)
