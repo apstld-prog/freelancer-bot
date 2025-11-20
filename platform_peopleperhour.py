@@ -1,183 +1,133 @@
-import httpx
-from bs4 import BeautifulSoup
-import re
+# platform_peopleperhour.py — Enhanced scraping with premium proxies
+import httpx, re, random, time
+from typing import List, Dict, Optional
 
-# ---------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------
+PROXY_POOL = [
+    "http://premium-proxy1.example:8000",
+    "http://premium-proxy2.example:8000",
+    "http://premium-proxy3.example:8000",
+    "http://premium-proxy4.example:8000",
+    "http://premium-proxy5.example:8000",
+]
 
+_UAS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17 Safari/605.1.15",
+]
 
-def _clean(s: str) -> str:
-    return (s or "").strip()
+BASE = "https://www.peopleperhour.com"
 
+RE_ITEM = re.compile(r"<item>(.*?)</item>", re.S)
+RE_TITLE = re.compile(r"<title>(.*?)</title>", re.S)
+RE_LINK = re.compile(r"<link>(.*?)</link>", re.S)
+RE_DATE = re.compile(r"<pubDate>(.*?)</pubDate>", re.S)
+RE_DESC = re.compile(r"<description>(.*?)</description>", re.S)
 
-def _extract_budget(text):
-    """
-    Παίρνει κάτι όπως:
-      "$40"
-      "£50 - £200"
-      "€120"
-      "$37/hr"
-    και επιστρέφει:
-      (min, max, currency)
-    """
-    if not text:
-        return None, None, None
+BUDGET_RE = re.compile(
+    r"(\d+[.,]?\d*)\s*(USD|EUR|GBP)|\$(\d+[.,]?\d*)|€(\d+[.,]?\d*)|£(\d+[.,]?\d*)",
+    re.I
+)
 
-    txt = text.replace(",", "").strip()
-
-    # currency detection
-    if "£" in txt:
-        cur = "GBP"
-    elif "€" in txt:
-        cur = "EUR"
-    elif "$" in txt:
-        cur = "USD"
-    else:
-        cur = None
-
-    # βγάζουμε σύμβολα και /hr κτλ.
-    cleaned = (
-        txt.replace("£", "")
-        .replace("€", "")
-        .replace("$", "")
-        .replace("/hr", "")
-        .replace("/HR", "")
-    )
-
-    numbers = re.findall(r"\d+(?:\.\d+)?", cleaned)
-    if not numbers:
-        return None, None, cur
-
-    nums = list(map(float, numbers))
-
-    if len(nums) == 1:
-        return nums[0], nums[0], cur
-    else:
-        return nums[0], nums[-1], cur
-
-
-# ---------------------------------------------------------
-# HTML parsing για μία σελίδα
-# ---------------------------------------------------------
-
-
-def _parse_cards(html: str, kw: str):
-    """
-    Διαβάζει το HTML της:
-      https://www.peopleperhour.com/freelance-jobs?q=KEYWORD
-
-    και γυρνάει λίστα από items με:
-      title, description, original_url, budget_min, budget_max,
-      original_currency, matched_keyword, source="peopleperhour"
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    items = []
-
-    # Τα <li> έχουν class σαν "list__item⤍List⤚2ytmm"
-    cards = []
-    for li in soup.find_all("li"):
-        classes = " ".join(li.get("class") or [])
-        if "list__item" in classes:
-            cards.append(li)
-
-    for card in cards:
-        # ------------------------- URL & Title -------------------------
-        job_link = None
-        for a in card.find_all("a", href=True):
-            href = a["href"]
-            # πραγματικά job links
-            if "/freelance-jobs/" in href:
-                job_link = a
-                break
-
-        if not job_link:
-            continue
-
-        title = _clean(job_link.get_text())
-        href = job_link["href"]
-        if href.startswith("/"):
-            href = "https://www.peopleperhour.com" + href
-
-        # ------------------------- Description -------------------------
-        # Συνήθως το τελευταίο <p> μέσα στην κάρτα είναι η περιγραφή
-        p_tags = card.find_all("p")
-        description = ""
-        if p_tags:
-            description = _clean(p_tags[-1].get_text())
-
-        # Strict keyword filter όπως στο Freelancer:
-        # κρατάμε μόνο αν το kw υπάρχει σε title+description
-        hay = f"{title} {description}".lower()
-        if kw and kw.lower() not in hay:
-            continue
-
-        # ------------------------- Budget / Price -------------------------
-        price_text = ""
-        for div in card.find_all("div"):
-            classes = " ".join(div.get("class") or [])
-            if "card__price" in classes:
-                price_text = _clean(div.get_text())
-                break
-
-        bmin, bmax, cur = _extract_budget(price_text)
-
-        item = {
-            "source": "peopleperhour",
-            "matched_keyword": kw,
-            "title": title,
-            "description": description,
-            "original_url": href,
-            "budget_min": bmin,
-            "budget_max": bmax,
-            "original_currency": cur,
-        }
-        items.append(item)
-
-    return items
-
-
-# ---------------------------------------------------------
-# Public API (όπως το καλεί ο worker)
-# ---------------------------------------------------------
-
-
-def get_items(keywords):
-    """
-    Scrapes PeoplePerHour search results:
-      https://www.peopleperhour.com/freelance-jobs?q=KEYWORD
-
-    και επιστρέφει items όπως ο freelancer scraper.
-    """
-
-    if not keywords:
-        return []
-
+def _proxy_get(url: str, timeout=8.0) -> Optional[str]:
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        )
+        "User-Agent": random.choice(_UAS),
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": BASE,
+        "Connection": "keep-alive"
+    }
+    for attempt in range(5):
+        proxy = random.choice(PROXY_POOL)
+        try:
+            with httpx.Client(proxies=proxy, headers=headers, timeout=timeout, follow_redirects=True) as c:
+                r = c.get(url)
+                if r.status_code == 429:
+                    time.sleep(1 + attempt)
+                    continue
+                if r.status_code >= 400:
+                    return None
+                return r.text
+        except Exception:
+            time.sleep(0.7 + attempt * 0.5)
+    return None
+
+def _parse_budget(text: str):
+    mins = []
+    maxs = []
+    currency = "USD"
+    for m in BUDGET_RE.findall(text):
+        nums = [x for x in m if x.replace('.', '', 1).isdigit()]
+        if nums:
+            val = float(nums[0].replace(",", "."))
+            mins.append(val)
+            maxs.append(val)
+        cur = [c for c in m if c in ["USD","EUR","GBP"]]
+        if cur:
+            currency = cur[0]
+    if not mins:
+        return None, None, None
+    return min(mins), max(maxs), currency
+
+def _scrape_job(url: str) -> Dict:
+    html = _proxy_get(url)
+    if not html:
+        return {}
+    budget_min, budget_max, cur = _parse_budget(html)
+    return {
+        "budget_min": budget_min,
+        "budget_max": budget_max,
+        "currency": cur,
+        "currency_display": cur or "USD",
+        "description": "",
     }
 
-    all_items = []
-
-    for kw in keywords:
-        if not kw:
+def _parse_rss_items(xml: str) -> List[Dict]:
+    items=[]
+    if not xml: return items
+    raw_items = RE_ITEM.findall(xml)
+    for block in raw_items:
+        title = RE_TITLE.search(block)
+        link = RE_LINK.search(block)
+        desc = RE_DESC.search(block)
+        date = RE_DATE.search(block)
+        title = title.group(1).strip() if title else ""
+        link = link.group(1).strip() if link else ""
+        desc = desc.group(1).strip() if desc else ""
+        date = date.group(1).strip() if date else ""
+        if "peopleperhour.com" not in link:
             continue
+        scraped = _scrape_job(link)
+        items.append({
+            "title": title,
+            "original_url": link,
+            "proposal_url": link,
+            "description": desc,
+            "description_html": desc,
+            "time_submitted": date,
+            "source": "peopleperhour",
+            **scraped
+        })
+    return items
 
-        url = f"https://www.peopleperhour.com/freelance-jobs?q={kw}"
-
-        try:
-            resp = httpx.get(url, headers=headers, timeout=30)
-            resp.raise_for_status()
-        except Exception as e:
-            # Σε αποτυχία, απλά συνεχίζουμε με επόμενο keyword
-            print(f"[PPH] Error for kw={kw}: {e}")
+def get_items(keywords: List[str]) -> List[Dict]:
+    out=[]
+    kws = [k.lower() for k in keywords]
+    for kw in kws:
+        url = f"{BASE}/freelance-jobs?rss=1&search={kw}"
+        xml = _proxy_get(url)
+        if not xml:
             continue
-
-        batch = _parse_cards(resp.text, kw)
-        all_items.extend(batch)
-
-    return all_items
+        parsed = _parse_rss_items(xml)
+        for it in parsed:
+            it["matched_keyword"] = kw
+            out.append(it)
+    if not out:
+        url = f"{BASE}/freelance-jobs?rss=1&page=1"
+        xml = _proxy_get(url)
+        parsed = _parse_rss_items(xml)
+        for it in parsed:
+            for kw in kws:
+                if kw in it.get("title","").lower():
+                    it["matched_keyword"] = kw
+                    out.append(it)
+    return out
