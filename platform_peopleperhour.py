@@ -1,135 +1,141 @@
-# platform_peopleperhour.py — TOR TEST MODE + Fallback
-import httpx, random, time, re
+# platform_peopleperhour.py — Playwright Proxy Edition
+# FULL VERSION — fetch search results + parse job pages
+# NO RSS, NO TOR, NO httpx proxy. Everything goes through your PPH Docker Proxy.
+
+import re
+import time
+import json
 from typing import List, Dict, Optional
+from playwright.sync_api import sync_playwright
+import os
 
-# TOR Exit Nodes (free, testing only)
-PROXY_POOL = [
-    "http://185.220.101.4:80",
-    "http://185.220.101.5:80",
-    "http://185.220.101.6:80",
-    "http://185.220.101.7:80",
-    "http://185.220.102.4:80",
-    "http://185.220.102.6:80",
-]
+# -------------------------------------------------
+# SETTINGS
+# -------------------------------------------------
 
-_UAS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605 Safari/605.1.15",
-]
+PPH_PROXY = os.getenv("PPH_PROXY_URL", "").strip()
+if not PPH_PROXY:
+    # failsafe για να μην σκάσει ο worker
+    PPH_PROXY = "https://pph-proxy.onrender.com"
 
 BASE = "https://www.peopleperhour.com"
 
-def _proxy_get(url: str, timeout=14.0) -> Optional[str]:
-    # Tor fallback logic
-    random.shuffle(PROXY_POOL)
-    for proxy in PROXY_POOL:
-        for attempt in range(3):
-            headers = {
-                "User-Agent": random.choice(_UAS),
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Connection": "keep-alive",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Referer": BASE,
-            }
-            try:
-                with httpx.Client(
-                    proxies=proxy,
-                    headers=headers,
-                    timeout=timeout,
-                    follow_redirects=True,
-                    verify=False
-                ) as c:
-                    r = c.get(url)
-                    if r.status_code in (403,429):
-                        time.sleep(1.2 + attempt*0.8)
-                        continue
-                    if r.status_code < 400:
-                        return r.text
-            except:
-                time.sleep(0.5 + attempt)
-    return None
+# regex extractors for job page
+META_PRICE = re.compile(r'"peopleperhourcom:price"\s+content="([\d.]+)"')
+META_CURR  = re.compile(r'"peopleperhourcom:currency"\s+content="([^"]+)"')
+META_DESC  = re.compile(r'<meta data-react-helmet="true" name="description" content="(.*?)"', re.S)
 
-# RSS patterns
-RE_ITEM = re.compile(r"<item>(.*?)</item>", re.S)
-RE_TITLE = re.compile(r"<title>(.*?)</title>", re.S)
-RE_LINK = re.compile(r"<link>(.*?)</link>", re.S)
-RE_DATE = re.compile(r"<pubDate>(.*?)</pubDate>", re.S)
-RE_DESC = re.compile(r"<description>(.*?)</description>", re.S)
+# -------------------------------------------------
+# Helper: launch browser through proxy
+# -------------------------------------------------
+def _launch_browser():
+    """Launch Chromium in Playwright through your proxy"""
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ],
+    )
+    context = browser.new_context(
+        proxy={"server": PPH_PROXY}
+    )
+    return playwright, browser, context
 
-def _parse_budget(text: str):
-    pat = re.compile(r"(\d+[.,]?\d*)\s*(USD|EUR|GBP)|[$€£](\d+[.,]?\d*)", re.I)
-    mins=[]; maxs=[]; cur="USD"
-    for m in pat.findall(text):
-        nums=[x for x in m if x and x.replace('.','',1).isdigit()]
-        if nums:
-            val=float(nums[0].replace(",","."))
-            mins.append(val)
-            maxs.append(val)
-        cc=[x for x in m if x in ["USD","EUR","GBP"]]
-        if cc: cur=cc[0]
-    if not mins: return None,None,None
-    return min(mins), max(maxs), cur
+# -------------------------------------------------
+# Fetch search result URLs
+# -------------------------------------------------
+def _search_urls(keyword: str) -> List[str]:
+    """Retrieve up to ~20 job links from PPH search"""
+    keyword = keyword.strip().replace(" ", "%20")
+    url = f"{BASE}/freelance-jobs?q={keyword}"
 
+    playwright, browser, context = _launch_browser()
+    page = context.new_page()
+
+    try:
+        page.goto(url, timeout=30000)
+        page.wait_for_timeout(1500)
+
+        links = page.locator("a[href*='/freelance-jobs/']").all()
+        out = []
+        for a in links:
+            href = a.get_attribute("href") or ""
+            if "/freelance-jobs/" in href and "?" not in href:
+                full = BASE + href if href.startswith("/") else href
+                if full not in out:
+                    out.append(full)
+        return out[:20]
+
+    except Exception:
+        return []
+
+    finally:
+        context.close()
+        browser.close()
+        playwright.stop()
+
+# -------------------------------------------------
+# Extract details from job page
+# -------------------------------------------------
 def _scrape_job(url: str) -> Dict:
-    html=_proxy_get(url)
-    if not html: return {}
-    bmin,bmax,cur=_parse_budget(html)
-    return {
-        "budget_min": bmin,
-        "budget_max": bmax,
-        "currency": cur,
-        "currency_display": cur or "USD",
-        "description": "",
-    }
+    playwright, browser, context = _launch_browser()
+    page = context.new_page()
 
-def _parse_rss_items(xml: str) -> List[Dict]:
-    items=[]
-    if not xml: return items
-    raw=RE_ITEM.findall(xml)
-    for block in raw:
-        title=RE_TITLE.search(block)
-        link=RE_LINK.search(block)
-        desc=RE_DESC.search(block)
-        date=RE_DATE.search(block)
-        title=title.group(1).strip() if title else ""
-        link=link.group(1).strip() if link else ""
-        desc=desc.group(1).strip() if desc else ""
-        date=date.group(1).strip() if date else ""
-        if "peopleperhour.com" not in link:
-            continue
-        scraped=_scrape_job(link)
-        items.append({
-            "title": title,
-            "original_url": link,
-            "proposal_url": link,
+    try:
+        page.goto(url, timeout=40000)
+        html = page.content()
+
+        # extract fields
+        price = None
+        curr = None
+
+        m = META_PRICE.search(html)
+        if m:
+            try: price = float(m.group(1))
+            except: pass
+
+        m = META_CURR.search(html)
+        if m:
+            curr = m.group(1).replace("£","GBP").replace("€","EUR")
+
+        m = META_DESC.search(html)
+        desc = m.group(1).strip() if m else ""
+
+        return {
+            "title": page.title() or "",
+            "budget_min": price,
+            "budget_max": price,
+            "currency": curr or "USD",
+            "currency_display": curr or "USD",
             "description": desc,
             "description_html": desc,
-            "time_submitted": date,
+            "original_url": url,
+            "proposal_url": url,
             "source": "peopleperhour",
-            **scraped
-        })
-    return items
+            "time_submitted": int(time.time()),
+        }
 
+    except Exception:
+        return {}
+
+    finally:
+        context.close()
+        browser.close()
+        playwright.stop()
+
+# -------------------------------------------------
+# Public API
+# -------------------------------------------------
 def get_items(keywords: List[str]) -> List[Dict]:
-    out=[]
-    kws=[k.lower() for k in keywords]
-    for kw in kws:
-        url=f"{BASE}/freelance-jobs?rss=1&search={kw}"
-        xml=_proxy_get(url)
-        if xml:
-            parsed=_parse_rss_items(xml)
-            for it in parsed:
-                it["matched_keyword"]=kw
-                out.append(it)
-    if not out:
-        url=f"{BASE}/freelance-jobs?rss=1&page=1"
-        xml=_proxy_get(url)
-        parsed=_parse_rss_items(xml)
-        for it in parsed:
-            for kw in kws:
-                if kw in it.get("title","").lower():
-                    it["matched_keyword"]=kw
-                    out.append(it)
+    """Search keyword → get URLs → scrape each job page."""
+    out: List[Dict] = []
+    for kw in keywords:
+        links = _search_urls(kw)
+        for url in links:
+            data = _scrape_job(url)
+            if data:
+                data["matched_keyword"] = kw
+                out.append(data)
     return out
