@@ -1,27 +1,14 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+set -e
 
-echo "[worker] launching bot + worker..."
+echo "========================================"
+echo "🚀 STARTING UNIFIED WORKER"
+echo "========================================"
+echo "Time: $(date)"
+echo "Python: $(python3 --version)"
+echo "----------------------------------------"
 
-start_bg() {
-  local name="$1"; shift
-  (stdbuf -oL -eL "$@" 2>&1 | awk -v p="[$name] " '{ print p $0; fflush() }') &
-  echo $!
-}
+cd /opt/render/project/src
 
-worker_pid=$(start_bg worker python worker.py)
-bot_pid=$(start_bg bot    python bot.py)
-
-echo "[worker] pids -> worker:$worker_pid bot:$bot_pid"
-
-cleanup() {
-  echo "[worker] terminating children..."
-  kill "$worker_pid" "$bot_pid" 2>/dev/null || true
-}
-trap cleanup SIGINT SIGTERM
-
-# Αν πέσει ένα, ρίξε και το άλλο για καθαρό restart από το Render
-wait -n || true
-cleanup
-wait || true
-echo "[worker] stopped"
+# Run the unified worker runner
+exec python3 worker_runner.py
