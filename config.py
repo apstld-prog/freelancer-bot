@@ -1,4 +1,3 @@
-
 import os
 
 # --- Core env ---
@@ -43,7 +42,7 @@ PLATFORMS = {
 }
 
 # Feeds and endpoints
-SKYWALKER_RSS = os.getenv("SKYWALKER_RSS", "https://www.skywalker.gr/jobs/feed")
+SKYWALKER_RSS = os.getenv("SKYWALKER_RSS", "https://www.skywalker.gr/jobs/feed/?post_type=job_listing")
 CAREERJET_RSS = os.getenv("CAREERJET_RSS", "https://www.careerjet.gr/search/rss?l=Greece")  # placeholder
 KARIERA_RSS = os.getenv("KARIERA_RSS", "")  # placeholder
 
