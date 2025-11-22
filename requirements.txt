@@ -1,6 +1,6 @@
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
-python-telegram-bot==20.6
+python-telegram-bot[job-queue]==20.6
 httpx==0.25.2
 SQLAlchemy==2.0.31
 psycopg2-binary==2.9.9
@@ -9,5 +9,4 @@ requests==2.32.3
 beautifulsoup4==4.12.3
 playwright
 bs4
-httpx
 feedparser
