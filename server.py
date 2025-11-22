@@ -1,5 +1,7 @@
 import os
 import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request, Response, HTTPException
 from telegram import Update
 from telegram.ext import Application
@@ -12,21 +14,27 @@ log = logging.getLogger("server")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777").strip()
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()  # e.g. https://freelancer-bot-ns7s.onrender.com
 
-app = FastAPI()
-
 # Build a single global Application instance
 application: Application = build_application()
 
-# Flags to avoid double init/stop in case of multiple lifecycle events
+# Flags to avoid double init/stop
 _is_initialized = False
 _is_started = False
 
 
-@app.on_event("startup")
-async def on_startup():
-    """Initialize and start the Telegram Application, then set webhook."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI lifespan handler = replacement for @app.on_event("startup"/"shutdown").
+
+    Κάνει:
+    - initialize + start το Telegram Application
+    - set webhook
+    - στο τέλος κάνει stop + shutdown
+    """
     global _is_initialized, _is_started
 
+    # ---------- STARTUP ----------
     try:
         if not _is_initialized:
             await application.initialize()
@@ -47,16 +55,15 @@ async def on_startup():
             )
             log.info("Webhook set to %s", url)
 
-        log.info("✅ Bot started via FastAPI")
+        log.info("✅ Bot started via FastAPI lifespan")
 
     except Exception:
-        log.exception("Startup failed")
+        log.exception("Startup (lifespan) failed")
 
+    # Δίνουμε τον έλεγχο στην FastAPI
+    yield
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    """Stop and shutdown the Telegram Application."""
-    global _is_initialized, _is_started
+    # ---------- SHUTDOWN ----------
     try:
         if _is_started:
             await application.stop()
@@ -67,8 +74,15 @@ async def on_shutdown():
             await application.shutdown()
             _is_initialized = False
             log.info("Application.shutdown() done")
+
+        log.info("✅ Bot stopped via FastAPI lifespan")
+
     except Exception:
-        log.exception("Shutdown failed")
+        log.exception("Shutdown (lifespan) failed")
+
+
+# Δημιουργούμε το app με lifespan (χωρίς @app.on_event)
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
@@ -92,24 +106,31 @@ async def tg_webhook(secret: str, request: Request):
     try:
         if "message" in data:
             msg = data["message"]
-            log.info("Incoming message: chat=%s text=%s",
-                     msg.get("chat", {}).get("id"),
-                     msg.get("text"))
+            log.info(
+                "Incoming message: chat=%s text=%s",
+                msg.get("chat", {}).get("id"),
+                msg.get("text"),
+            )
         if "callback_query" in data:
             cq = data["callback_query"]
-            log.info("Incoming callback: from=%s data=%s",
-                     cq.get("from", {}).get("id"),
-                     cq.get("data"))
+            log.info(
+                "Incoming callback: from=%s data=%s",
+                cq.get("from", {}).get("id"),
+                cq.get("data"),
+            )
     except Exception:
+        # Δεν μας νοιάζει αν αποτύχει το logging
         pass
 
     try:
-        # Make sure app is initialized/started (idempotent)
+        # Safety net: αν για κάποιο λόγο δεν είναι initialized/started, το
+        # ξανακάνουμε εδώ (idempotent χάρη στα flags).
         global _is_initialized, _is_started
         if not _is_initialized:
             await application.initialize()
             _is_initialized = True
             log.info("Re-initialize Application in webhook")
+
         if not _is_started:
             await application.start()
             _is_started = True
@@ -117,6 +138,7 @@ async def tg_webhook(secret: str, request: Request):
 
         update = Update.de_json(data=data, bot=application.bot)
         await application.process_update(update)
+
     except Exception:
         log.exception("Failed to process update")
         return Response(status_code=200)
