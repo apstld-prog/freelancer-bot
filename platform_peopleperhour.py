@@ -1,141 +1,118 @@
-# platform_peopleperhour.py — Playwright Proxy Edition
-# FULL VERSION — fetch search results + parse job pages
-# NO RSS, NO TOR, NO httpx proxy. Everything goes through your PPH Docker Proxy.
+# platform_peopleperhour.py — SAFE MODE via Proxy, 10 pages per keyword, no duplicate job pages
 
-import re
-import time
-import json
+import httpx, time, re
 from typing import List, Dict, Optional
-from playwright.sync_api import sync_playwright
-import os
 
-# -------------------------------------------------
-# SETTINGS
-# -------------------------------------------------
-
-PPH_PROXY = os.getenv("PPH_PROXY_URL", "").strip()
-if not PPH_PROXY:
-    # failsafe για να μην σκάσει ο worker
-    PPH_PROXY = "https://pph-proxy.onrender.com"
+PPH_PROXY = "https://pph-proxy-chris.fly.dev/?url="
 
 BASE = "https://www.peopleperhour.com"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 
-# regex extractors for job page
-META_PRICE = re.compile(r'"peopleperhourcom:price"\s+content="([\d.]+)"')
-META_CURR  = re.compile(r'"peopleperhourcom:currency"\s+content="([^"]+)"')
-META_DESC  = re.compile(r'<meta data-react-helmet="true" name="description" content="(.*?)"', re.S)
+# Regex parsers
+RE_ITEM = re.compile(r"<item>(.*?)</item>", re.S)
+RE_TITLE = re.compile(r"<title>(.*?)</title>", re.S)
+RE_LINK = re.compile(r"<link>(.*?)</link>", re.S)
+RE_DATE = re.compile(r"<pubDate>(.*?)</pubDate>", re.S)
+RE_DESC = re.compile(r"<description>(.*?)</description>", re.S)
 
-# -------------------------------------------------
-# Helper: launch browser through proxy
-# -------------------------------------------------
-def _launch_browser():
-    """Launch Chromium in Playwright through your proxy"""
-    playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-        ],
-    )
-    context = browser.new_context(
-        proxy={"server": PPH_PROXY}
-    )
-    return playwright, browser, context
-
-# -------------------------------------------------
-# Fetch search result URLs
-# -------------------------------------------------
-def _search_urls(keyword: str) -> List[str]:
-    """Retrieve up to ~20 job links from PPH search"""
-    keyword = keyword.strip().replace(" ", "%20")
-    url = f"{BASE}/freelance-jobs?q={keyword}"
-
-    playwright, browser, context = _launch_browser()
-    page = context.new_page()
-
+def _proxy_get(url: str, timeout=25) -> Optional[str]:
+    """Fetch via proxy only. SAFE MODE."""
+    proxy_url = f"{PPH_PROXY}{url}"
     try:
-        page.goto(url, timeout=30000)
-        page.wait_for_timeout(1500)
-
-        links = page.locator("a[href*='/freelance-jobs/']").all()
-        out = []
-        for a in links:
-            href = a.get_attribute("href") or ""
-            if "/freelance-jobs/" in href and "?" not in href:
-                full = BASE + href if href.startswith("/") else href
-                if full not in out:
-                    out.append(full)
-        return out[:20]
-
+        r = httpx.get(proxy_url, timeout=timeout, headers={"User-Agent": USER_AGENT})
+        if r.status_code == 200:
+            return r.text
     except Exception:
-        return []
+        return None
+    return None
 
-    finally:
-        context.close()
-        browser.close()
-        playwright.stop()
+def _parse_budget(text: str):
+    pat = re.compile(r"(\d+[.,]?\d*)\s*(USD|EUR|GBP)|[$€£](\d+[.,]?\d*)", re.I)
+    mins=[]; maxs=[]; cur="USD"
+    for m in pat.findall(text):
+        nums=[x for x in m if x and x.replace('.','',1).isdigit()]
+        if nums:
+            val=float(nums[0].replace(",",".")); mins.append(val); maxs.append(val)
+        cc=[x for x in m if x in ["USD","EUR","GBP"]]
+        if cc: cur=cc[0]
+    if not mins: return None,None,None
+    return min(mins), max(maxs), cur
 
-# -------------------------------------------------
-# Extract details from job page
-# -------------------------------------------------
 def _scrape_job(url: str) -> Dict:
-    playwright, browser, context = _launch_browser()
-    page = context.new_page()
+    """Fetch job HTML and extract budget only."""
+    html = _proxy_get(url)
+    if not html:
+        return {"budget_min": None, "budget_max": None, "currency": None, "currency_display": None}
 
-    try:
-        page.goto(url, timeout=40000)
-        html = page.content()
+    bmin,bmax,cur = _parse_budget(html)
+    return {
+        "budget_min": bmin,
+        "budget_max": bmax,
+        "currency": cur,
+        "currency_display": cur or "USD",
+    }
 
-        # extract fields
-        price = None
-        curr = None
+def _parse_rss_items(xml: str) -> List[Dict]:
+    if not xml: return []
+    out=[]
+    blocks=RE_ITEM.findall(xml)
+    for block in blocks:
+        title=RE_TITLE.search(block)
+        link=RE_LINK.search(block)
+        desc=RE_DESC.search(block)
+        date=RE_DATE.search(block)
 
-        m = META_PRICE.search(html)
-        if m:
-            try: price = float(m.group(1))
-            except: pass
+        title = title.group(1).strip() if title else ""
+        link = link.group(1).strip() if link else ""
+        desc = desc.group(1).strip() if desc else ""
+        date = date.group(1).strip() if date else ""
 
-        m = META_CURR.search(html)
-        if m:
-            curr = m.group(1).replace("£","GBP").replace("€","EUR")
+        if "peopleperhour.com" not in link:
+            continue
 
-        m = META_DESC.search(html)
-        desc = m.group(1).strip() if m else ""
-
-        return {
-            "title": page.title() or "",
-            "budget_min": price,
-            "budget_max": price,
-            "currency": curr or "USD",
-            "currency_display": curr or "USD",
+        out.append({
+            "title": title,
+            "original_url": link,
+            "proposal_url": link,
             "description": desc,
             "description_html": desc,
-            "original_url": url,
-            "proposal_url": url,
+            "time_submitted": date,
             "source": "peopleperhour",
-            "time_submitted": int(time.time()),
-        }
-
-    except Exception:
-        return {}
-
-    finally:
-        context.close()
-        browser.close()
-        playwright.stop()
-
-# -------------------------------------------------
-# Public API
-# -------------------------------------------------
-def get_items(keywords: List[str]) -> List[Dict]:
-    """Search keyword → get URLs → scrape each job page."""
-    out: List[Dict] = []
-    for kw in keywords:
-        links = _search_urls(kw)
-        for url in links:
-            data = _scrape_job(url)
-            if data:
-                data["matched_keyword"] = kw
-                out.append(data)
+        })
     return out
+
+def get_items(keywords: List[str]) -> List[Dict]:
+    """SAFE MODE: Fetch 10 pages per keyword, no duplicate job pages."""
+    final=[]
+    seen_links=set()
+
+    for kw in keywords:
+        kw_lower = kw.lower()
+
+        # 10 RSS pages
+        for page in range(1, 11):
+            rss_url = f"{BASE}/freelance-jobs?rss=1&search={kw_lower}&page={page}"
+            xml = _proxy_get(rss_url)
+
+            if not xml:
+                continue
+
+            parsed = _parse_rss_items(xml)
+
+            for it in parsed:
+                link = it["original_url"]
+                if link in seen_links:
+                    continue  # skip duplicates job pages
+
+                seen_links.add(link)
+
+                # Fetch budget
+                jobdata = _scrape_job(link)
+                it.update(jobdata)
+
+                it["matched_keyword"] = kw_lower
+                final.append(it)
+
+            time.sleep(0.2)
+
+    return final

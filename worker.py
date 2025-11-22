@@ -1,216 +1,83 @@
-# worker.py — fetch, per-user filter, annotate match, dedup, currency prepare (prefers non-USD)
-# NEW: Integrated PeoplePerHour (platform_peopleperhour.py)
-# NO affiliate links for PPH
+# worker.py — Unified Worker, PPH SAFE MODE, 10 pages per keyword, dedupe
 
-from typing import List, Dict, Optional, Tuple
-from config import (
-    PLATFORMS, SKYWALKER_RSS, FX_USD_RATES,
-    AFFILIATE_PREFIX_FREELANCER
-)
-from utils_fx import load_fx_rates, to_usd
-from dedup import make_key, prefer_affiliate
-import platform_skywalker as sky
-import platform_placeholders as ph
-import platform_freelancer as fr
+import asyncio
+import time
+import logging
+from typing import List, Dict
+
+import platform_freelancer as pf
 import platform_peopleperhour as pph
-from db_events import ensure_feed_events_schema as ensure_schema, record_event as log_platform_event
-import time, datetime
+import platform_skywalker as sky
+import platform_careerjet as cj
 
-ensure_schema()
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("worker")
 
-# ---------- keyword helpers ----------
-def _normalize_kw_list(keywords: Optional[List[str]]) -> List[str]:
-    if not keywords:
-        return []
-    return [(k or "").strip().lower() for k in keywords if (k or "").strip()]
+ASYNC_INTERVAL = 60  # worker loop
 
-def match_keywords(item: Dict, keywords: List[str]) -> Optional[str]:
-    if not keywords:
-        return None
-    hay = f"{(item.get('title') or '').lower()}\n{(item.get('description') or '').lower()}"
-    for kw in keywords:
-        if kw and kw in hay:
-            return kw
-    return None
-
-# ---------- fetch ----------
-def fetch_all(keywords_query: Optional[str] = None) -> List[Dict]:
-    out: List[Dict] = []
+async def fetch_all(keywords: List[str]) -> List[Dict]:
+    all_results=[]
 
     # FREELANCER
-    if PLATFORMS.get("freelancer"):
-        try:
-            out += fr.fetch(keywords_query or None)
-        except Exception:
-            pass
+    try:
+        fr = pf.get_items(keywords)
+        all_results.extend(fr)
+    except Exception as e:
+        log.warning(f"Freelancer failed: {e}")
+
+    # PPH SAFE MODE (proxy)
+    try:
+        pph_items = pph.get_items(keywords)
+        all_results.extend(pph_items)
+    except Exception as e:
+        log.warning(f"platform_peopleperhour failed: {e}")
 
     # SKYWALKER
-    if PLATFORMS.get("skywalker"):
-        try:
-            for i in sky.fetch(SKYWALKER_RSS):
-                i["affiliate"] = False
-                out.append(i)
-        except Exception:
-            pass
-
-    # PEOPLEPERHOUR (search per keyword)
-    if PLATFORMS.get("peopleperhour"):
-        try:
-            kws = keywords_query.split(",") if keywords_query else []
-            for kw in kws:
-                results = pph.get_items([kw])
-                for it in results:
-                    it["affiliate"] = False
-                    out.append(it)
-        except Exception:
-            pass
-
-    # PLACEHOLDERS
     try:
-        if PLATFORMS.get("malt"): out += ph.fetch_malt()
-        if PLATFORMS.get("workana"): out += ph.fetch_workana()
-        if PLATFORMS.get("wripple"): out += ph.fetch_wripple()
-        if PLATFORMS.get("toptal"): out += ph.fetch_toptal()
-        if PLATFORMS.get("twago"): out += ph.fetch_twago()
-        if PLATFORMS.get("freelancermap"): out += ph.fetch_freelancermap()
-        if PLATFORMS.get("younojuno") or PLATFORMS.get("yunoJuno") or PLATFORMS.get("yuno_juno"):
-            out += ph.fetch_yunojuno()
-        if PLATFORMS.get("worksome"): out += ph.fetch_worksome()
-        if PLATFORMS.get("codeable"): out += ph.fetch_codeable()
-        if PLATFORMS.get("guru"): out += ph.fetch_guru()
-        if PLATFORMS.get("99designs"): out += ph.fetch_99designs()
-        if PLATFORMS.get("jobfind"): out += ph.fetch_jobfind()
-        if PLATFORMS.get("kariera"): out += ph.fetch_kariera()
-        if PLATFORMS.get("careerjet"): out += ph.fetch_careerjet()
-    except Exception:
-        pass
+        sk = sky.get_items(keywords)
+        all_results.extend(sk)
+    except Exception as e:
+        log.warning(f"Skywalker failed: {e}")
 
-    return out
-
-# ---------- dedup ----------
-def _job_key(item: Dict) -> str:
+    # CAREERJET
     try:
-        return make_key(item)
-    except Exception:
-        sid = str(item.get("id") or item.get("original_url") or item.get("url") or item.get("title") or "")[:512]
-        return f"{item.get('source','unknown')}::{sid}"
+        cj_items = cj.get_items(keywords)
+        all_results.extend(cj_items)
+    except Exception as e:
+        log.warning(f"Careerjet failed: {e}")
 
-def deduplicate(items: List[Dict]) -> List[Dict]:
-    keep: Dict[str, Dict] = {}
-    for it in items:
-        k = _job_key(it)
-        if k in keep:
-            try:
-                keep[k] = prefer_affiliate(keep[k], it)
-            except Exception:
-                pass
-        else:
-            keep[k] = it
-    return list(keep.values())
+    return all_results
 
-# ---------- currency + time helpers ----------
-_SYMBOL_TO_CODE = {
-    "€": "EUR", "£": "GBP", "₹": "INR", "₽": "RUB", "₺": "TRY",
-    "¥": "JPY", "₩": "KRW", "₪": "ILS", "R$": "BRL",
-    "A$": "AUD", "C$": "CAD", "$": "USD"
-}
+async def worker_loop():
+    from db_keywords import get_all_keywords
+    from job_logic import handle_new_jobs
 
-def _pick_non_usd(*cands: str) -> Optional[str]:
-    cleaned = [str(c).strip().upper() for c in cands if c and str(c).strip()]
-    non_usd = [c for c in cleaned if c != "USD"]
-    return non_usd[0] if non_usd else (cleaned[0] if cleaned else None)
+    while True:
+        keywords = get_all_keywords()
+        kw_list = [k.keyword for k in keywords]
 
-def _detect_currency(item: Dict) -> Tuple[str, str]:
-    code = _pick_non_usd(
-        item.get("original_currency"),
-        item.get("budget_currency"),
-        item.get("currency_code"),
-        item.get("currency"),
-    )
-    sym = (item.get("currency_symbol") or item.get("currency_display") or "").strip()
-    if not code and sym:
-        code = _SYMBOL_TO_CODE.get(sym, None)
-    if not code:
-        txt = f"{item.get('title') or ''}\n{item.get('description') or ''}"
-        for s, c in [("₹", "INR"), ("€", "EUR"), ("£", "GBP")]:
-            if s in txt:
-                code = c; sym = s; break
-    if not code:
-        code = "USD"
-    display = sym or code
-    return code, display
-
-def _humanize_ago(epoch_s: Optional[int]) -> Optional[str]:
-    if not epoch_s:
-        return None
-    try:
-        now = int(time.time())
-        diff = max(0, now - int(epoch_s))
-        if diff < 60:
-            return "just now"
-        mins = diff // 60
-        if mins < 60:
-            return f"{mins} min ago"
-        hrs = mins // 60
-        if hrs < 24:
-            return f"{hrs} h ago"
-        days = hrs // 24
-        if days < 7:
-            return f"{days} d ago"
-        return datetime.datetime.utcfromtimestamp(epoch_s).strftime("%Y-%m-%d")
-    except Exception:
-        return None
-
-def prepare_display(item: Dict, rates: Dict) -> Dict:
-    out = dict(item)
-    code, display = _detect_currency(out)
-    out["currency_code_detected"] = code
-    out["currency_display"] = out.get("currency_display") or display
-
-    for fld in ("budget_min", "budget_max"):
-        val = out.get(fld)
-        out[fld + "_usd"] = to_usd(val, code, rates)
-
-    if "matched_keyword" in item:
-        out["matched_keyword"] = item["matched_keyword"]
-
-    ts = item.get("time_submitted")
-    if ts:
-        out["time_submitted"] = int(ts)
-        out["posted_ago"] = _humanize_ago(int(ts))
-
-    return out
-
-def wrap_freelancer(url: str) -> str:
-    if not url:
-        return url
-    return f"{AFFILIATE_PREFIX_FREELANCER}&dl={url}"
-
-# ---------- pipeline ----------
-def run_pipeline(keywords: Optional[List[str]]) -> List[Dict]:
-    rates = load_fx_rates(FX_USD_RATES)
-    kw_norm = _normalize_kw_list(keywords)
-    query = ",".join(kw_norm) if kw_norm else None
-
-    items = fetch_all(keywords_query=query)
-
-    filtered: List[Dict] = []
-    for it in items:
-        mk = match_keywords(it, kw_norm)
-        if kw_norm and mk is None:
+        if not kw_list:
+            log.info("No keywords, sleeping...")
+            await asyncio.sleep(20)
             continue
-        if mk:
-            it["matched_keyword"] = mk
-        filtered.append(it)
 
-    filtered = deduplicate(filtered)
+        log.info(f"Fetching for keywords: {kw_list}")
 
-    final: List[Dict] = []
-    for it in filtered:
-        final.append(prepare_display(it, rates))
+        items = await fetch_all(kw_list)
+
+        log.info(f"Fetched total items: {len(items)}")
+
+        # Dedup logic happens inside handle_new_jobs
         try:
-            log_platform_event(it.get("source", "unknown"))
-        except Exception:
-            pass
+            handle_new_jobs(items)
+        except Exception as e:
+            log.error(f"Handler failed: {e}")
 
-    return final
+        await asyncio.sleep(ASYNC_INTERVAL)
+
+def main():
+    log.info("Unified Worker started")
+    asyncio.run(worker_loop())
+
+if __name__ == "__main__":
+    main()
