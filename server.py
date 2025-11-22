@@ -1,4 +1,4 @@
-# server.py — FastAPI + Telegram webhook, single event loop, no "Application exited early"
+# server.py — FastAPI + Telegram webhook, fully fixed
 
 import os
 import logging
@@ -17,62 +17,53 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.gete
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # π.χ. https://freelancer-bot-ns7s.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 if not WEBHOOK_URL:
-    # fallback για Render: παίρνει RENDER_EXTERNAL_URL αν υπάρχει
-    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if render_url:
         WEBHOOK_URL = render_url
     else:
-        # τελείως fallback: δεν σπάει αλλά δεν στήνει webhook
         WEBHOOK_URL = ""
 
-# Το application του telegram (θα το φτιάξουμε στο lifespan)
-tg_app = None  # type: ignore[assignment]
+tg_app = None  # global
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Νέος, σωστός τρόπος (lifespan) αντί για @app.on_event("startup"/"shutdown").
-    ΕΔΩ:
-      - build_application()
-      - set webhook
-      - start tg_app.start()
-    Στο τέλος:
-      - stop tg_app.stop()
-    """
     global tg_app
 
     log.info("LIFESPAN: startup — building Telegram application...")
     tg_app = build_application()
 
-    # Αν έχουμε WEBHOOK_URL, στήνουμε webhook, αλλιώς τρέχει σε polling-like mode αλλά χωρίς να κρασάρει.
-    if WEBHOOK_URL:
-        wh_url = f"{WEBHOOK_URL.rstrip('/')}/telegram/{BOT_TOKEN}"
-        log.info("Setting Telegram webhook to %s", wh_url)
-        try:
-            await tg_app.bot.set_webhook(wh_url)
-            log.info("Webhook set OK.")
-        except Exception as e:
-            log.exception("Failed to set webhook: %s", e)
+    # FIRST: initialize()
+    log.info("Initializing Telegram application...")
+    await tg_app.initialize()
+    log.info("Initialized OK.")
 
-    # Ξεκινάμε το telegram app (χωρίς δεύτερο event loop)
-    log.info("Starting Telegram application (tg_app.start()) ...")
+    # Set webhook
+    if WEBHOOK_URL:
+        wh = f"{WEBHOOK_URL.rstrip('/')}/telegram/{BOT_TOKEN}"
+        try:
+            await tg_app.bot.set_webhook(wh)
+            log.info("Webhook set OK: %s", wh)
+        except Exception as e:
+            log.exception("Webhook error: %s", e)
+
+    # THEN: start()
+    log.info("Starting Telegram application...")
     await tg_app.start()
     log.info("Telegram application started.")
 
     try:
         yield
     finally:
-        # Shutdown
+        # shutdown
         log.info("LIFESPAN: shutdown — stopping Telegram application...")
-        if tg_app is not None:
-            try:
-                await tg_app.stop()
-            except Exception as e:
-                log.exception("Error while stopping Telegram application: %s", e)
-        log.info("Telegram application stopped. Lifespan finished.")
+        try:
+            await tg_app.stop()
+        except Exception as e:
+            log.exception("Stop error: %s", e)
+        log.info("Telegram app stopped.")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -85,17 +76,12 @@ async def root():
 
 @app.post(f"/telegram/{{token}}")
 async def telegram_webhook(token: str, request: Request):
-    """
-    Webhook endpoint που δέχεται updates από το Telegram και τα στέλνει
-    στο application του python-telegram-bot.
-    """
-    global tg_app
-
     if token != BOT_TOKEN:
         return PlainTextResponse("Invalid token", status_code=403)
 
+    global tg_app
     if tg_app is None:
-        return PlainTextResponse("Telegram application not ready", status_code=503)
+        return PlainTextResponse("Bot not ready", status_code=503)
 
     try:
         data = await request.json()
@@ -103,9 +89,10 @@ async def telegram_webhook(token: str, request: Request):
         return PlainTextResponse("Bad request", status_code=400)
 
     try:
-        await tg_app.update_queue.put(tg_app._update_cls.de_json(data, tg_app.bot))  # type: ignore[attr-defined]
+        update = tg_app._update_cls.de_json(data, tg_app.bot)  # type: ignore
+        await tg_app.update_queue.put(update)
     except Exception as e:
-        log.exception("Failed to put update in queue: %s", e)
+        log.exception("Failed to enqueue update: %s", e)
         return PlainTextResponse("Error", status_code=500)
 
     return PlainTextResponse("OK", status_code=200)
