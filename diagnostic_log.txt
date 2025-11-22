@@ -1,8 +1,44 @@
-=== ULTIMATE DIAGNOSTIC REPORT ===
-Traceback (most recent call last):
-  File "C:\Users\chris\Desktop\\u0391\u03a0\u039f\u0394\u0395\u0399\u039e\u0397 \u039a\u0391\u0399 \u0392\u0395\u0392\u0391\u0399\u03a9\u03a3\u0397 \u0399\u0391\u039d\u039f\u03a5\u0391\u03a1\u0399\u039f\u03a5-\u03a6\u0395\u0392\u03a1\u039f\u03a5\u0391\u03a1\u0399\u039f\u03a5\freelancer-bot\diagnostic_all.py", line 83, in <module>
-    print(json.dumps(data, indent=2, ensure_ascii=False))
-  File "C:\Users\chris\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1252.py", line 19, in encode
-    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-UnicodeEncodeError: 'charmap' codec can't encode characters in position 40-47: character maps to <undefined>
+=== ULTIMATE DIAGNOSTIC REPORT V4 (NO PSUTIL, WINDOWS SAFE UTF‑8) ===
+{
+  "cwd": "C:\\Users\\chris\\Desktop\\ΑΠΟΔΕΙΞΗ ΚΑΙ ΒΕΒΑΙΩΣΗ ΙΑΝΟΥΑΡΙΟΥ-ΦΕΒΡΟΥΑΡΙΟΥ\\freelancer-bot",
+  "os": "Windows",
+  "python": "3.11.9",
+  "hostname": "KTLIGHTING",
+  "env": {
+    "TELEGRAM_BOT_TOKEN": "",
+    "WEBHOOK_SECRET": "",
+    "RENDER_EXTERNAL_HOSTNAME": "",
+    "DATABASE_URL": "postgresql://freelancer_bot_db_user:nLgzwrBwiTdCeb77cuUdyCWiOI0iadrb@dpg-d39uff49c44c73frguv0-a:5432/freelancer_bot_db",
+    "PORT": ""
+  },
+  "token_valid_format": false,
+  "secret_not_empty": false,
+  "public_url_ok": false,
+  "port_binding": "Command 'lsof -i:' returned non-zero exit status 1.",
+  "utf8_bom_files": [],
+  "import_status": {
+    "server": "TELEGRAM_BOT_TOKEN env var is required",
+    "bot": "TELEGRAM_BOT_TOKEN env var is required",
+    "handlers_start": "OK",
+    "handlers_settings": "OK",
+    "handlers_help": "OK",
+    "handlers_jobs": "OK",
+    "db": "OK",
+    "platform_peopleperhour": "OK",
+    "worker_pph": "No module named 'worker_pph'"
+  },
+  "workers": "Command 'ps aux | grep worker_' returned non-zero exit status 255.",
+  "uvicorn": "Command 'ps aux | grep uvicorn' returned non-zero exit status 255.",
+  "dns": {
+    "peopleperhour.com": true,
+    "freelancer.com": true,
+    "skywalker.gr": true
+  },
+  "network_tests": {
+    "PPH": "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n\n  0     0    0     0    0     0      0   ",
+    "Freelancer": "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n\n  0     0    0     0    0     0      0   ",
+    "Skywalker": "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n\n  0     0    0     0    0     0      0   "
+  },
+  "db_tables": "Command 'psql \"postgresql://freelancer_bot_db_user:nLgzwrBwiTdCeb77cuUdyCWiOI0iadrb@dpg-d39uff49c44c73frguv0-a:5432/freelancer_bot_db\" -c \"\\dt\"' returned non-zero exit status 1."
+}
+=== END ===

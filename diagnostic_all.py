@@ -1,7 +1,13 @@
-# ULTIMATE DIAGNOSTIC V2 (Enhanced)
-import os, platform, subprocess, json, re, importlib, socket, time, psutil
+# ULTIMATE DIAGNOSTIC V4 (NO PSUTIL, WINDOWS SAFE UTF‑8 OUTPUT)
+import os, platform, subprocess, json, re, importlib, socket, sys
 
-print("=== ULTIMATE DIAGNOSTIC REPORT V2 ===")
+# ---- FIX WINDOWS UNICODE PRINT ----
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except:
+    pass
+
+print("=== ULTIMATE DIAGNOSTIC REPORT V4 (NO PSUTIL, WINDOWS SAFE UTF‑8) ===")
 
 data = {}
 data["cwd"] = os.getcwd()
@@ -86,14 +92,6 @@ data["network_tests"] = {
     "Skywalker": curl_test("https://www.skywalker.gr/jobs/feed")
 }
 
-# Memory & CPU
-try:
-    data["memory"] = dict(psutil.virtual_memory()._asdict())
-    data["cpu_load"] = psutil.getloadavg()
-except:
-    data["memory"] = "psutil missing"
-    data["cpu_load"] = "psutil missing"
-
 # Database
 db_url = data["env"].get("DATABASE_URL","")
 if db_url:
@@ -104,5 +102,10 @@ token = data["env"].get("TELEGRAM_BOT_TOKEN","")
 if token:
     data["webhook_info"] = run(f"curl -s https://api.telegram.org/bot{token}/getWebhookInfo")
 
-print(json.dumps(data, indent=2, ensure_ascii=False))
+# SAFE PRINT JSON (fallback ensures no crash)
+try:
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+except:
+    print(json.dumps(data, indent=2, ensure_ascii=True))
+
 print("=== END ===")
