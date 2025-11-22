@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
 echo "[web] starting server..."
-# unbuffered, prefixed logs
-(stdbuf -oL -eL python server.py 2>&1 | awk '{print "[server] " $0; fflush() }')
+
+# ΕΚΜΕΤΑΛΛΕΥΟΜΑΣΤΕ ΤΟ ΙΔΙΟ event loop
+# ΔΕΝ κάνουμε ούτε build_application() ούτε application.run_* εδώ.
+# ΜΟΝΟ uvicorn, που θα καλέσει το FastAPI lifespan μας.
+exec uvicorn server:app --host 0.0.0.0 --port 10000

@@ -1,146 +1,111 @@
+# server.py — FastAPI + Telegram webhook, single event loop, no "Application exited early"
+
 import os
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response, HTTPException
-from telegram import Update
-from telegram.ext import Application
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 
-from bot import build_application  # do not change bot.py structure per your request
+from bot import build_application
 
-logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("server")
+logging.basicConfig(level=logging.INFO)
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hook-secret-777").strip()
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()  # e.g. https://freelancer-bot-ns7s.onrender.com
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
 
-# Build a single global Application instance 
-application: Application = build_application()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # π.χ. https://freelancer-bot-ns7s.onrender.com
+if not WEBHOOK_URL:
+    # fallback για Render: παίρνει RENDER_EXTERNAL_URL αν υπάρχει
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    if render_url:
+        WEBHOOK_URL = render_url
+    else:
+        # τελείως fallback: δεν σπάει αλλά δεν στήνει webhook
+        WEBHOOK_URL = ""
 
-# Flags to avoid double init/stop
-_is_initialized = False
-_is_started = False
+# Το application του telegram (θα το φτιάξουμε στο lifespan)
+tg_app = None  # type: ignore[assignment]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    FastAPI lifespan handler = replacement for @app.on_event("startup"/"shutdown").
-
-    Κάνει:
-    - initialize + start το Telegram Application
-    - set webhook
-    - στο τέλος κάνει stop + shutdown
+    Νέος, σωστός τρόπος (lifespan) αντί για @app.on_event("startup"/"shutdown").
+    ΕΔΩ:
+      - build_application()
+      - set webhook
+      - start tg_app.start()
+    Στο τέλος:
+      - stop tg_app.stop()
     """
-    global _is_initialized, _is_started
+    global tg_app
 
-    # ---------- STARTUP ----------
+    log.info("LIFESPAN: startup — building Telegram application...")
+    tg_app = build_application()
+
+    # Αν έχουμε WEBHOOK_URL, στήνουμε webhook, αλλιώς τρέχει σε polling-like mode αλλά χωρίς να κρασάρει.
+    if WEBHOOK_URL:
+        wh_url = f"{WEBHOOK_URL.rstrip('/')}/telegram/{BOT_TOKEN}"
+        log.info("Setting Telegram webhook to %s", wh_url)
+        try:
+            await tg_app.bot.set_webhook(wh_url)
+            log.info("Webhook set OK.")
+        except Exception as e:
+            log.exception("Failed to set webhook: %s", e)
+
+    # Ξεκινάμε το telegram app (χωρίς δεύτερο event loop)
+    log.info("Starting Telegram application (tg_app.start()) ...")
+    await tg_app.start()
+    log.info("Telegram application started.")
+
     try:
-        if not _is_initialized:
-            await application.initialize()
-            _is_initialized = True
-            log.info("Application.initialize() done")
-
-        if not _is_started:
-            await application.start()
-            _is_started = True
-            log.info("Application.start() done")
-
-        if WEBHOOK_BASE_URL:
-            url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook/{WEBHOOK_SECRET}"
-            await application.bot.set_webhook(
-                url=url,
-                drop_pending_updates=True,
-                allowed_updates=["message", "callback_query"],
-            )
-            log.info("Webhook set to %s", url)
-
-        log.info("✅ Bot started via FastAPI lifespan")
-
-    except Exception:
-        log.exception("Startup (lifespan) failed")
-
-    # Δίνουμε τον έλεγχο στην FastAPI
-    yield
-
-    # ---------- SHUTDOWN ----------
-    try:
-        if _is_started:
-            await application.stop()
-            _is_started = False
-            log.info("Application.stop() done")
-
-        if _is_initialized:
-            await application.shutdown()
-            _is_initialized = False
-            log.info("Application.shutdown() done")
-
-        log.info("✅ Bot stopped via FastAPI lifespan")
-
-    except Exception:
-        log.exception("Shutdown (lifespan) failed")
+        yield
+    finally:
+        # Shutdown
+        log.info("LIFESPAN: shutdown — stopping Telegram application...")
+        if tg_app is not None:
+            try:
+                await tg_app.stop()
+            except Exception as e:
+                log.exception("Error while stopping Telegram application: %s", e)
+        log.info("Telegram application stopped. Lifespan finished.")
 
 
-# Δημιουργούμε το app με lifespan (χωρίς @app.on_event)
 app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
 async def root():
-    return {"status": "ok"}
+    return PlainTextResponse("Freelancer Alert Bot web service is up.", status_code=200)
 
 
-@app.post("/webhook/{secret}")
-async def tg_webhook(secret: str, request: Request):
-    """Telegram webhook endpoint."""
-    if secret != WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="forbidden")
+@app.post(f"/telegram/{{token}}")
+async def telegram_webhook(token: str, request: Request):
+    """
+    Webhook endpoint που δέχεται updates από το Telegram και τα στέλνει
+    στο application του python-telegram-bot.
+    """
+    global tg_app
+
+    if token != BOT_TOKEN:
+        return PlainTextResponse("Invalid token", status_code=403)
+
+    if tg_app is None:
+        return PlainTextResponse("Telegram application not ready", status_code=503)
 
     try:
         data = await request.json()
     except Exception:
-        log.exception("Invalid JSON body on webhook")
-        return Response(status_code=200)
-
-    # Light logging for diagnostics (do not log PII)
-    try:
-        if "message" in data:
-            msg = data["message"]
-            log.info(
-                "Incoming message: chat=%s text=%s",
-                msg.get("chat", {}).get("id"),
-                msg.get("text"),
-            )
-        if "callback_query" in data:
-            cq = data["callback_query"]
-            log.info(
-                "Incoming callback: from=%s data=%s",
-                cq.get("from", {}).get("id"),
-                cq.get("data"),
-            )
-    except Exception:
-        # Δεν μας νοιάζει αν αποτύχει το logging
-        pass
+        return PlainTextResponse("Bad request", status_code=400)
 
     try:
-        # Safety net: αν για κάποιο λόγο δεν είναι initialized/started, το
-        # ξανακάνουμε εδώ (idempotent χάρη στα flags).
-        global _is_initialized, _is_started
-        if not _is_initialized:
-            await application.initialize()
-            _is_initialized = True
-            log.info("Re-initialize Application in webhook")
+        await tg_app.update_queue.put(tg_app._update_cls.de_json(data, tg_app.bot))  # type: ignore[attr-defined]
+    except Exception as e:
+        log.exception("Failed to put update in queue: %s", e)
+        return PlainTextResponse("Error", status_code=500)
 
-        if not _is_started:
-            await application.start()
-            _is_started = True
-            log.info("Re-start Application in webhook")
-
-        update = Update.de_json(data=data, bot=application.bot)
-        await application.process_update(update)
-
-    except Exception:
-        log.exception("Failed to process update")
-        return Response(status_code=200)
-
-    return Response(status_code=200)
+    return PlainTextResponse("OK", status_code=200)
