@@ -1,12 +1,13 @@
-# ULTIMATE DIAGNOSTIC (Auto-generated)
-import os, platform, subprocess, json, re, importlib
+# ULTIMATE DIAGNOSTIC V2 (Enhanced)
+import os, platform, subprocess, json, re, importlib, socket, time, psutil
 
-print("=== ULTIMATE DIAGNOSTIC REPORT ===")
+print("=== ULTIMATE DIAGNOSTIC REPORT V2 ===")
 
 data = {}
 data["cwd"] = os.getcwd()
 data["os"] = platform.system()
 data["python"] = platform.python_version()
+data["hostname"] = socket.gethostname()
 
 def run(cmd):
     try:
@@ -14,70 +15,94 @@ def run(cmd):
     except Exception as e:
         return str(e)
 
+# ENV variables
 env_keys = ["TELEGRAM_BOT_TOKEN","WEBHOOK_SECRET","RENDER_EXTERNAL_HOSTNAME","DATABASE_URL","PORT"]
-env = {k: os.environ.get(k,"") for k in env_keys}
-data["env"] = env
+data["env"] = {k: os.environ.get(k,"") for k in env_keys}
 
-handler_requirements = {
-    "handlers_start":"register_start_handlers",
-    "handlers_settings":"register_settings_handlers",
-    "handlers_help":"register_help_handlers",
-    "handlers_jobs":"register_jobs_handlers",
-    "handlers_admin":"register_admin_handlers",
-    "handlers_ui":"register_ui_handlers"
-}
+# Basic env checks
+data["token_valid_format"] = bool(re.match(r"^\d+:[A-Za-z0-9_-]+$", data["env"].get("TELEGRAM_BOT_TOKEN","")))
+data["secret_not_empty"] = data["env"].get("WEBHOOK_SECRET","") != ""
+data["public_url_ok"] = bool(data["env"].get("RENDER_EXTERNAL_HOSTNAME","").strip())
 
-handler_status = {}
-for module, func in handler_requirements.items():
-    try:
-        m = importlib.import_module(module)
-        handler_status[module] = hasattr(m, func)
-    except Exception as e:
-        handler_status[module] = str(e)
-data["handler_functions"] = handler_status
+# Port status
+port = data["env"].get("PORT","10000")
+data["port_binding"] = run(f"lsof -i:{port}")[:300]
 
-token = env.get("TELEGRAM_BOT_TOKEN","")
-data["token_valid_format"] = bool(re.match(r"^\d+:[A-Za-z0-9_-]+$", token))
+# File encoding test
+suspicious = []
+for root,_,files in os.walk("."):
+    for f in files:
+        if f.endswith(".py"):
+            p = os.path.join(root,f)
+            try:
+                with open(p,"rb") as fh:
+                    b = fh.read()
+                    if b.startswith(b"\xef\xbb\xbf"):
+                        suspicious.append(p)
+            except:
+                pass
+data["utf8_bom_files"] = suspicious
 
-data["secret_not_empty"] = env.get("WEBHOOK_SECRET","") != ""
-
-pub = env.get("RENDER_EXTERNAL_HOSTNAME","")
-data["public_url_ok"] = bool(pub.strip())
-
-port = env.get("PORT","10000")
-data["server_port_check"] = run(f"lsof -i:{port}")[:200]
-
-imports = ["server","bot","handlers_start","handlers_settings","handlers_help"]
+# Import tests
+modules = ["server","bot","handlers_start","handlers_settings","handlers_help","handlers_jobs","db","platform_peopleperhour","worker_pph"]
 import_status = {}
-for i in imports:
+for m in modules:
     try:
-        importlib.import_module(i)
-        import_status[i] = True
+        importlib.import_module(m)
+        import_status[m] = "OK"
     except Exception as e:
-        import_status[i] = str(e)
+        import_status[m] = str(e)
 data["import_status"] = import_status
 
+# Worker processes
 data["workers"] = run("ps aux | grep worker_")
 data["uvicorn"] = run("ps aux | grep uvicorn")
 
-if token:
-    data["webhook_info"] = run(f"curl -s https://api.telegram.org/bot{token}/getWebhookInfo")
+# DNS test
+def test_dns(host):
+    try:
+        socket.gethostbyname(host)
+        return True
+    except:
+        return False
 
-db_url = env.get("DATABASE_URL","")
+data["dns"] = {
+    "peopleperhour.com": test_dns("www.peopleperhour.com"),
+    "freelancer.com": test_dns("www.freelancer.com"),
+    "skywalker.gr": test_dns("www.skywalker.gr")
+}
+
+# Network test simple fetch
+def curl_test(url):
+    try:
+        out = run(f"curl -I --max-time 5 {url}")
+        return out[:200]
+    except:
+        return "ERR"
+
+data["network_tests"] = {
+    "PPH": curl_test("https://www.peopleperhour.com/freelance-jobs?rss=1"),
+    "Freelancer": curl_test("https://www.freelancer.com/rss.xml"),
+    "Skywalker": curl_test("https://www.skywalker.gr/jobs/feed")
+}
+
+# Memory & CPU
+try:
+    data["memory"] = dict(psutil.virtual_memory()._asdict())
+    data["cpu_load"] = psutil.getloadavg()
+except:
+    data["memory"] = "psutil missing"
+    data["cpu_load"] = "psutil missing"
+
+# Database
+db_url = data["env"].get("DATABASE_URL","")
 if db_url:
     data["db_tables"] = run(f'psql "{db_url}" -c "\dt"')
 
+# Webhook info
+token = data["env"].get("TELEGRAM_BOT_TOKEN","")
+if token:
+    data["webhook_info"] = run(f"curl -s https://api.telegram.org/bot{token}/getWebhookInfo")
+
 print(json.dumps(data, indent=2, ensure_ascii=False))
-
-# --- SKYTEST BLOCK ---
-try:
-    import platform_skywalker as sky
-    url = os.getenv("SKYWALKER_RSS","https://www.skywalker.gr/jobs/feed")
-    items = sky.fetch(url)
-    print("SKYWALKER:", len(items))
-    if items:
-        print("SKYWALKER FIRST:", items[0].get("title"))
-except Exception as e:
-    print("SKYWALKER ERROR:", e)
-
 print("=== END ===")
