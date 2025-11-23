@@ -1,3 +1,4 @@
+# platform_peopleperhour_proxy.py — FINAL VERSION
 import httpx
 import logging
 from urllib.parse import urlencode
@@ -6,7 +7,7 @@ log = logging.getLogger("pph")
 
 PPH_BASE = "https://pph-proxy.onrender.com"
 
-AFFILIATE_PREFIX = "https://www.peopleperhour.com/site/signup?rfrd=xxxx&"  # βάλε το δικό σου αν έχεις
+AFFILIATE_PREFIX = ""  # βάλε affiliate αν θέλεις, αλλιώς άστο κενό
 
 def _wrap_affiliate(url: str) -> str:
     try:
@@ -14,47 +15,44 @@ def _wrap_affiliate(url: str) -> str:
     except:
         return url
 
-def _normalize_budget(budget):
-    if not budget:
-        return (None, None, None)
+def _normalize_budget(job):
+    if not job:
+        return None, None, None
+    b = job.get("budget")
+    if not b:
+        return None, None, None
     try:
-        amount = float(budget.get("amount", 0))
-        currency = budget.get("currency", "USD")
-        return (amount, amount, currency)
+        amount = float(b.get("amount"))
+        curr = b.get("currency", "USD")
+        return amount, amount, curr
     except:
-        return (None, None, None)
-
+        return None, None, None
 
 def get_items(keywords: list):
-    """
-    Fetch PeoplePerHour jobs from proxy: https://pph-proxy.onrender.com/jobs
-    Returns list of dict items with unified format.
-    """
-
     url = f"{PPH_BASE}/jobs"
     try:
         res = httpx.get(url, timeout=20)
-        if res.status_code != 200:
-            log.warning(f"PPH proxy bad status {res.status_code}")
-            return []
-
+        res.raise_for_status()
         data = res.json()
-        if not isinstance(data, list):
-            log.warning("PPH proxy returned non-list")
-            return []
-
     except Exception as e:
         log.error(f"PPH proxy error: {e}")
         return []
 
-    out = []
-    for job in data:
-        title = job.get("title", "")
-        url = job.get("url", "")
+    if not isinstance(data, list):
+        log.error("PPH proxy returned non-list JSON.")
+        return []
 
-        # match by keyword
-        matched = None
+    out = []
+
+    for job in data:
+        title = (job.get("title") or "").strip()
+        url = job.get("url") or ""
+
+        if not title or not url:
+            continue
+
         low_title = title.lower()
+        matched = None
         for kw in keywords:
             if kw.lower() in low_title:
                 matched = kw
@@ -62,7 +60,7 @@ def get_items(keywords: list):
         if not matched:
             continue
 
-        min_b, max_b, curr = _normalize_budget(job.get("budget"))
+        bmin, bmax, curr = _normalize_budget(job)
 
         item = {
             "source": "PeoplePerHour",
@@ -70,11 +68,12 @@ def get_items(keywords: list):
             "title": title,
             "url": url,
             "affiliate_url": _wrap_affiliate(url),
-            "budget_min": min_b,
-            "budget_max": max_b,
+            "budget_min": bmin,
+            "budget_max": bmax,
             "original_currency": curr,
             "posted": job.get("posted"),
         }
+
         out.append(item)
 
     return out
