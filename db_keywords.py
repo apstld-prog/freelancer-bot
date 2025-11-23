@@ -1,11 +1,11 @@
-# db_keywords.py — FULL & FIXED
+# db_keywords.py — FULL & FINAL FIXED VERSION
 
 from sqlalchemy import text
 from db import get_session
 
-# ---------------------------------
-# Add keyword
-# ---------------------------------
+# ----------------------------------------------------
+# Add ONE keyword
+# ----------------------------------------------------
 def add_keyword(user_id: int, keyword: str):
     with get_session() as session:
         session.execute(
@@ -14,9 +14,20 @@ def add_keyword(user_id: int, keyword: str):
         )
         session.commit()
 
-# ---------------------------------
+# ----------------------------------------------------
+# Add MULTIPLE keywords (bot.py expects this)
+# ----------------------------------------------------
+def add_keywords(user_id: int, keywords: list[str]):
+    """
+    Required by bot.py.
+    Bulk insert keywords — simply calls add_keyword() repeatedly.
+    """
+    for kw in keywords:
+        add_keyword(user_id, kw)
+
+# ----------------------------------------------------
 # Delete keyword
-# ---------------------------------
+# ----------------------------------------------------
 def delete_keyword(user_id: int, keyword: str):
     with get_session() as session:
         session.execute(
@@ -25,10 +36,9 @@ def delete_keyword(user_id: int, keyword: str):
         )
         session.commit()
 
-# ---------------------------------
-# Get keywords for a specific user
-# (legacy compatibility)
-# ---------------------------------
+# ----------------------------------------------------
+# Get keywords for a user (legacy)
+# ----------------------------------------------------
 def get_keywords(user_id: int):
     with get_session() as session:
         rows = session.execute(
@@ -37,13 +47,12 @@ def get_keywords(user_id: int):
         ).fetchall()
     return rows
 
-# ---------------------------------
-# NEW — list_keywords (used by bot.py)
-# ---------------------------------
+# ----------------------------------------------------
+# list_keywords — REQUIRED BY bot.py (/keywords)
+# ----------------------------------------------------
 def list_keywords(user_id: int):
     """
-    Required by bot.py (/keywords).
-    Returns Row objects with `.value`
+    Returns Row objects with .value
     """
     with get_session() as session:
         rows = session.execute(
@@ -52,14 +61,14 @@ def list_keywords(user_id: int):
         ).fetchall()
     return rows
 
-# ---------------------------------
-# GLOBAL — used by unified worker
+# ----------------------------------------------------
+# get_all_keywords — used by unified worker
 # returns Row(keyword="logo")
-# ---------------------------------
+# ----------------------------------------------------
 def get_all_keywords():
     """
-    Return ALL keywords for ALL users.
-    Row objects with attribute `.keyword`
+    Returns ALL keywords for ALL users.
+    Produces Row objects with attribute `.keyword`
     """
     with get_session() as session:
         rows = session.execute(
