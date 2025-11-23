@@ -10,5 +10,5 @@ echo "----------------------------------------"
 
 cd /opt/render/project/src
 
-# Run the unified worker runner
-exec python3 worker_runner.py
+# Run the REAL unified worker
+exec python3 worker.py
