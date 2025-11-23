@@ -1,60 +1,62 @@
-# FINAL platform_peopleperhour_proxy.py
+# FINAL PeoplePerHour API Scraper via Proxy
 import httpx
-import re
-from typing import Dict, List, Optional
+from typing import List, Dict, Optional
 from config import PEOPLEPERHOUR_PROXY_URL
 
-# regex helpers
-RE_JOB_BLOCK = re.compile(r'<a[^>]+href="(/freelance-jobs/[^"]+)"[^>]*>(.*?)</a>', re.S)
-RE_BUDGET = re.compile(r'(\d+[.,]?\d*)\s*(USD|EUR|GBP)|[$€£](\d+[.,]?\d*)', re.I)
+API_URL = "https://www.peopleperhour.com/api/search/freelance-jobs"
 
-def _proxy_fetch(url: str, timeout: float = 12.0) -> Optional[str]:
+def _proxy_fetch_json(url: str, timeout: float = 15.0) -> Optional[dict]:
+    """
+    Fetch JSON through Render PPH Proxy using /fetch endpoint.
+    """
     try:
-        r = httpx.get(f"{PEOPLEPERHOUR_PROXY_URL}/fetch", params={"url": url}, timeout=timeout)
+        r = httpx.get(f"{PEOPLEPERHOUR_PROXY_URL}", params={"url": url}, timeout=timeout)
         if r.status_code == 200:
-            return r.text
+            return r.json()
+        return None
     except Exception:
         return None
-    return None
-
-def _extract_budget(text: str):
-    mins=[]; maxs=[]; cur="USD"
-    for m in RE_BUDGET.findall(text or ""):
-        nums = [x for x in m if x and x.replace('.', '', 1).isdigit()]
-        if nums:
-            val=float(nums[0].replace(",", "."))
-            mins.append(val); maxs.append(val)
-        cc=[x for x in m if x in ["USD","EUR","GBP"]]
-        if cc: cur=cc[0]
-    if not mins:
-        return None, None, None
-    return min(mins), max(maxs), cur
 
 def get_items(keywords: List[str]) -> List[Dict]:
-    out=[]
+    out = []
+
     for kw in keywords:
-        search_url = f"https://www.peopleperhour.com/freelance-jobs?search={kw}"
-        html = _proxy_fetch(search_url)
-        if not html:
+        # Build API query URL
+        url = f"{API_URL}?search={kw}&page=1"
+
+        data = _proxy_fetch_json(url)
+        if not data:
             continue
 
-        # find job links
-        for link, title in RE_JOB_BLOCK.findall(html):
-            job_url = f"https://www.peopleperhour.com{link}"
-            job_html = _proxy_fetch(job_url) or ""
-            bmin, bmax, cur = _extract_budget(job_html)
+        # The jobs live inside data["results"]
+        jobs = data.get("results", [])
+        for job in jobs:
+            title = job.get("title", "")
+            if not title:
+                continue
+
+            # SEO URL structure for job link
+            job_id = job.get("id")
+            seo_url = job.get("seo_url", "")
+            full_url = f"https://www.peopleperhour.com/freelance-jobs/{seo_url}-{job_id}"
+
+            budget = job.get("budget", {}) or {}
+            bmin = budget.get("minimum")
+            bmax = budget.get("maximum")
+            cur = budget.get("currency", "USD")
 
             out.append({
                 "source": "peopleperhour",
                 "matched_keyword": kw,
-                "title": re.sub('<.*?>', '', title).strip(),
-                "original_url": job_url,
-                "proposal_url": job_url,
-                "description": "",
-                "description_html": "",
+                "title": title,
+                "original_url": full_url,
+                "proposal_url": full_url,
+                "description": job.get("description", ""),
+                "description_html": job.get("description", ""),
                 "budget_min": bmin,
                 "budget_max": bmax,
                 "currency": cur,
-                "time_submitted": None,
+                "time_submitted": job.get("publish_date"),
             })
+
     return out
