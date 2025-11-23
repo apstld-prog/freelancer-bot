@@ -1,83 +1,43 @@
-# db_keywords.py – fully compatible with bot.py
-import datetime
-from sqlalchemy import Column, Integer, Text, ForeignKey, DateTime, UniqueConstraint, text
-from sqlalchemy.orm import declarative_base, Session
+# db_keywords.py — FULL
 
-Base = declarative_base()
+from sqlalchemy import text
+from db import get_session
 
-class Keyword(Base):
-    __tablename__ = "keyword"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
-    value = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+# Add keyword
+def add_keyword(user_id: int, keyword: str):
+    with get_session() as session:
+        session.execute(
+            text("INSERT INTO keyword (telegram_id, value) VALUES (:uid, :kw)"),
+            {"uid": user_id, "kw": keyword},
+        )
+        session.commit()
 
-    __table_args__ = (UniqueConstraint("user_id", "value", name="uq_keyword_user_value"),)
+# Delete keyword
+def delete_keyword(user_id: int, keyword: str):
+    with get_session() as session:
+        session.execute(
+            text("DELETE FROM keyword WHERE telegram_id = :uid AND value = :kw"),
+            {"uid": user_id, "kw": keyword},
+        )
+        session.commit()
 
-def ensure_keyword_unique():
-    return  # handled by table constraint
-
-def list_keywords(user_id: int) -> list[str]:
-    from db import get_session
-    with get_session() as s:
-        rows = s.execute(text("SELECT value FROM keyword WHERE user_id=:u"), {"u": user_id}).fetchall()
-    return [r[0] for r in rows]
-
-def add_keywords(user_id: int, values: list[str]) -> int:
-    from db import get_session
-    cleaned = []
-    for v in values:
-        v = v.strip().lower()
-        if v:
-            cleaned.append(v)
-    inserted = 0
-    with get_session() as s:
-        for v in cleaned:
-            exists = s.execute(
-                text("SELECT 1 FROM keyword WHERE user_id=:u AND value=:v"),
-                {"u": user_id, "v": v}
-            ).fetchone()
-            if exists:
-                continue
-            s.execute(
-                text("INSERT INTO keyword (user_id, value) VALUES (:u, :v)"),
-                {"u": user_id, "v": v}
-            )
-            inserted += 1
-        s.commit()
-    return inserted
-
-def delete_keywords(user_id: int, values: list[str]) -> int:
-    from db import get_session
-    cleaned = [v.strip().lower() for v in values if v.strip()]
-    removed = 0
-    with get_session() as s:
-        for v in cleaned:
-            r = s.execute(
-                text("DELETE FROM keyword WHERE user_id=:u AND value=:v RETURNING id"),
-                {"u": user_id, "v": v}
-            ).fetchone()
-            if r:
-                removed += 1
-        s.commit()
-    return removed
-
-def clear_keywords(user_id: int) -> int:
-    from db import get_session
-    with get_session() as s:
-        rows = s.execute(
-            text("DELETE FROM keyword WHERE user_id=:u RETURNING id"),
-            {"u": user_id}
+# Get keywords per user
+def get_keywords(user_id: int):
+    with get_session() as session:
+        rows = session.execute(
+            text("SELECT value FROM keyword WHERE telegram_id = :uid"),
+            {"uid": user_id},
         ).fetchall()
-        s.commit()
-    return len(rows)
+    return rows
 
-def count_keywords(user_id: int) -> int:
-    from db import get_session
-    with get_session() as s:
-        c = s.execute(
-            text("SELECT COUNT(*) FROM keyword WHERE user_id=:u"),
-            {"u": user_id}
-        ).scalar()
-    return int(c or 0)
+# ⭐ GLOBAL — used by worker
+def get_all_keywords():
+    """
+    Returns ALL keywords for ALL users.
+    Row objects with attribute .keyword
+    """
+    with get_session() as session:
+        rows = session.execute(
+            text("SELECT value AS keyword FROM keyword")
+        ).fetchall()
+    return rows

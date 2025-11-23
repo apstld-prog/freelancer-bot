@@ -1,79 +1,69 @@
-# worker.py — Unified Worker, PPH SAFE MODE, 10 pages per keyword, dedupe
+# worker.py — FULL
 
 import asyncio
-import time
 import logging
-from typing import List, Dict
+import time
+from datetime import datetime
 
-import platform_freelancer as pf
-import platform_peopleperhour as pph
-import platform_skywalker as sky
-import platform_careerjet as cj
+from db_keywords import get_all_keywords
+from platform_freelancer import get_items as fl_get_items
+from platform_peopleperhour import get_items as pph_get_items
+from platform_skywalker import get_items as sw_get_items
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
 
-ASYNC_INTERVAL = 60  # worker loop
+FETCH_INTERVAL = 180  # seconds
 
-async def fetch_all(keywords: List[str]) -> List[Dict]:
-    all_results=[]
+async def fetch_platform_items(keyword_list):
+    """
+    Fetch items from all enabled platforms.
+    """
+    items = []
 
-    # FREELANCER
+    # Freelancer
     try:
-        fr = pf.get_items(keywords)
-        all_results.extend(fr)
+        fl = fl_get_items(keyword_list)
+        items.extend(fl)
     except Exception as e:
-        log.warning(f"Freelancer failed: {e}")
+        log.warning(f"Freelancer error: {e}")
 
-    # PPH SAFE MODE (proxy)
+    # PeoplePerHour
     try:
-        pph_items = pph.get_items(keywords)
-        all_results.extend(pph_items)
+        pph = pph_get_items(keyword_list)
+        items.extend(pph)
     except Exception as e:
-        log.warning(f"platform_peopleperhour failed: {e}")
+        log.warning(f"PPH error: {e}")
 
-    # SKYWALKER
+    # Skywalker
     try:
-        sk = sky.get_items(keywords)
-        all_results.extend(sk)
+        sw = sw_get_items(keyword_list)
+        items.extend(sw)
     except Exception as e:
-        log.warning(f"Skywalker failed: {e}")
+        log.warning(f"Skywalker error: {e}")
 
-    # CAREERJET
-    try:
-        cj_items = cj.get_items(keywords)
-        all_results.extend(cj_items)
-    except Exception as e:
-        log.warning(f"Careerjet failed: {e}")
-
-    return all_results
+    return items
 
 async def worker_loop():
-    from db_keywords import get_all_keywords
-    from job_logic import handle_new_jobs
-
+    log.info("Unified Worker loop starting...")
     while True:
-        keywords = get_all_keywords()
-        kw_list = [k.keyword for k in keywords]
-
-        if not kw_list:
-            log.info("No keywords, sleeping...")
-            await asyncio.sleep(20)
-            continue
-
-        log.info(f"Fetching for keywords: {kw_list}")
-
-        items = await fetch_all(kw_list)
-
-        log.info(f"Fetched total items: {len(items)}")
-
-        # Dedup logic happens inside handle_new_jobs
         try:
-            handle_new_jobs(items)
-        except Exception as e:
-            log.error(f"Handler failed: {e}")
+            # 🔥 Read ALL keywords from DB
+            keyword_rows = get_all_keywords()
+            keyword_list = [k.keyword for k in keyword_rows]
 
-        await asyncio.sleep(ASYNC_INTERVAL)
+            log.info(f"Loaded {len(keyword_list)} keywords")
+
+            if keyword_list:
+                items = await fetch_platform_items(keyword_list)
+                log.info(f"Fetched total {len(items)} items")
+            else:
+                log.info("No keywords found")
+
+        except Exception as e:
+            log.error(f"Worker loop error: {e}")
+
+        await asyncio.sleep(FETCH_INTERVAL)
 
 def main():
     log.info("Unified Worker started")
