@@ -1,93 +1,91 @@
-# db_keywords.py — FULL & FINAL FIXED VERSION
-# Compatible with bot.py, worker.py, settings UI, admin menus
+# FINAL db_keywords.py
+import datetime
+from sqlalchemy import Column, Integer, Text, ForeignKey, DateTime, UniqueConstraint, text
+from sqlalchemy.orm import declarative_base
 
-from sqlalchemy import text
-from db import get_session
+Base = declarative_base()
 
-# ----------------------------------------------------
-# Add ONE keyword
-# ----------------------------------------------------
-def add_keyword(user_id: int, keyword: str):
-    with get_session() as session:
-        session.execute(
-            text("INSERT INTO keyword (telegram_id, value) VALUES (:uid, :kw)"),
-            {"uid": user_id, "kw": keyword},
-        )
-        session.commit()
+class Keyword(Base):
+    __tablename__ = "keyword"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    value = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-# ----------------------------------------------------
-# Add MULTIPLE keywords (bot.py expects this)
-# ----------------------------------------------------
-def add_keywords(user_id: int, keywords: list[str]):
-    """
-    Required by bot.py.
-    Bulk insert keywords — simply calls add_keyword() repeatedly.
-    """
-    for kw in keywords:
-        add_keyword(user_id, kw)
+    __table_args__ = (UniqueConstraint("user_id", "value", name="uq_keyword_user_value"),)
 
-# ----------------------------------------------------
-# Delete keyword
-# ----------------------------------------------------
-def delete_keyword(user_id: int, keyword: str):
-    with get_session() as session:
-        session.execute(
-            text("DELETE FROM keyword WHERE telegram_id = :uid AND value = :kw"),
-            {"uid": user_id, "kw": keyword},
-        )
-        session.commit()
+def ensure_keyword_unique():
+    return  # handled by SQL constraint
 
-# ----------------------------------------------------
-# Get keywords for a user (legacy)
-# ----------------------------------------------------
-def get_keywords(user_id: int):
-    with get_session() as session:
-        rows = session.execute(
-            text("SELECT value FROM keyword WHERE telegram_id = :uid"),
-            {"uid": user_id},
-        ).fetchall()
-    return rows
-
-# ----------------------------------------------------
-# list_keywords — REQUIRED BY bot.py (/keywords)
-# ----------------------------------------------------
 def list_keywords(user_id: int):
-    """
-    Returns Row objects with .value
-    """
-    with get_session() as session:
-        rows = session.execute(
-            text("SELECT value FROM keyword WHERE telegram_id = :uid"),
-            {"uid": user_id},
-        ).fetchall()
-    return rows
+    from db import get_session
+    with get_session() as s:
+        rows = s.execute(text("SELECT value FROM keyword WHERE user_id=:u"), {"u": user_id}).fetchall()
+    return [r[0] for r in rows]
 
-# ----------------------------------------------------
-# count_keywords — REQUIRED BY bot.py (settings)
-# ----------------------------------------------------
-def count_keywords(user_id: int) -> int:
-    """
-    Returns how many keywords a user has.
-    Required by bot UI and settings.
-    """
-    with get_session() as session:
-        row = session.execute(
-            text("SELECT COUNT(*) AS cnt FROM keyword WHERE telegram_id = :uid"),
-            {"uid": user_id},
-        ).fetchone()
-    return row.cnt if row else 0
-
-# ----------------------------------------------------
-# get_all_keywords — used by unified worker
-# returns Row(keyword="logo")
-# ----------------------------------------------------
 def get_all_keywords():
-    """
-    Returns ALL keywords for ALL users.
-    Produces Row objects with attribute `.keyword`
-    """
-    with get_session() as session:
-        rows = session.execute(
-            text("SELECT value AS keyword FROM keyword")
+    from db import get_session
+    with get_session() as s:
+        rows = s.execute(text("SELECT value FROM keyword")).fetchall()
+    return [r[0] for r in rows]
+
+def get_unique_keywords():
+    from db import get_session
+    with get_session() as s:
+        rows = s.execute(text("SELECT DISTINCT value FROM keyword")).fetchall()
+    return [r[0] for r in rows]
+
+def add_keywords(user_id: int, values):
+    from db import get_session
+    cleaned = [v.strip().lower() for v in values if v.strip()]
+    inserted = 0
+    with get_session() as s:
+        for v in cleaned:
+            ex = s.execute(
+                text("SELECT 1 FROM keyword WHERE user_id=:u AND value=:v"),
+                {"u": user_id, "v": v}
+            ).fetchone()
+            if ex:
+                continue
+            s.execute(
+                text("INSERT INTO keyword (user_id, value) VALUES (:u, :v)"),
+                {"u": user_id, "v": v}
+            )
+            inserted += 1
+        s.commit()
+    return inserted
+
+def delete_keywords(user_id: int, values):
+    from db import get_session
+    cleaned = [v.strip().lower() for v in values if v.strip()]
+    removed = 0
+    with get_session() as s:
+        for v in cleaned:
+            r = s.execute(
+                text("DELETE FROM keyword WHERE user_id=:u AND value=:v RETURNING id"),
+                {"u": user_id, "v": v}
+            ).fetchone()
+            if r:
+                removed += 1
+        s.commit()
+    return removed
+
+def clear_keywords(user_id: int):
+    from db import get_session
+    with get_session() as s:
+        rows = s.execute(
+            text("DELETE FROM keyword WHERE user_id=:u RETURNING id"),
+            {"u": user_id}
         ).fetchall()
-    return rows
+        s.commit()
+    return len(rows)
+
+def count_keywords(user_id: int):
+    from db import get_session
+    with get_session() as s:
+        c = s.execute(
+            text("SELECT COUNT(*) FROM keyword WHERE user_id=:u"),
+            {"u": user_id}
+        ).scalar()
+    return int(c or 0)

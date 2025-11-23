@@ -1,73 +1,47 @@
+# FINAL worker.py
 import asyncio
 import logging
-from db_keywords import get_all_keywords
+from typing import List, Dict
 
-# platforms
-from platform_freelancer import get_items as fl_get
-from platform_peopleperhour_proxy import get_items as pph_get
-from platform_skywalker import get_items as sw_get
+import platform_freelancer as f
+import platform_peopleperhour_proxy as p
+import platform_skywalker as s
 
-log = logging.getLogger("worker")
+from db_keywords import get_unique_keywords
+
 logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("worker")
 
-FETCH_INTERVAL = 180
-
-
-async def fetch_all(keywords):
-    items = []
-
-    # freelancer
+async def fetch_all(keywords: List[str]) -> List[Dict]:
+    out=[]
     try:
-        fl = fl_get(keywords)
-        if isinstance(fl, list):
-            items.extend(fl)
+        out += f.get_items(keywords)
     except Exception as e:
-        log.warning(f"Freelancer error: {e}")
+        log.warning(f"freelancer error: {e}")
 
-    # peopleperhour
     try:
-        pph = pph_get(keywords)
-        if isinstance(pph, list):
-            items.extend(pph)
+        out += p.get_items(keywords)
     except Exception as e:
-        log.warning(f"PPH error: {e}")
+        log.warning(f"pph error: {e}")
 
-    # skywalker
     try:
-        sw = sw_get(keywords)
-        if isinstance(sw, list):
-            items.extend(sw)
+        out += s.get_items(keywords)
     except Exception as e:
-        log.warning(f"Skywalker error: {e}")
+        log.warning(f"skywalker error: {e}")
 
-    return items
-
+    return out
 
 async def worker_loop():
-    log.info("Unified Worker starting...")
-
     while True:
-        try:
-            rows = get_all_keywords()
-            keywords = [r.keyword for r in rows]
-
-            log.info(f"Loaded {len(keywords)} keywords")
-
-            if keywords:
-                items = await fetch_all(keywords)
-                log.info(f"Fetched total {len(items)} items.")
-            else:
-                log.info("No keywords found.")
-        except Exception as e:
-            log.error(f"Worker loop error: {e}")
-
-        await asyncio.sleep(FETCH_INTERVAL)
-
+        kws = get_unique_keywords()
+        if kws:
+            items = await fetch_all(kws)
+            log.info(f"Fetched {len(items)} items")
+        await asyncio.sleep(180)
 
 def main():
-    log.info("Unified Worker started.")
+    log.info("Unified worker started")
     asyncio.run(worker_loop())
-
 
 if __name__ == "__main__":
     main()

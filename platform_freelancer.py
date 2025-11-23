@@ -1,32 +1,35 @@
+# FINAL platform_freelancer.py
+import httpx
+from typing import List, Dict
 
-# platform_freelancer.py
-import requests, logging
-log=logging.getLogger("freelancer")
+API = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 
-API="https://www.freelancer.com/api/projects/0.1/projects/active/"
-
-def get_items(keywords):
+def get_items(keywords: List[str]) -> List[Dict]:
+    out=[]
     try:
-        r=requests.get(API, timeout=20)
-        j=r.json()
-        out=[]
-        for p in j.get("result",[]):
-            title=p.get("title","")
-            desc=p.get("description","")
-            for kw in keywords:
-                if kw.lower() in title.lower() or kw.lower() in desc.lower():
-                    out.append({
-                        "title":title,
-                        "description":desc,
-                        "budget_min":p.get("minbudget"),
-                        "budget_max":p.get("maxbudget"),
-                        "original_currency":p.get("currency",{}).get("code","USD"),
-                        "url":f"https://www.freelancer.com/projects/{p.get('seo_url','')}",
-                        "source":"Freelancer",
-                        "matched_keyword":kw
-                    })
-                    break
+        r = httpx.get(API, timeout=10)
+        if r.status_code != 200:
+            return out
+        data = r.json()
+    except:
         return out
-    except Exception as e:
-        log.warning(e)
-        return []
+
+    rows = data.get("result", {}).get("projects", [])
+    for kw in keywords:
+        for p in rows:
+            title = p.get("title", "")
+            if kw.lower() in title.lower():
+                out.append({
+                    "source": "freelancer",
+                    "matched_keyword": kw,
+                    "title": title,
+                    "original_url": f"https://www.freelancer.com/projects/{p.get('seo_url', '')}",
+                    "proposal_url": f"https://www.freelancer.com/projects/{p.get('seo_url', '')}",
+                    "description": p.get("description", ""),
+                    "description_html": p.get("description", ""),
+                    "budget_min": p.get("budget", {}).get("minimum", None),
+                    "budget_max": p.get("budget", {}).get("maximum", None),
+                    "currency": p.get("budget", {}).get("currency", "USD"),
+                    "time_submitted": p.get("submitdate", None),
+                })
+    return out

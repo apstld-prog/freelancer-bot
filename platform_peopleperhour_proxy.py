@@ -1,79 +1,60 @@
-# platform_peopleperhour_proxy.py — FINAL VERSION
+# FINAL platform_peopleperhour_proxy.py
 import httpx
-import logging
-from urllib.parse import urlencode
+import re
+from typing import Dict, List, Optional
+from config import PEOPLEPERHOUR_PROXY_URL
 
-log = logging.getLogger("pph")
+# regex helpers
+RE_JOB_BLOCK = re.compile(r'<a[^>]+href="(/freelance-jobs/[^"]+)"[^>]*>(.*?)</a>', re.S)
+RE_BUDGET = re.compile(r'(\d+[.,]?\d*)\s*(USD|EUR|GBP)|[$€£](\d+[.,]?\d*)', re.I)
 
-PPH_BASE = "https://pph-proxy.onrender.com"
-
-AFFILIATE_PREFIX = ""  # βάλε affiliate αν θέλεις, αλλιώς άστο κενό
-
-def _wrap_affiliate(url: str) -> str:
+def _proxy_fetch(url: str, timeout: float = 12.0) -> Optional[str]:
     try:
-        return AFFILIATE_PREFIX + urlencode({"goto": url})
-    except:
-        return url
+        r = httpx.get(f"{PEOPLEPERHOUR_PROXY_URL}/fetch", params={"url": url}, timeout=timeout)
+        if r.status_code == 200:
+            return r.text
+    except Exception:
+        return None
+    return None
 
-def _normalize_budget(job):
-    if not job:
+def _extract_budget(text: str):
+    mins=[]; maxs=[]; cur="USD"
+    for m in RE_BUDGET.findall(text or ""):
+        nums = [x for x in m if x and x.replace('.', '', 1).isdigit()]
+        if nums:
+            val=float(nums[0].replace(",", "."))
+            mins.append(val); maxs.append(val)
+        cc=[x for x in m if x in ["USD","EUR","GBP"]]
+        if cc: cur=cc[0]
+    if not mins:
         return None, None, None
-    b = job.get("budget")
-    if not b:
-        return None, None, None
-    try:
-        amount = float(b.get("amount"))
-        curr = b.get("currency", "USD")
-        return amount, amount, curr
-    except:
-        return None, None, None
+    return min(mins), max(maxs), cur
 
-def get_items(keywords: list):
-    url = f"{PPH_BASE}/jobs"
-    try:
-        res = httpx.get(url, timeout=20)
-        res.raise_for_status()
-        data = res.json()
-    except Exception as e:
-        log.error(f"PPH proxy error: {e}")
-        return []
-
-    if not isinstance(data, list):
-        log.error("PPH proxy returned non-list JSON.")
-        return []
-
-    out = []
-
-    for job in data:
-        title = (job.get("title") or "").strip()
-        url = job.get("url") or ""
-
-        if not title or not url:
+def get_items(keywords: List[str]) -> List[Dict]:
+    out=[]
+    for kw in keywords:
+        search_url = f"https://www.peopleperhour.com/freelance-jobs?search={kw}"
+        html = _proxy_fetch(search_url)
+        if not html:
             continue
 
-        low_title = title.lower()
-        matched = None
-        for kw in keywords:
-            if kw.lower() in low_title:
-                matched = kw
-                break
-        if not matched:
-            continue
+        # find job links
+        for link, title in RE_JOB_BLOCK.findall(html):
+            job_url = f"https://www.peopleperhour.com{link}"
+            job_html = _proxy_fetch(job_url) or ""
+            bmin, bmax, cur = _extract_budget(job_html)
 
-        bmin, bmax, curr = _normalize_budget(job)
-
-        item = {
-            "source": "PeoplePerHour",
-            "matched_keyword": matched,
-            "title": title,
-            "url": url,
-            "affiliate_url": _wrap_affiliate(url),
-            "budget_min": bmin,
-            "budget_max": bmax,
-            "original_currency": curr,
-            "posted": job.get("posted"),
-        }
-
-        out.append(item)
-
+            out.append({
+                "source": "peopleperhour",
+                "matched_keyword": kw,
+                "title": re.sub('<.*?>', '', title).strip(),
+                "original_url": job_url,
+                "proposal_url": job_url,
+                "description": "",
+                "description_html": "",
+                "budget_min": bmin,
+                "budget_max": bmax,
+                "currency": cur,
+                "time_submitted": None,
+            })
     return out
