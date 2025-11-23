@@ -19,6 +19,13 @@ AFFILIATE_PREFIX_GENERIC = os.getenv("AFFILIATE_PREFIX_GENERIC", "")
 # FX rates JSON string: {"EUR":1.08, "GBP":1.26, "USD":1.0}
 FX_USD_RATES = os.getenv("FX_USD_RATES", "")
 
+# 🔥🔥🔥 THIS WAS MISSING — FIX 🔥🔥🔥
+# PeoplePerHour proxy (Render)
+PEOPLEPERHOUR_PROXY_URL = os.getenv(
+    "PEOPLEPERHOUR_PROXY_URL",
+    "https://pph-proxy.onrender.com/fetch"
+)
+
 # Platforms toggles (all on by default)
 PLATFORMS = {
     "freelancer": os.getenv("P_FREELANCER", "1") == "1",
