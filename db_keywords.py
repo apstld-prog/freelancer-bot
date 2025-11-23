@@ -1,4 +1,5 @@
 # db_keywords.py — FULL & FINAL FIXED VERSION
+# Compatible with bot.py, worker.py, settings UI, admin menus
 
 from sqlalchemy import text
 from db import get_session
@@ -60,6 +61,21 @@ def list_keywords(user_id: int):
             {"uid": user_id},
         ).fetchall()
     return rows
+
+# ----------------------------------------------------
+# count_keywords — REQUIRED BY bot.py (settings)
+# ----------------------------------------------------
+def count_keywords(user_id: int) -> int:
+    """
+    Returns how many keywords a user has.
+    Required by bot UI and settings.
+    """
+    with get_session() as session:
+        row = session.execute(
+            text("SELECT COUNT(*) AS cnt FROM keyword WHERE telegram_id = :uid"),
+            {"uid": user_id},
+        ).fetchone()
+    return row.cnt if row else 0
 
 # ----------------------------------------------------
 # get_all_keywords — used by unified worker
