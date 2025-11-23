@@ -1,8 +1,7 @@
-# worker.py — FULL
+# worker.py — FULL & FIXED
 
 import asyncio
 import logging
-import time
 from datetime import datetime
 
 from db_keywords import get_all_keywords
@@ -15,40 +14,44 @@ log = logging.getLogger("worker")
 
 FETCH_INTERVAL = 180  # seconds
 
+# -----------------------------------------------------
+# Fetch items from all platforms
+# -----------------------------------------------------
 async def fetch_platform_items(keyword_list):
-    """
-    Fetch items from all enabled platforms.
-    """
     items = []
 
     # Freelancer
     try:
-        fl = fl_get_items(keyword_list)
-        items.extend(fl)
+        fl_items = fl_get_items(keyword_list)
+        items.extend(fl_items)
     except Exception as e:
         log.warning(f"Freelancer error: {e}")
 
     # PeoplePerHour
     try:
-        pph = pph_get_items(keyword_list)
-        items.extend(pph)
+        pph_items = pph_get_items(keyword_list)
+        items.extend(pph_items)
     except Exception as e:
         log.warning(f"PPH error: {e}")
 
     # Skywalker
     try:
-        sw = sw_get_items(keyword_list)
-        items.extend(sw)
+        sw_items = sw_get_items(keyword_list)
+        items.extend(sw_items)
     except Exception as e:
         log.warning(f"Skywalker error: {e}")
 
     return items
 
+# -----------------------------------------------------
+# Worker loop
+# -----------------------------------------------------
 async def worker_loop():
     log.info("Unified Worker loop starting...")
+
     while True:
         try:
-            # 🔥 Read ALL keywords from DB
+            # 🔥 Load ALL keywords
             keyword_rows = get_all_keywords()
             keyword_list = [k.keyword for k in keyword_rows]
 
@@ -65,6 +68,9 @@ async def worker_loop():
 
         await asyncio.sleep(FETCH_INTERVAL)
 
+# -----------------------------------------------------
+# Main
+# -----------------------------------------------------
 def main():
     log.info("Unified Worker started")
     asyncio.run(worker_loop())
