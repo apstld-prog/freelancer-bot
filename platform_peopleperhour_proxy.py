@@ -1,117 +1,91 @@
-# platform_peopleperhour_proxy.py — FINAL CLEAN VERSION (PPH via proxy /jobs)
+# platform_peopleperhour_proxy.py — FINAL PPH PROXY CLIENT
+# -------------------------------------------------------
+# Συνδέεται με το pph-proxy (Docker service)
+# Κάνει request στο /jobs?kw=...
+# Παίρνει JSON (ή fallback HTML)
+# Επιστρέφει unified items, με matched_keyword
+# -------------------------------------------------------
+
 import httpx
 from bs4 import BeautifulSoup
 
-PROXY_URL = "https://pph-proxy.onrender.com/jobs"
+BASE = "https://pph-proxy.onrender.com"
 
 
-def fetch_raw_html():
-    """
-    Fetch raw HTML directly from PPH proxy.
-    The proxy returns HTML from PeoplePerHour.
-    """
+def _fetch_json(kw: str):
+    """Προσπαθεί να πάρει JSON από /jobs?kw=..."""
     try:
-        r = httpx.get(PROXY_URL, timeout=20)
+        r = httpx.get(f"{BASE}/jobs", params={"kw": kw}, timeout=20)
         r.raise_for_status()
-        return r.text
+        data = r.json()
+        if isinstance(data, list):
+            return data
     except Exception:
-        return ""
+        return None
+    return None
 
 
-def parse_html(html: str):
-    """
-    Extract PPH job tiles from HTML snapshot.
-    This matches the structure in the file you sent.
-    """
-    soup = BeautifulSoup(html, "html.parser")
+def _fetch_html(kw: str):
+    """Fallback: παίρνει HTML από /jobs_html?kw=..."""
+    try:
+        r = httpx.get(f"{BASE}/jobs_html", params={"kw": kw}, timeout=20)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+    except Exception:
+        return []
+
     jobs = []
-
-    # Each job container (from your HTML file)
-    for div in soup.select("div.jobs--item"):
-
-        title_el = div.select_one("h3.jobs--item__title")
-        desc_el = div.select_one("p.jobs--item__description")
-        link_el = div.select_one("a.jobs--item__link")
-        budget_el = div.select_one(".jobs--item__budget")
-        time_el = div.select_one(".jobs--item__posted")
-
-        title = title_el.get_text(strip=True) if title_el else ""
-        desc = desc_el.get_text(strip=True) if desc_el else ""
-        link = link_el["href"] if link_el and link_el.has_attr("href") else ""
-
-        # Normalize link (PeoplePerHour uses /something)
-        if link and link.startswith("/"):
-            link = "https://www.peopleperhour.com" + link
-
-        # Budget extraction
-        budget_min = None
-        budget_max = None
-        currency = None
-
-        if budget_el:
-            txt = budget_el.get_text(" ", strip=True)
-            # Examples: "€50", "€100 - €200"
-            parts = txt.replace("–", "-").split("-")
-            if len(parts) == 2:
-                p1 = parts[0].strip()
-                p2 = parts[1].strip()
-                currency = p1[0] if p1 else None
-                try:
-                    budget_min = float(p1[1:].strip())
-                    budget_max = float(p2[1:].strip())
-                except:
-                    pass
-            else:
-                # Single price
-                p = txt.strip()
-                if p:
-                    currency = p[0]
-                    try:
-                        budget_min = float(p[1:])
-                        budget_max = float(p[1:])
-                    except:
-                        pass
-
-        # Timestamp (if available)
-        posted = time_el.get_text(strip=True) if time_el else ""
-
+    tiles = soup.select(".job-tile")
+    for t in tiles:
+        title = t.select_one(".job-title")
+        desc = t.select_one(".job-description")
         jobs.append({
-            "source": "PPH",
-            "title": title,
-            "description": desc,
-            "original_url": link,
-            "budget_min": budget_min,
-            "budget_max": budget_max,
-            "original_currency": currency,
-            "posted": posted,
+            "title": title.get_text(strip=True) if title else "",
+            "description": desc.get_text(strip=True) if desc else "",
+            "source": "peopleperhour"
         })
-
     return jobs
 
 
-def get_items(keywords):
-    """
-    Unified worker access point.
-    """
-    html = fetch_raw_html()
-    if not html:
+def fetch(kw: str):
+    """Κάνει JSON first, μετά HTML fallback."""
+    if not kw:
         return []
 
-    data = parse_html(html)
+    # 1) JSON first
+    data = _fetch_json(kw)
+    if data:
+        # JSON job objects πρέπει να είναι ήδη καθαρά
+        cleaned = []
+        for j in data:
+            title = j.get("title", "")
+            desc = j.get("description", "")
+            cleaned.append({
+                "title": title,
+                "description": desc,
+                "source": "peopleperhour"
+            })
+        return cleaned
+
+    # 2) HTML fallback
+    return _fetch_html(kw)
+
+
+def get_items(keywords):
+    """Καλείται από τον worker. Επιστρέφει matched items."""
     out = []
+    for kw in keywords:
+        kw_clean = kw.strip().lower()
+        if not kw_clean:
+            continue
 
-    for it in data:
-        title = it.get("title", "") or ""
-        desc = it.get("description", "") or ""
-
-        hay = (title + " " + desc).lower()
-
-        for kw in keywords:
-            k = kw.lower()
-            if k in hay:
-                x = it.copy()
+        jobs = fetch(kw_clean)
+        for job in jobs:
+            title = (job.get("title") or "").lower()
+            desc = (job.get("description") or "").lower()
+            if kw_clean in title or kw_clean in desc:
+                x = job.copy()
                 x["matched_keyword"] = kw
                 out.append(x)
-                break
 
     return out
