@@ -1,26 +1,17 @@
 
-# platform_peopleperhour.py
-import requests, logging
-log=logging.getLogger("pph")
-
-PROXY="https://pph-proxy.onrender.com/jobs"
+# platform_peopleperhour.py - Hybrid scraper client
+import platform_peopleperhour_proxy as proxy
 
 def get_items(keywords):
-    try:
-        r=requests.get(PROXY, timeout=20)
-        jobs=r.json()
-        out=[]
-        for j in jobs:
-            title=j.get("title","")
-            desc=j.get("description","")
-            for kw in keywords:
-                if kw.lower() in title.lower() or kw.lower() in desc.lower():
-                    j2=j.copy()
-                    j2["matched_keyword"]=kw
-                    j2["source"]="PeoplePerHour"
-                    out.append(j2)
-                    break
-        return out
-    except Exception as e:
-        log.warning(e)
-        return []
+    jobs = proxy.fetch_jobs()
+    results=[]
+    for job in jobs:
+        title=job.get('title','')
+        desc=job.get('description','')
+        for kw in keywords:
+            if kw.lower() in title.lower() or kw.lower() in desc.lower():
+                j=job.copy()
+                j['matched_keyword']=kw
+                results.append(j)
+                break
+    return results

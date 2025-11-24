@@ -1,35 +1,56 @@
-# FINAL platform_freelancer.py
+
+# platform_freelancer.py — NEW FULL SCRAPER (2025 API)
 import httpx
-from typing import List, Dict
 
 API = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 
-def get_items(keywords: List[str]) -> List[Dict]:
-    out=[]
-    try:
-        r = httpx.get(API, timeout=10)
-        if r.status_code != 200:
-            return out
-        data = r.json()
-    except:
-        return out
+def normalize_currency(c):
+    if isinstance(c, dict):
+        return c.get("code","USD")
+    return c or "USD"
 
-    rows = data.get("result", {}).get("projects", [])
+def make_affiliate(url):
+    return f"https://www.freelancer.com/get/apstld?f=give&url={url}"
+
+def fetch(keyword):
+    params = {"query": keyword, "limit": 50}
+    r = httpx.get(API, params=params, timeout=20)
+    if r.status_code != 200:
+        return []
+    data = r.json()
+    projects = data.get("result", {}).get("projects", []) or []
+    items=[]
+    for p in projects:
+        title = p.get("title","")
+        desc = p.get("preview_description","") or ""
+        budget = p.get("budget") or {}
+        curr = normalize_currency(budget.get("currency"))
+        minb = budget.get("minimum")
+        maxb = budget.get("maximum")
+
+        pid = p.get("id")
+        link = p.get("seo_url") or ""
+        if pid and link:
+            url = f"https://www.freelancer.com/projects/{pid}/{link}"
+        elif pid:
+            url = f"https://www.freelancer.com/projects/{pid}"
+        else:
+            url = "https://www.freelancer.com"
+
+        items.append({
+            "title": title,
+            "description": desc,
+            "matched_keyword": keyword,
+            "budget_min": minb,
+            "budget_max": maxb,
+            "original_currency": curr,
+            "link": make_affiliate(url),
+            "source": "Freelancer"
+        })
+    return items
+
+def get_items(keywords):
+    out=[]
     for kw in keywords:
-        for p in rows:
-            title = p.get("title", "")
-            if kw.lower() in title.lower():
-                out.append({
-                    "source": "freelancer",
-                    "matched_keyword": kw,
-                    "title": title,
-                    "original_url": f"https://www.freelancer.com/projects/{p.get('seo_url', '')}",
-                    "proposal_url": f"https://www.freelancer.com/projects/{p.get('seo_url', '')}",
-                    "description": p.get("description", ""),
-                    "description_html": p.get("description", ""),
-                    "budget_min": p.get("budget", {}).get("minimum", None),
-                    "budget_max": p.get("budget", {}).get("maximum", None),
-                    "currency": p.get("budget", {}).get("currency", "USD"),
-                    "time_submitted": p.get("submitdate", None),
-                })
+        out.extend(fetch(kw))
     return out

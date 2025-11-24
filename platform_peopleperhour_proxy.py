@@ -1,92 +1,33 @@
-# platform_peopleperhour_proxy.py — DROMOS A
-# FULL FILE — 100% COMPATIBLE WITH NEW PROXY (app.py)
 
+# platform_peopleperhour_proxy.py - Hybrid scraper
 import httpx
-from typing import List, Dict
+from bs4 import BeautifulSoup
 
+BASE="https://pph-proxy.onrender.com"
 
-# ---------------------------------------
-# CONFIG — Hardcoded proxy URL from config.py
-# ---------------------------------------
-from config import PEOPLEPERHOUR_PROXY_URL
-
-
-# ---------------------------------------
-# Fetch search results from proxy
-# ---------------------------------------
-def _fetch_search(kw: str) -> List[Dict]:
-    """
-    Calls: https://pph-proxy.onrender.com/jobs?kw=logo
-    Returns: {keyword, count, jobs: [ ... ]}
-    """
+def fetch_jobs():
+    # Try JSON endpoint
     try:
-        r = httpx.get(
-            f"{PEOPLEPERHOUR_PROXY_URL}/jobs",
-            params={"kw": kw},
-            timeout=30.0
-        )
-        if r.status_code != 200:
-            return []
-        data = r.json()
-        return data.get("jobs", [])
-    except Exception:
+        r=httpx.get(f"{BASE}/jobs",timeout=20)
+        if r.status_code==200:
+            data=r.json()
+            if isinstance(data,list):
+                return data
+    except:
+        pass
+    # fallback HTML
+    try:
+        r=httpx.get(f"{BASE}/jobs_html",timeout=20)
+        soup=BeautifulSoup(r.text,"html.parser")
+        jobs=[]
+        for item in soup.select(".job-tile"):
+            title=item.select_one(".job-title")
+            desc=item.select_one(".job-description")
+            jobs.append({
+                "title": title.get_text(strip=True) if title else "",
+                "description": desc.get_text(strip=True) if desc else "",
+                "source": "PPH"
+            })
+        return jobs
+    except:
         return []
-
-
-# ---------------------------------------
-# Fetch job details (budget, description)
-# ---------------------------------------
-def _fetch_job(url: str) -> Dict:
-    """
-    Calls: https://pph-proxy.onrender.com/job?url=...
-    Returns job details dict.
-    """
-    try:
-        r = httpx.get(
-            f"{PEOPLEPERHOUR_PROXY_URL}/job",
-            params={"url": url},
-            timeout=30.0
-        )
-        if r.status_code != 200:
-            return {}
-        return r.json()
-    except Exception:
-        return {}
-
-
-# ---------------------------------------
-# Public API for unified worker
-# ---------------------------------------
-def get_items(keywords: List[str]) -> List[Dict]:
-    """
-    Returns all matched PPH items:
-        - title
-        - description
-        - url
-        - budget (if available)
-    """
-    results = []
-
-    for kw in keywords:
-        jobs = _fetch_search(kw)
-        for job in jobs:
-            item = {
-                "source": "peopleperhour",
-                "matched_keyword": kw,
-                "title": job.get("title", "").strip(),
-                "original_url": job.get("url", ""),
-                "proposal_url": job.get("url", ""),
-                "description": job.get("desc", ""),
-                "description_html": job.get("desc", ""),
-                "time_submitted": job.get("time", None),
-            }
-
-            # fetch additional job details (budget, etc)
-            detail = _fetch_job(item["original_url"])
-            item["budget_min"] = detail.get("budget_min")
-            item["budget_max"] = detail.get("budget_max")
-            item["currency"] = detail.get("currency")
-
-            results.append(item)
-
-    return results
