@@ -1,13 +1,14 @@
-# server.py — FastAPI + Telegram webhook, PTB v20+ compatible
+# server.py — FastAPI + Telegram webhook + SKY PROXY (FINAL 2025)
 
 import os
 import logging
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
 
+import httpx
 from telegram import Update
 from bot import build_application
 
@@ -37,12 +38,12 @@ async def lifespan(app: FastAPI):
     log.info("LIFESPAN: startup — building Telegram application...")
     tg_app = build_application()
 
-    # 1) Initialize
+    # Initialize
     log.info("Initializing Telegram application...")
     await tg_app.initialize()
     log.info("Initialized OK.")
 
-    # 2) Set webhook
+    # Set webhook
     if WEBHOOK_URL:
         wh_url = f"{WEBHOOK_URL.rstrip('/')}/telegram/{BOT_TOKEN}"
         try:
@@ -51,12 +52,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.exception("Webhook error: %s", e)
 
-    # 3) Start
+    # Start
     log.info("Starting Telegram application...")
     await tg_app.start()
     log.info("Telegram application started.")
 
-    # Enter app
+    # Enter lifespan
     try:
         yield
     finally:
@@ -70,6 +71,36 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------
+# SKYWALKER PROXY (bypass Cloudflare permanently)
+# ---------------------------------------------------------------------
+@app.get("/skywalker_proxy", tags=["proxy"])
+async def skywalker_proxy():
+    """
+    Server-side fetch of Skywalker XML feed to bypass Cloudflare.
+    The worker will read from this endpoint instead of the original feed.
+    """
+    FEED_URL = "https://www.skywalker.gr/jobs/feed"
+
+    try:
+        r = httpx.get(
+            FEED_URL,
+            timeout=20,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/rss+xml,application/xml,text/xml",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.skywalker.gr/",
+            }
+        )
+        r.raise_for_status()
+    except Exception as e:
+        return Response(f"<error>{str(e)}</error>", media_type="application/xml")
+
+    return Response(r.text, media_type="application/xml")
 
 
 # ---------------------------------------------------------------------
@@ -98,9 +129,7 @@ async def telegram_webhook(token: str, request: Request):
         return PlainTextResponse("Bad request", status_code=400)
 
     try:
-        # CORRECT way for PTB v20+
         update = Update.de_json(data, tg_app.bot)
-
         await tg_app.update_queue.put(update)
     except Exception as e:
         log.exception("Failed to enqueue update: %s", e)
