@@ -1,50 +1,75 @@
-
-# platform_skywalker.py — FINAL STABLE VERSION (2025)
+# platform_skywalker.py — FINAL RENDER VERSION 2025 (WORKING)
 import httpx
 from bs4 import BeautifulSoup
+
 from datetime import datetime
 
 FEED_URL = "https://www.skywalker.gr/jobs/feed"
 
+
 def fetch(feed_url=FEED_URL):
+    """
+    Fetch Skywalker RSS feed with safe HTML fallback.
+    Skywalker sometimes returns HTML instead of XML, so BeautifulSoup("xml")
+    will fail silently and return 0 items.
+    """
     try:
         r = httpx.get(feed_url, timeout=20)
         r.raise_for_status()
     except Exception:
         return []
-    try:
-        soup = BeautifulSoup(r.text, "xml")
-    except Exception:
-        soup = BeautifulSoup(r.text, "html.parser")
 
-    items=[]
+    raw = r.text.strip()
+
+    # Try XML first — but if parsing fails, fallback to HTML
+    soup = None
+    try:
+        soup = BeautifulSoup(raw, "xml")
+        if not soup.find("item"):
+            raise Exception("XML parser returned no items")
+    except Exception:
+        soup = BeautifulSoup(raw, "html.parser")
+
+    items = []
     for item in soup.find_all("item"):
-        title = item.title.text if item.title else ""
-        desc = item.description.text if item.description else ""
-        link = item.link.text if item.link else ""
-        pub = item.pubDate.text if item.pubDate else ""
         try:
-            ts = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %z")
-        except Exception:
-            ts = None
-        items.append({
-            "title": title,
-            "description": desc,
-            "link": link,
-            "pub_date": ts,
-            "source": "Skywalker"
-        })
+            title = item.title.text.strip() if item.title else ""
+            desc = item.description.text.strip() if item.description else ""
+            link = item.link.text.strip() if item.link else ""
+            pub = item.pubDate.text.strip() if item.pubDate else ""
+
+            try:
+                ts = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %z")
+            except Exception:
+                ts = None
+
+            items.append(
+                {
+                    "title": title,
+                    "description": desc,
+                    "link": link,
+                    "pub_date": ts,
+                    "source": "Skywalker",
+                }
+            )
+        except:
+            continue
+
     return items
 
+
 def get_items(keywords):
+    """
+    Keyword-based filter for unified worker.
+    """
     data = fetch()
-    out=[]
+    out = []
     for it in data:
-        title = it.get("title","")
-        desc  = it.get("description","")
+        title = it.get("title", "")
+        desc = it.get("description", "")
         for kw in keywords:
-            k = kw.lower()
-            if k in title.lower() or k in desc.lower():
+            lowkw = kw.lower()
+            if lowkw in title.lower() or lowkw in desc.lower():
                 x = it.copy()
                 x["matched_keyword"] = kw
                 out.append(x)
