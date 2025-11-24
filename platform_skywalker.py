@@ -1,4 +1,4 @@
-# platform_skywalker.py — SKY PROXY VERSION
+# platform_skywalker.py — SKY PROXY VERSION (ATOM + RSS SUPPORT)
 import httpx
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -15,20 +15,51 @@ def fetch():
 
     raw = r.text.strip()
 
-    # Try XML, fallback HTML
+    # Try XML first
     try:
         soup = BeautifulSoup(raw, "xml")
-        if not soup.find("item"):
-            raise Exception("xml empty")
     except Exception:
         soup = BeautifulSoup(raw, "html.parser")
 
     items = []
-    for item in soup.find_all("item"):
+
+    # Detect if it's ATOM or RSS
+    atom_entries = soup.find_all("entry")
+    rss_items    = soup.find_all("item")
+
+    # -----------------------------
+    # ATOM FEED PARSING (Skywalker)
+    # -----------------------------
+    if atom_entries:
+        for e in atom_entries:
+            title = e.title.text.strip() if e.title else ""
+            link  = e.link.get("href","","") if e.link else ""
+            desc  = ""
+            pub   = e.publishDate.text.strip() if e.publishDate else ""
+
+            try:
+                ts = datetime.fromisoformat(pub.replace("Z","+00:00"))
+            except:
+                ts = None
+
+            items.append({
+                "title": title,
+                "description": desc,
+                "link": link,
+                "pub_date": ts,
+                "source": "Skywalker"
+            })
+
+        return items
+
+    # -----------------------------
+    # RSS FEED PARSING (fallback)
+    # -----------------------------
+    for item in rss_items:
         title = item.title.text.strip() if item.title else ""
-        desc = item.description.text.strip() if item.description else ""
-        link = item.link.text.strip() if item.link else ""
-        pub = item.pubDate.text.strip() if item.pubDate else ""
+        desc  = item.description.text.strip() if item.description else ""
+        link  = item.link.text.strip() if item.link else ""
+        pub   = item.pubDate.text.strip() if item.pubDate else ""
 
         try:
             ts = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %z")
