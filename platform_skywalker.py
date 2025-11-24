@@ -1,4 +1,4 @@
-# platform_skywalker.py — SKY PROXY VERSION (ATOM + RSS SUPPORT)
+# platform_skywalker.py — SKY PROXY VERSION (ATOM + RSS SUPPORT FIXED)
 import httpx
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -27,18 +27,25 @@ def fetch():
     atom_entries = soup.find_all("entry")
     rss_items    = soup.find_all("item")
 
-    # -----------------------------
-    # ATOM FEED PARSING (Skywalker)
-    # -----------------------------
+    # -------------------------------------------------------
+    # ATOM FEED PARSING (Skywalker modern feed)
+    # -------------------------------------------------------
     if atom_entries:
         for e in atom_entries:
+
             title = e.title.text.strip() if e.title else ""
-            link  = e.link.get("href","","") if e.link else ""
-            desc  = ""
-            pub   = e.publishDate.text.strip() if e.publishDate else ""
+
+            # FIX: BeautifulSoup get() only accepts (attr, default)
+            if e.link:
+                link = e.link.get("href", "").strip()
+            else:
+                link = ""
+
+            desc = ""  # Atom feed does not include description
+            pub  = e.publishDate.text.strip() if e.publishDate else ""
 
             try:
-                ts = datetime.fromisoformat(pub.replace("Z","+00:00"))
+                ts = datetime.fromisoformat(pub.replace("Z", "+00:00"))
             except:
                 ts = None
 
@@ -52,9 +59,9 @@ def fetch():
 
         return items
 
-    # -----------------------------
-    # RSS FEED PARSING (fallback)
-    # -----------------------------
+    # -------------------------------------------------------
+    # RSS FALLBACK (older Skywalker feed)
+    # -------------------------------------------------------
     for item in rss_items:
         title = item.title.text.strip() if item.title else ""
         desc  = item.description.text.strip() if item.description else ""
@@ -82,7 +89,7 @@ def get_items(keywords):
     out = []
     for it in data:
         title = it.get("title", "")
-        desc = it.get("description", "")
+        desc  = it.get("description", "")
         for kw in keywords:
             k = kw.lower()
             if k in title.lower() or k in desc.lower():
