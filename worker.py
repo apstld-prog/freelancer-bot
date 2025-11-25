@@ -14,7 +14,7 @@ import httpx
 
 async def fetch_pph(keywords: List[str]):
     kw = ",".join(keywords)
-    url = f"https://pph-scraper-uk.fly.dev/batch?kw={kw}&pages=3"
+    url = f"https://pph-uk-scraper.cloudflare.workers.dev/batch?kw={kw}&pages=3"
     try:
         r = httpx.get(url, timeout=60.0)
         if r.status_code == 200:
