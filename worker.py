@@ -1,4 +1,3 @@
-# FINAL worker.py
 import asyncio
 import logging
 from typing import List, Dict
@@ -13,21 +12,21 @@ log = logging.getLogger("worker")
 
 import httpx
 
-async def fetch_pph(keywords):
+async def fetch_pph(keywords: List[str]):
     kw = ",".join(keywords)
-    url = f"https://pph-browser-scraper.onrender.com/batch?kw={kw}&pages=3"
+    url = f"https://pph-scraper-uk.fly.dev/batch?kw={kw}&pages=3"
     try:
         r = httpx.get(url, timeout=60.0)
         if r.status_code == 200:
             return r.json()
         return []
     except Exception as e:
-        log.warning(f"PPH browser API error: {e}")
+        log.warning(f"PPH remote API error: {e}")
         return []
 
-
 async def fetch_all(keywords: List[str]) -> List[Dict]:
-    out=[]
+    out: List[Dict] = []
+
     try:
         out += f.get_items(keywords)
     except Exception as e:
@@ -36,10 +35,6 @@ async def fetch_all(keywords: List[str]) -> List[Dict]:
     try:
         out += await fetch_pph(keywords)
     except Exception as e:
-        log.warning(f"pph error: {e}")
-
-    try:
-            except Exception as e:
         log.warning(f"pph error: {e}")
 
     try:
