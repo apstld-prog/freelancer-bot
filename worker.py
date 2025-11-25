@@ -4,7 +4,7 @@ import logging
 from typing import List, Dict
 
 import platform_freelancer as f
-import platform_peopleperhour_proxy as p
+import platform_peopleperhour as p      # <-- ΕΔΩ Η ΔΙΟΡΘΩΣΗ
 import platform_skywalker as s
 
 from db_keywords import get_unique_keywords
