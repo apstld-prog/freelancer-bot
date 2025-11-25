@@ -1,18 +1,16 @@
 # platform_peopleperhour_browser.py
-# PeoplePerHour Browser Scraper via Playwright (headless Chromium)
+# FULL ASYNC PeoplePerHour browser scraper via Playwright
 
-import asyncio
-from playwright.async_api import async_playwright
-import logging
 import re
+import logging
+from playwright.async_api import async_playwright
 
 log = logging.getLogger("pph_browser")
 
 BASE = "https://www.peopleperhour.com/freelance-jobs?page={page}&filter=skills&query={query}"
 
-# Clean budget extraction (handles £, $, ranges etc)
-def extract_budget(text):
-    # e.g. £30, $50–$120, 40 - 80 USD
+
+def extract_budget(text: str):
     text = text.replace(",", "")
     m1 = re.search(r"([£$]?)(\d+)\s*[-–]\s*([£$]?)(\d+)", text)
     if m1:
@@ -35,10 +33,11 @@ def extract_budget(text):
 
 
 async def fetch_keyword(keyword: str, pages: int = 3):
-    """Fetch jobs for a single keyword across N pages."""
+    """Async scraping για ένα keyword σε N σελίδες."""
     jobs = []
 
-    async with async_playwright() as pw:
+    try:
+        pw = await async_playwright().start()
         browser = await pw.chromium.launch(headless=True)
         ctx = await browser.new_context(
             user_agent=(
@@ -46,48 +45,45 @@ async def fetch_keyword(keyword: str, pages: int = 3):
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/123.0.0.0 Safari/537.36"
             ),
-            viewport={"width": 1280, "height": 2000}
+            viewport={"width": 1280, "height": 2400},
         )
-        page_obj = await ctx.new_page()
+        page = await ctx.new_page()
 
         for p in range(1, pages + 1):
             url = BASE.format(page=p, query=keyword)
             log.info(f"[PPH] Fetching: {url}")
 
             try:
-                await page_obj.goto(url, timeout=30000, wait_until="domcontentloaded")
-                await page_obj.wait_for_timeout(2000)  # allow JS to render cards
+                await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(1800)
             except Exception as e:
                 log.warning(f"PPH navigation error: {e}")
                 continue
 
-            cards = await page_obj.query_selector_all("article, div, section")
+            cards = await page.query_selector_all("a[href*='/job/'], article, div")
 
             for c in cards:
                 try:
-                    t = (await c.inner_text()).strip()
-                except Exception:
+                    text = (await c.inner_text()).strip()
+                except:
                     continue
 
-                # Skip empty blocks
-                if not t or len(t) < 30:
+                if not text or len(text) < 30:
                     continue
 
-                # Titles on PPH tend to be in <h3>, <h2>, <a>, etc.
-                try:
-                    title_el = await c.query_selector("h3, h2, a")
-                    title = (await title_el.inner_text()).strip() if title_el else "Untitled"
-                except:
-                    title = "Untitled"
+                # Title
+                title = ""
+                for sel in ["h3", "h2", "h4", "a"]:
+                    try:
+                        el = await c.query_selector(sel)
+                        if el:
+                            title = (await el.inner_text()).strip()
+                            break
+                    except:
+                        pass
 
-                # Description guess
-                desc = ""
-                try:
-                    ptag = await c.query_selector("p")
-                    if ptag:
-                        desc = (await ptag.inner_text()).strip()
-                except:
-                    pass
+                if not title or len(title) < 3:
+                    continue
 
                 # URL
                 job_url = ""
@@ -103,40 +99,46 @@ async def fetch_keyword(keyword: str, pages: int = 3):
                 except:
                     pass
 
-                # Budget parsing
-                min_b, max_b, cur = extract_budget(t)
+                if not job_url:
+                    continue
 
-                job = {
+                # Description
+                desc = ""
+                try:
+                    pnode = await c.query_selector("p")
+                    if pnode:
+                        desc = (await pnode.inner_text()).strip()
+                except:
+                    pass
+
+                # Budget
+                bmin, bmax, cur = extract_budget(text)
+
+                jobs.append({
                     "title": title,
                     "description": desc,
-                    "budget_min": min_b,
-                    "budget_max": max_b,
+                    "budget_min": bmin,
+                    "budget_max": bmax,
                     "original_currency": cur or "USD",
                     "url": job_url,
                     "source": "PeoplePerHour",
-                    "timestamp": None,  # PPH hides timestamps
-                    "matched_keyword": keyword
-                }
-
-                # Heuristic: Only include cards that look like job posts
-                if len(title) > 5 and job_url:
-                    jobs.append(job)
+                    "timestamp": None,
+                    "matched_keyword": keyword,
+                })
 
         await ctx.close()
         await browser.close()
+        await pw.stop()
+
+    except Exception as e:
+        log.error(f"PPH global error: {e}")
 
     return jobs
 
 
-def get_items(keywords, pages=3):
-    """Main entry: Playwright browser scraper."""
+async def get_items(keywords, pages=3):
+    """async API για worker"""
     results = []
-
-    # Run all keywords in a single event loop
-    async def run_all():
-        for kw in keywords:
-            items = await fetch_keyword(kw, pages)
-            results.extend(items)
-
-    asyncio.get_event_loop().run_until_complete(run_all())
+    for kw in keywords:
+        results.extend(await fetch_keyword(kw, pages))
     return results

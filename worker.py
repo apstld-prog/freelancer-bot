@@ -4,7 +4,7 @@ import logging
 from typing import List, Dict
 
 import platform_freelancer as f
-import platform_peopleperhour_browser as p      # <-- ΤΕΛΙΚΗ ΑΛΛΑΓΗ ΕΔΩ
+import platform_peopleperhour_browser as p
 import platform_skywalker as s
 
 from db_keywords import get_unique_keywords
@@ -21,7 +21,7 @@ async def fetch_all(keywords: List[str]) -> List[Dict]:
         log.warning(f"freelancer error: {e}")
 
     try:
-        out += p.get_items(keywords)
+        out += await p.get_items(keywords)       # <-- ASYNC SCRAPER
     except Exception as e:
         log.warning(f"pph error: {e}")
 
