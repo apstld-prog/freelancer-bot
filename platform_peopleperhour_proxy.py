@@ -1,91 +1,82 @@
-# platform_peopleperhour_proxy.py — FINAL PPH PROXY CLIENT
-# -------------------------------------------------------
-# Συνδέεται με το pph-proxy (Docker service)
-# Κάνει request στο /jobs?kw=...
-# Παίρνει JSON (ή fallback HTML)
-# Επιστρέφει unified items, με matched_keyword
-# -------------------------------------------------------
-
+# platform_peopleperhour_proxy.py
+# PeoplePerHour via Proxy JSON API v3
 import httpx
-from bs4 import BeautifulSoup
+import logging
 
-BASE = "https://pph-proxy.onrender.com"
+log = logging.getLogger("pph")
 
+BASE = "https://pph-proxy.onrender.com/api?page={page}"
 
-def _fetch_json(kw: str):
-    """Προσπαθεί να πάρει JSON από /jobs?kw=..."""
+TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+HEADERS = {
+    "User-Agent": "FreelancerBot/1.0"
+}
+
+def _fetch_page(page: int):
+    url = BASE.format(page=page)
     try:
-        r = httpx.get(f"{BASE}/jobs", params={"kw": kw}, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-        if isinstance(data, list):
-            return data
-    except Exception:
-        return None
-    return None
-
-
-def _fetch_html(kw: str):
-    """Fallback: παίρνει HTML από /jobs_html?kw=..."""
-    try:
-        r = httpx.get(f"{BASE}/jobs_html", params={"kw": kw}, timeout=20)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-    except Exception:
+        with httpx.Client(timeout=TIMEOUT, headers=HEADERS, verify=False) as c:
+            r = c.get(url)
+            if r.status_code != 200:
+                log.warning(f"PPH page {page} HTTP {r.status_code}")
+                return []
+            js = r.json()
+            items = js.get("items") or js.get("jobs") or []
+            if not isinstance(items, list):
+                return []
+            return items
+    except Exception as e:
+        log.warning(f"PPH fetch error page {page}: {e}")
         return []
 
-    jobs = []
-    tiles = soup.select(".job-tile")
-    for t in tiles:
-        title = t.select_one(".job-title")
-        desc = t.select_one(".job-description")
-        jobs.append({
-            "title": title.get_text(strip=True) if title else "",
-            "description": desc.get_text(strip=True) if desc else "",
-            "source": "peopleperhour"
-        })
-    return jobs
+def fetch_all_pages(max_pages=5):
+    out = []
+    for p in range(1, max_pages + 1):
+        arr = _fetch_page(p)
+        if not arr:
+            break
+        out.extend(arr)
+    return out
 
+def _normalize(j):
+    """Normalize PPH JSON job into BOT format."""
+    title = j.get("title") or ""
+    desc = j.get("description") or ""
+    budget_min = j.get("minBudget")
+    budget_max = j.get("maxBudget")
+    currency = j.get("currencyCode") or j.get("currency") or "USD"
+    ts = j.get("timestamp") or j.get("createdAt") or j.get("publishedAt")
 
-def fetch(kw: str):
-    """Κάνει JSON first, μετά HTML fallback."""
-    if not kw:
-        return []
+    seo = j.get("seoUrl") or ""
+    if seo.startswith("/"):
+        link = "https://www.peopleperhour.com" + seo
+    else:
+        link = seo
 
-    # 1) JSON first
-    data = _fetch_json(kw)
-    if data:
-        # JSON job objects πρέπει να είναι ήδη καθαρά
-        cleaned = []
-        for j in data:
-            title = j.get("title", "")
-            desc = j.get("description", "")
-            cleaned.append({
-                "title": title,
-                "description": desc,
-                "source": "peopleperhour"
-            })
-        return cleaned
-
-    # 2) HTML fallback
-    return _fetch_html(kw)
-
+    return {
+        "title": title,
+        "description": desc,
+        "budget_min": budget_min,
+        "budget_max": budget_max,
+        "original_currency": currency,
+        "url": link,
+        "source": "PeoplePerHour",
+        "timestamp": ts
+    }
 
 def get_items(keywords):
-    """Καλείται από τον worker. Επιστρέφει matched items."""
-    out = []
-    for kw in keywords:
-        kw_clean = kw.strip().lower()
-        if not kw_clean:
-            continue
+    raw = fetch_all_pages()
+    items = [_normalize(j) for j in raw]
 
-        jobs = fetch(kw_clean)
-        for job in jobs:
-            title = (job.get("title") or "").lower()
-            desc = (job.get("description") or "").lower()
-            if kw_clean in title or kw_clean in desc:
-                x = job.copy()
+    out = []
+    for it in items:
+        txt = (it.get("title","") + " " + it.get("description","")).lower()
+        for kw in keywords:
+            if not kw:
+                continue
+            if kw.lower() in txt:
+                x = it.copy()
                 x["matched_keyword"] = kw
                 out.append(x)
-
+                break
     return out

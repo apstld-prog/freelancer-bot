@@ -1,4 +1,4 @@
-# FINAL worker.py
+# worker.py
 import asyncio
 import logging
 from typing import List, Dict
@@ -13,7 +13,8 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
 
 async def fetch_all(keywords: List[str]) -> List[Dict]:
-    out=[]
+    out = []
+
     try:
         out += f.get_items(keywords)
     except Exception as e:
