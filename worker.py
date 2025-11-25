@@ -1,8 +1,10 @@
+# FINAL worker.py
 import asyncio
 import logging
 from typing import List, Dict
 
 import platform_freelancer as f
+import platform_peopleperhour_proxy as p
 import platform_skywalker as s
 
 from db_keywords import get_unique_keywords
@@ -10,30 +12,15 @@ from db_keywords import get_unique_keywords
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
 
-import httpx
-
-async def fetch_pph(keywords: List[str]):
-    kw = ",".join(keywords)
-    url = f"https://pph-uk-scraper.cloudflare.workers.dev/batch?kw={kw}&pages=3"
-    try:
-        r = httpx.get(url, timeout=60.0)
-        if r.status_code == 200:
-            return r.json()
-        return []
-    except Exception as e:
-        log.warning(f"PPH remote API error: {e}")
-        return []
-
 async def fetch_all(keywords: List[str]) -> List[Dict]:
-    out: List[Dict] = []
-
+    out=[]
     try:
         out += f.get_items(keywords)
     except Exception as e:
         log.warning(f"freelancer error: {e}")
 
     try:
-        out += await fetch_pph(keywords)
+        out += p.get_items(keywords)
     except Exception as e:
         log.warning(f"pph error: {e}")
 
