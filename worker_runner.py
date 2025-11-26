@@ -3,6 +3,7 @@ import os, logging, asyncio, hashlib
 from typing import Dict, List, Optional, Set
 from html import escape as _esc
 from datetime import datetime, timezone, timedelta
+from currency_usd import usd_line
 
 import worker as _worker
 from sqlalchemy import text as _sql_text
@@ -126,7 +127,7 @@ def _compose_message(it: Dict) -> str:
         except:
             return str(v)
 
-    orig = ""
+            orig = ""
     if budget_min is not None and budget_max is not None:
         orig = f"{_fmt(budget_min)}–{_fmt(budget_max)} {currency}"
     elif budget_min is not None:
@@ -134,9 +135,19 @@ def _compose_message(it: Dict) -> str:
     elif budget_max is not None:
         orig = f"up to {_fmt(budget_max)} {currency}"
 
+    # USD conversion
+    usd = None
+    try:
+        usd = usd_line(budget_min, budget_max, currency)
+    except Exception:
+        usd = None
+
     lines = [f"<b>{_h(title)}</b>"]
     if orig:
-        lines.append(f"<b>Budget:</b> {_h(orig)}")
+        if usd:
+            lines.append(f"<b>Budget:</b> {_h(orig)} ({_h(usd)})")
+        else:
+            lines.append(f"<b>Budget:</b> {_h(orig)}")
 
     lines.append(f"<b>Source:</b> {_h(src)}")
 
