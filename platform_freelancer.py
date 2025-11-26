@@ -4,7 +4,7 @@
 # - Provides budget_min/budget_max, original_currency, currency_symbol
 # - Emits 'matched_keyword' when keywords_query provided
 # - Leaves presentation to worker/runner
-# - NEW: Expose submission time (time_submitted epoch + ISO)
+# - Exposes submission time (time_submitted epoch + ISO)
 
 from typing import List, Dict, Optional
 import os, time, json, math, datetime
@@ -26,9 +26,11 @@ def _ccy_symbol(code: Optional[str]) -> str:
 
 def _safe_num(x) -> Optional[float]:
     try:
-        if x is None: return None
+        if x is None:
+            return None
         f = float(x)
-        if math.isnan(f): return None
+        if math.isnan(f):
+            return None
         return round(f, 1)
     except Exception:
         return None
@@ -51,7 +53,7 @@ def _extract_time_submitted(p) -> Optional[int]:
         return int(f)
     except Exception:
         try:
-            dt = datetime.datetime.fromisoformat(str(ts).replace("Z","+00:00"))
+            dt = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
             return int(dt.timestamp())
         except Exception:
             return None
@@ -78,7 +80,7 @@ def _normalize_project(p) -> Dict:
         iso = datetime.datetime.utcfromtimestamp(ts).isoformat() + "Z"
 
     out = {
-        "source": "freelancer",
+        "source": "freelancer",  # canonical, lowercase
         "title": title.strip(),
         "description": desc.strip(),
         "original_url": url,
@@ -139,7 +141,7 @@ def fetch(keywords_query: Optional[str] = None) -> List[Dict]:
     return items
 
 # ------------------------------------------------------------
-# NEW — REQUIRED BY UNIFIED WORKER
+# Public keyword-based interface (used by unified worker)
 # ------------------------------------------------------------
 def get_items(keywords: List[str]) -> List[Dict]:
     """
@@ -150,7 +152,7 @@ def get_items(keywords: List[str]) -> List[Dict]:
 
     q = ",".join(keywords)
     raw = fetch(q)
-    out = []
+    out: List[Dict] = []
 
     for it in raw:
         text = f"{it.get('title','').lower()} {it.get('description','').lower()}"
@@ -162,7 +164,8 @@ def get_items(keywords: List[str]) -> List[Dict]:
         if matched:
             x = it.copy()
             x["matched_keyword"] = matched
-            x["source"] = "Freelancer"
+            # κρατάμε source lowercase για συνέπεια με feedstats/interleave
+            x["source"] = "freelancer"
             out.append(x)
 
     return out
