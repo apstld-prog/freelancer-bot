@@ -1,76 +1,69 @@
-import asyncio
-import logging
+# worker.py
+# Ενιαίος worker που φέρνει αγγελίες από όλες τις πλατφόρμες
+# Χωρίς αλλαγή στο UI, μόνο στη λογική fetch_all(keywords)
+
 from typing import List, Dict
+import logging
 
-import platform_freelancer as f
-import platform_skywalker as s
+from platform_freelancer import get_items as _freelancer_items
+# Αν θέλεις αργότερα να προσθέσεις κι άλλες πλατφόρμες:
+# from platform_peopleperhour_playwright import get_items as _pph_items
+# from platform_kariera import get_items as _kariera_items
+# from platform_skywalker import get_items as _skywalker_items
+# from platform_careerjet import get_items as _careerjet_items
 
-from db_keywords import get_unique_keywords
-import httpx
-
-logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker")
 
-
-# --------------------------------------------
-# NEW REMOTE PPH SCRAPER (DIRECT IP ENDPOINT)
-# --------------------------------------------
-async def fetch_pph(keywords: List[str]):
-    kw = ",".join(keywords)
-    url = f"http://51.20.55.147:8080/batch?kw={kw}&pages=3"
-    try:
-        r = httpx.get(url, timeout=60.0)
-        if r.status_code == 200:
-            return r.json()
-        return []
-    except Exception as e:
-        log.warning(f"PPH remote API error: {e}")
-        return []
-
-
-# --------------------------------------------
-# UNIFIED FETCH
-# --------------------------------------------
 async def fetch_all(keywords: List[str]) -> List[Dict]:
-    out = []
+    """
+    Ενιαία είσοδος για τον worker_runner.
+    Δέχεται τις λέξεις-κλειδιά του χρήστη και επιστρέφει ΟΛΕΣ τις αγγελίες
+    από όλες τις πλατφόρμες, σε ενιαία λίστα.
+    Ο worker_runner αναλαμβάνει το matching, το φιλτράρισμα χρόνου και το UI.
+    """
+    keywords = [k.strip() for k in (keywords or []) if k and k.strip()]
+    if not keywords:
+        return []
 
-    # Freelancer
+    all_items: List[Dict] = []
+
+    # 1) Freelancer
     try:
-        out += f.get_items(keywords)
+        fl_items = _freelancer_items(keywords)
+        log.info(f"[worker] Freelancer returned {len(fl_items)} items for keywords={keywords}")
+        all_items.extend(fl_items)
     except Exception as e:
-        log.warning(f"freelancer error: {e}")
+        log.warning(f"[worker] Freelancer fetch failed: {e}")
 
-    # PeoplePerHour (REMOTE SCRAPER)
-    try:
-        out += await fetch_pph(keywords)
-    except Exception as e:
-        log.warning(f"pph error: {e}")
+    # 2) Άλλες πλατφόρμες (PPH, Kariera, Skywalker, Careerjet κ.λπ.)
+    #    Όταν είναι έτοιμα τα get_items για αυτές, απλώς τα ξεσχολιάζεις:
 
-    # Skywalker
-    try:
-        out += s.get_items(keywords)
-    except Exception as e:
-        log.warning(f"skywalker error: {e}")
+    # try:
+    #     pph_items = _pph_items(keywords)
+    #     log.info(f"[worker] PPH returned {len(pph_items)} items for keywords={keywords}")
+    #     all_items.extend(pph_items)
+    # except Exception as e:
+    #     log.warning(f"[worker] PPH fetch failed: {e}")
 
-    return out
+    # try:
+    #     kj_items = _kariera_items(keywords)
+    #     log.info(f"[worker] Kariera returned {len(kj_items)} items for keywords={keywords}")
+    #     all_items.extend(kj_items)
+    # except Exception as e:
+    #     log.warning(f"[worker] Kariera fetch failed: {e}")
 
+    # try:
+    #     sky_items = _skywalker_items(keywords)
+    #     log.info(f"[worker] Skywalker returned {len(sky_items)} items for keywords={keywords}")
+    #     all_items.extend(sky_items)
+    # except Exception as e:
+    #     log.warning(f"[worker] Skywalker fetch failed: {e}")
 
-# --------------------------------------------
-# WORKER LOOP
-# --------------------------------------------
-async def worker_loop():
-    while True:
-        kws = get_unique_keywords()
-        if kws:
-            items = await fetch_all(kws)
-            log.info(f"Fetched {len(items)} items")
-        await asyncio.sleep(180)
+    # try:
+    #     cj_items = _careerjet_items(keywords)
+    #     log.info(f"[worker] Careerjet returned {len(cj_items)} items for keywords={keywords}")
+    #     all_items.extend(cj_items)
+    # except Exception as e:
+    #     log.warning(f"[worker] Careerjet fetch failed: {e}")
 
-
-def main():
-    log.info("Unified worker started")
-    asyncio.run(worker_loop())
-
-
-if __name__ == "__main__":
-    main()
+    return all_items
