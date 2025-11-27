@@ -24,20 +24,6 @@ async def fetch(url: str, timeout: float = 20.0) -> Optional[str]:
     return None
 
 
-async def fetch_rss(url: str, timeout: float = 20.0) -> Optional[str]:
-    """
-    Fetch για RSS XML (ελαφρύ).
-    """
-    try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
-            r = await c.get(url)
-            if r.status_code == 200 and r.text:
-                return r.text
-    except Exception:
-        return None
-    return None
-
-
 def clean(text: str) -> str:
     return (text or "").replace("\r", " ").replace("\n", " ").strip()
 
@@ -50,7 +36,6 @@ def extract_budget(html: str):
     if not html:
         return None, None, None
 
-    # σύμβολα νομισμάτων + αριθμοί
     pat = re.compile(r"([$\£\€])\s*([\d,]+(?:\.\d+)?)")
     matches = pat.findall(html)
     if not matches:
@@ -147,34 +132,58 @@ async def scrape_job(url: str) -> Dict:
     }
 
 
-async def search_urls(keyword: str) -> List[str]:
+def extract_job_links(html: str) -> List[str]:
     """
-    RSS feed per keyword – ελαφρύ endpoint.
-    Παίρνει URLs αγγελιών για ένα keyword.
+    Βγάζει τα URLs αγγελιών από τη σελίδα freelance-jobs HTML.
+    Ψάχνει links τύπου /freelance-jobs/... ή /job/...
+    """
+    if not html:
+        return []
+
+    links: List[str] = []
+
+    # 1) /freelance-jobs/... links
+    for m in re.findall(r'href="(/freelance-jobs/[^"#?]+)"', html):
+        links.append(BASE + m)
+
+    # 2) /job/... links (αν υπάρχουν)
+    for m in re.findall(r'href="(/job/[^"#?]+)"', html):
+        links.append(BASE + m)
+
+    # αφαίρεση διπλών, διατήρηση σειράς
+    seen = set()
+    out: List[str] = []
+    for url in links:
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append(url)
+
+    # μικρό όριο για να μη γινόμαστε επιθετικοί
+    return out[:10]
+
+
+async def search_urls_html(keyword: str) -> List[str]:
+    """
+    HTML search page per keyword (μέσω proxy).
+    Παίρνει URLs αγγελιών για ένα keyword από τη σελίδα αποτελεσμάτων.
     """
     kw = (keyword or "").strip()
     if not kw:
         return []
 
-    rss_url = f"{BASE}/freelance-jobs?rss=1&search={kw}"
-    xml = await fetch_rss(rss_url)
-    if not xml:
+    search_url = f"{BASE}/freelance-jobs?q={kw}"
+    html = await fetch(search_url)
+    if not html:
         return []
 
-    links = re.findall(r"<link>(.+?)</link>", xml)
-    out: List[str] = []
-    for l in links:
-        l = l.strip()
-        if BASE in l:
-            out.append(l)
-    # μικρό όριο για να μη γινόμαστε επιθετικοί
-    return out[:10]
+    return extract_job_links(html)
 
 
 async def get_items_async(keywords: List[str]) -> List[Dict]:
     """
     Κεντρική async ρουτίνα:
-    - για κάθε keyword διαβάζει RSS,
+    - για κάθε keyword διαβάζει HTML search results,
     - scrape των πρώτων N job URLs,
     - φτιάχνει unified dict ανά job.
     """
@@ -186,7 +195,7 @@ async def get_items_async(keywords: List[str]) -> List[Dict]:
         if not kw:
             continue
 
-        links = await search_urls(kw)
+        links = await search_urls_html(kw)
         for url in links:
             if url in seen_urls:
                 continue
