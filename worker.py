@@ -10,7 +10,6 @@ from platform_skywalker import get_items as _skywalker_items
 # Αν θέλεις αργότερα να προσθέσεις κι άλλες πλατφόρμες:
 # from platform_peopleperhour_playwright import get_items as _pph_items
 # from platform_kariera import get_items as _kariera_items
-# from platform_skywalker import get_items as _skywalker_items
 # from platform_careerjet import get_items as _careerjet_items
 
 log = logging.getLogger("worker")
@@ -35,6 +34,14 @@ async def fetch_all(keywords: List[str]) -> List[Dict]:
         all_items.extend(fl_items)
     except Exception as e:
         log.warning(f"[worker] Freelancer fetch failed: {e}")
+        
+    # 2) Skywalker
+    try:
+        sky_items = _skywalker_items(keywords)
+        log.info(f"[worker] Skywalker returned {len(sky_items)} items for keywords={keywords}")
+        all_items.extend(sky_items)
+    except Exception as e:
+        log.warning(f"[worker] Skywalker fetch failed: {e}")
 
     # 2) Άλλες πλατφόρμες (PPH, Kariera, Skywalker, Careerjet κ.λπ.)
     #    Όταν είναι έτοιμα τα get_items για αυτές, απλώς τα ξεσχολιάζεις:
@@ -52,13 +59,6 @@ async def fetch_all(keywords: List[str]) -> List[Dict]:
     #     all_items.extend(kj_items)
     # except Exception as e:
     #     log.warning(f"[worker] Kariera fetch failed: {e}")
-    # 2) Skywalker
-     try:
-         sky_items = _skywalker_items(keywords)
-         log.info(f"[worker] Skywalker returned {len(sky_items)} items for keywords={keywords}")
-         all_items.extend(sky_items)
-     except Exception as e:
-         log.warning(f"[worker] Skywalker fetch failed: {e}")
 
     # try:
     #     cj_items = _careerjet_items(keywords)
