@@ -1,33 +1,22 @@
-# platform_peopleperhour_playwright.py
-# --------------------------------------
-# Playwright async scraper -> Fly.io proxy -> Fallback
-#
-# - Extracts full job data (title, budget min/max, currency, description HTML)
-# - Uses external proxy: https://pph-proxy-chris.fly.dev/?url=
-# - Fully async-compatible for Render unified worker
-# --------------------------------------
-
 import httpx
 import asyncio
 import re
 from typing import Dict, List, Optional
 
-PROXY_BASE = "https://pph-proxy-chris.fly.dev/?url="
-
+# Proxy backend για να μη χτυπάς απευθείας το PPH με τον worker.
+PROXYBASE = "https://pph-proxy-chris.fly.dev?url="
 BASE = "https://www.peopleperhour.com"
 
-# --------------------------------------
-# Helpers
-# --------------------------------------
+# ------------------ helpers για HTTP & parsing ------------------ #
 
-async def _fetch(url: str, timeout: float = 20.0) -> Optional[str]:
+async def fetch(url: str, timeout: float = 20.0) -> Optional[str]:
     """
-    Fetch through Fly proxy (Playwright backend).
-    Returns full HTML if successful.
+    Fetch μέσω Fly proxy (Playwright backend).
+    Επιστρέφει full HTML αν όλα πάνε καλά, αλλιώς None.
     """
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
-            r = await c.get(PROXY_BASE + url)
+            r = await c.get(PROXYBASE + url)
             if r.status_code == 200 and r.text:
                 return r.text
     except Exception:
@@ -35,34 +24,44 @@ async def _fetch(url: str, timeout: float = 20.0) -> Optional[str]:
     return None
 
 
-def _clean(text: str) -> str:
-    return (text or "").replace("\n", " ").replace("\r", " ").strip()
-
-
-def _extract_budget(html: str):
+async def fetch_rss(url: str, timeout: float = 20.0) -> Optional[str]:
     """
-    Extract min/max price and currency.
-    Supports:
-        £100
-        $200
-        €150
+    Fetch για RSS XML (ελαφρύ).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
+            r = await c.get(url)
+            if r.status_code == 200 and r.text:
+                return r.text
+    except Exception:
+        return None
+    return None
+
+
+def clean(text: str) -> str:
+    return (text or "").replace("\r", " ").replace("\n", " ").strip()
+
+
+def extract_budget(html: str):
+    """
+    Εξάγει min/max price και currency από HTML.
+    Πιάνει patterns όπως: "£100 - £200", "$150", "€50 - €80" κλπ.
     """
     if not html:
         return None, None, None
 
-    pat = re.compile(r"([$£€])\s?(\d+[.,]?\d*)")
+    # σύμβολα νομισμάτων + αριθμοί
+    pat = re.compile(r"([$\£\€])\s*([\d,]+(?:\.\d+)?)")
     matches = pat.findall(html)
-
     if not matches:
         return None, None, None
 
     vals = []
     currency = None
-
     for sym, num in matches:
         try:
-            vals.append(float(num.replace(",", ".")))
-        except:
+            vals.append(float(num.replace(",", "")))
+        except Exception:
             continue
         if not currency:
             if sym == "$":
@@ -78,107 +77,130 @@ def _extract_budget(html: str):
     return min(vals), max(vals), currency
 
 
-def _extract_description(html: str) -> str:
+def extract_description_html(html: str) -> str:
     """
-    Extracts <div class="job-description">...</div>
+    Παίρνει το κείμενο από το job description block.
     """
-    m = re.search(r'<div class="job-description">(.*?)</div>', html, re.S)
+    if not html:
+        return ""
+    m = re.search(r'<div[^>]+class="job-description"[^>]*>(.+?)</div>', html, re.S)
     if m:
-        return m.group(1).strip()
+        return clean(m.group(1))
     return ""
 
 
-def _extract_title(html: str) -> str:
-    m = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.S)
-    return _clean(m.group(1)) if m else ""
+def extract_title(html: str) -> str:
+    """
+    Εξάγει τον τίτλο της αγγελίας.
+    """
+    if not html:
+        return ""
+    m = re.search(r"<h1[^>]*>(.+?)</h1>", html, re.S)
+    return clean(m.group(1)) if m else ""
 
 
-def _extract_date(html: str) -> Optional[int]:
+def extract_date(html: str) -> Optional[int]:
     """
-    Extracts epoch timestamp embedded in PPH pages.
-    Looks for: data-published="1698765432"
+    Προσπαθεί να βρει epoch timestamp από data-published="1698765432" κλπ.
     """
+    if not html:
+        return None
     m = re.search(r'data-published="(\d+)"', html)
     if m:
         try:
             return int(m.group(1))
-        except:
+        except Exception:
             return None
     return None
 
 
-# --------------------------------------
-# Scrape a single job
-# --------------------------------------
-
-async def _scrape_job(url: str) -> Dict:
-    html = await _fetch(url)
+async def scrape_job(url: str) -> Dict:
+    """
+    Κατεβάζει μια job page και επιστρέφει normalized dict.
+    """
+    html = await fetch(url)
     if not html:
-        return {
-            "budget_min": None,
-            "budget_max": None,
-            "currency": None,
-            "description_html": "",
-        }
-
-    title = _extract_title(html)
-    desc = _extract_description(html)
-    bmin, bmax, cur = _extract_budget(html)
-    ts = _extract_date(html)
+        bmin = bmax = None
+        cur = None
+        desc = ""
+        title = ""
+        ts = None
+    else:
+        title = extract_title(html)
+        desc = extract_description_html(html)
+        bmin, bmax, cur = extract_budget(html)
+        ts = extract_date(html)
 
     return {
-        "title": title,
-        "description": desc,
-        "description_html": desc,
+        "title": title or "",
+        "description": desc or "",
+        "description_html": desc or "",
         "budget_min": bmin,
         "budget_max": bmax,
-        "currency": cur,
+        "original_currency": cur,
+        "timestamp": ts,
         "time_submitted": ts,
+        "original_url": url,
+        "proposal_url": url,
+        "source": "peopleperhour",
+        "matched_keyword": None,
     }
 
 
-# --------------------------------------
-# Fetch RSS-style job list
-# --------------------------------------
+async def search_urls(keyword: str) -> List[str]:
+    """
+    RSS feed per keyword – ελαφρύ endpoint.
+    Παίρνει URLs αγγελιών για ένα keyword.
+    """
+    kw = (keyword or "").strip()
+    if not kw:
+        return []
 
-async def _search_urls(keyword: str) -> List[str]:
-    """
-    RSS feed per keyword.
-    """
-    rss_url = f"{BASE}/freelance-jobs?rss=1&search={keyword}"
-    xml = await _fetch(rss_url)
+    rss_url = f"{BASE}/freelance-jobs?rss=1&search={kw}"
+    xml = await fetch_rss(rss_url)
     if not xml:
         return []
 
-    links = re.findall(r"<link>(.*?)</link>", xml)
-    return [l.strip() for l in links if BASE in l]
+    links = re.findall(r"<link>(.+?)</link>", xml)
+    out: List[str] = []
+    for l in links:
+        l = l.strip()
+        if BASE in l:
+            out.append(l)
+    # μικρό όριο για να μη γινόμαστε επιθετικοί
+    return out[:10]
 
-
-# --------------------------------------
-# PUBLIC API
-# --------------------------------------
 
 async def get_items_async(keywords: List[str]) -> List[Dict]:
     """
-    Full async keyword fetch + scrape each job page.
+    Κεντρική async ρουτίνα:
+    - για κάθε keyword διαβάζει RSS,
+    - scrape των πρώτων N job URLs,
+    - φτιάχνει unified dict ανά job.
     """
     out: List[Dict] = []
+    seen_urls: set = set()
 
-    for kw in keywords:
-        kw = kw.strip().lower()
-        links = await _search_urls(kw)
+    for kw in keywords or []:
+        kw = kw.strip()
+        if not kw:
+            continue
 
-        for url in links[:10]:  # limit to 10 per keyword
-            data = await _scrape_job(url)
-            data["original_url"] = url
-            data["proposal_url"] = url
-            data["source"] = "peopleperhour"
-            data["matched_keyword"] = kw
+        links = await search_urls(kw)
+        for url in links:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+
+            data = await scrape_job(url)
+            data["matched_keyword"] = kw.lower()
             out.append(data)
 
     return out
 
 
-# Render worker calls this (sync wrapper)
 def get_items(keywords: List[str]) -> List[Dict]:
-    return asyncio.run(get_items_async(keywords))
+    """
+    Sync wrapper για τον unified worker (όπως στα άλλα platform_*).
+    """
+    return asyncio.run(get_items_async(keywords or []))

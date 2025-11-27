@@ -7,6 +7,7 @@ import logging
 
 from platform_freelancer import get_items as _freelancer_items
 from platform_skywalker import get_items as _skywalker_items
+from platform_peopleperhour_playwright import get_items as pph_items
 
 from worker_stats_sidecar import incr, error
 
@@ -48,16 +49,19 @@ async def fetch_all(keywords: List[str]) -> List[Dict]:
     except Exception as e:
         error("skywalker", str(e))
         log.warning(f"[worker] Skywalker fetch failed: {e}")
+    
+    # 3) PeoplePerHour
+    try:
+        pph_jobs = pph_items(keywords)
+        incr("peopleperhour", len(pph_jobs))
+        log.info(f"[worker] PeoplePerHour returned {len(pph_jobs)} items")
+        all_items.extend(pph_jobs)
+    except Exception as e:
+        error("peopleperhour", str(e))
+        log.warning(f"[worker] PeoplePerHour fetch failed: {e}")
 
     # 2) Άλλες πλατφόρμες (PPH, Kariera, Skywalker, Careerjet κ.λπ.)
     #    Όταν είναι έτοιμα τα get_items για αυτές, απλώς τα ξεσχολιάζεις:
-
-    # try:
-    #     pph_items = _pph_items(keywords)
-    #     log.info(f"[worker] PPH returned {len(pph_items)} items for keywords={keywords}")
-    #     all_items.extend(pph_items)
-    # except Exception as e:
-    #     log.warning(f"[worker] PPH fetch failed: {e}")
 
     # try:
     #     kj_items = _kariera_items(keywords)
