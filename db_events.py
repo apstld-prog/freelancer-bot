@@ -1,4 +1,5 @@
 # db_events.py — feed events schema + stats
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
@@ -27,7 +28,10 @@ def record_event(source: str, payload: Optional[dict] = None) -> None:
     with get_session() as s:
         s.execute(
             text("INSERT INTO feed_events (source, payload) VALUES (:source, :payload)"),
-            {"source": source, "payload": payload},
+            {
+                "source": source,
+                "payload": json.dumps(payload or {}),
+            },
         )
         s.commit()
 
