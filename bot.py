@@ -3,6 +3,7 @@ import os, logging, asyncio, re
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import List, Set, Optional
+from feedstats import get_feed_stats_last_24h
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -343,16 +344,27 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML)
 
 async def feedstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_user(update.effective_user.id): return
+    if not is_admin_user(update.effective_user.id):
+        return
     try:
-        stats = get_platform_stats(STATS_WINDOW_HOURS) or {}
+        stats = get_feed_stats_last_24h() or {}
     except Exception as e:
-        await update.effective_chat.send_message(f"Feed status unavailable: {e}"); return
+        await update.effective_chat.send_message(f"Feed status unavailable: {e}")
+        return
+
     if not stats:
-        await update.effective_chat.send_message(f"No events in the last {STATS_WINDOW_HOURS} hours."); return
-    await update.effective_chat.send_message("📊 Feed status (last %dh):\n%s" % (
-        STATS_WINDOW_HOURS, "\n".join([f"• {k}: {v}" for k,v in stats.items()])
-    ))
+        await update.effective_chat.send_message(
+            f"No stats available from worker in the last {STATS_WINDOW_HOURS} hours."
+        )
+        return
+
+    lines = ["📊 Feed status (last 24h):"]
+    for name, value in stats.items():
+        if name == "__total__":
+            continue
+        lines.append(f"• {name}: {value}")
+
+    await update.effective_chat.send_message("\n".join(lines))
 
 async def feetstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await feedstatus_cmd(update, context)
