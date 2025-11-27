@@ -53,9 +53,26 @@ def _fetch_all_users() -> List[int]:
     ids: Set[int] = set()
     with _get_session() as s:
         rows = s.execute(_sql_text(
-            'SELECT DISTINCT telegram_id FROM "user" WHERE telegram_id IS NOT NULL AND COALESCE(is_blocked,false)=false AND COALESCE(is_active,true)=true'
+            'SELECT DISTINCT telegram_id, COALESCE(license_until, trial_end) '
+            'FROM "user" '
+            'WHERE telegram_id IS NOT NULL '
+            'AND COALESCE(is_blocked,false)=false '
+            'AND COALESCE(is_active,true)=true'
         )).fetchall()
-        ids.update(int(r[0]) for r in rows if r[0] is not None)
+
+    now = datetime.now(timezone.utc)
+    for tid, expiry in rows:
+        if tid is None:
+            continue
+        if expiry is not None:
+            # βάλε timezone αν λείπει
+            if getattr(expiry, "tzinfo", None) is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if expiry < now:
+                # trial/licence έχει λήξει → skip
+                continue
+        ids.add(int(tid))
+
     return sorted(list(ids))
 
 def _fetch_user_keywords(telegram_id: int) -> List[str]:
