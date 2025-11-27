@@ -7,6 +7,9 @@ import logging
 
 from platform_freelancer import get_items as _freelancer_items
 from platform_skywalker import get_items as _skywalker_items
+
+from worker_stats_sidecar import incr, error
+
 # Αν θέλεις αργότερα να προσθέσεις κι άλλες πλατφόρμες:
 # from platform_peopleperhour_playwright import get_items as _pph_items
 # from platform_kariera import get_items as _kariera_items
@@ -24,23 +27,26 @@ async def fetch_all(keywords: List[str]) -> List[Dict]:
     keywords = [k.strip() for k in (keywords or []) if k and k.strip()]
     if not keywords:
         return []
-
     all_items: List[Dict] = []
 
     # 1) Freelancer
     try:
         fl_items = _freelancer_items(keywords)
-        log.info(f"[worker] Freelancer returned {len(fl_items)} items for keywords={keywords}")
+        incr("freelancer", len(fl_items))
+        log.info(f"[worker] Freelancer returned {len(fl_items)} items")
         all_items.extend(fl_items)
     except Exception as e:
+        error("freelancer", str(e))
         log.warning(f"[worker] Freelancer fetch failed: {e}")
         
     # 2) Skywalker
     try:
         sky_items = _skywalker_items(keywords)
-        log.info(f"[worker] Skywalker returned {len(sky_items)} items for keywords={keywords}")
+        incr("skywalker", len(sky_items))
+        log.info(f"[worker] Skywalker returned {len(sky_items)} items")
         all_items.extend(sky_items)
     except Exception as e:
+        error("skywalker", str(e))
         log.warning(f"[worker] Skywalker fetch failed: {e}")
 
     # 2) Άλλες πλατφόρμες (PPH, Kariera, Skywalker, Careerjet κ.λπ.)
