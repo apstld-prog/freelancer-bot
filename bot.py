@@ -49,6 +49,31 @@ def all_admin_ids() -> Set[int]:
 
 def is_admin_user(tid: int) -> bool:
     return tid in all_admin_ids()
+    
+ACCESS_DENIED_MSG = (
+    "Your free trial has ended.\n"
+    "Please contact the admin to extend your access."
+)
+
+def user_has_access(tid: int) -> bool:
+    try:
+        with get_session() as s:
+            row = s.execute(text(
+                'SELECT COALESCE(license_until, trial_end), is_active, is_blocked '
+                'FROM "user" WHERE telegram_id=:tid'
+            ), {"tid": tid}).fetchone()
+        if not row:
+            return False
+        expiry, active, blocked = row
+        if blocked or not active:
+            return False
+        now = datetime.now(timezone.utc)
+        if expiry and expiry < now:
+            return False
+        return True
+    except Exception:
+        return False
+
 
 # ---------- UI ----------
 def main_menu_kb(is_admin: bool=False) -> InlineKeyboardMarkup:
@@ -187,10 +212,14 @@ async def mysettings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not user_has_access(update.effective_user.id):
+        await update.message.reply_text(ACCESS_DENIED_MSG, parse_mode=ParseMode.HTML)
+        return
     if not context.args:
         await update.message.reply_text(
-            "Add keywords separated by commas. Example:\n<code>/addkeyword logo, lighting</code>",
+            "Add keywords separated by commas. Example:\nde>/addkeyword logo, lighting</code>",
             parse_mode=ParseMode.HTML); return
+    ...
     kws = _parse_keywords(" ".join(context.args))
     if not kws:
         await update.message.reply_text("No valid keywords provided."); return
@@ -203,18 +232,18 @@ async def addkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     parse_mode=ParseMode.HTML)
 
 async def delkeyword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not user_has_access(update.effective_user.id):
+        await update.message.reply_text(ACCESS_DENIED_MSG, parse_mode=ParseMode.HTML)
+        return
     if not context.args:
-        await update.message.reply_text("Delete keywords. Example:\n<code>/delkeyword logo, sales</code>",
+        await update.message.reply_text("Delete keywords. Example:\nde>/delkeyword logo, sales</code>",
                                         parse_mode=ParseMode.HTML); return
-    kws = _parse_keywords(" ".join(context.args))
-    with get_session() as s:
-        u = get_or_create_user_by_tid(s, update.effective_user.id)
-    removed = delete_keywords(u.id, kws)
-    left = list_keywords(u.id)
-    await update.message.reply_text(f"🗑 Removed {removed} keyword(s).\n\nCurrent keywords:\n• " + (", ".join(left) if left else "—"),
-                                    parse_mode=ParseMode.HTML)
+    ...
 
 async def clearkeywords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not user_has_access(update.effective_user.id):
+        await update.message.reply_text(ACCESS_DENIED_MSG, parse_mode=ParseMode.HTML)
+        return
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes, clear all", callback_data="kw:clear:yes"),
                                 InlineKeyboardButton("❌ No", callback_data="kw:clear:no")]])
     await update.message.reply_text("Clear ALL your keywords?", reply_markup=kb)
