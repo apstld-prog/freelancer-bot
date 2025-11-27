@@ -6,6 +6,7 @@ from typing import List, Dict
 import logging
 
 from platform_freelancer import get_items as _freelancer_items
+from platform_skywalker import get_items as _skywalker_items
 # Αν θέλεις αργότερα να προσθέσεις κι άλλες πλατφόρμες:
 # from platform_peopleperhour_playwright import get_items as _pph_items
 # from platform_kariera import get_items as _kariera_items
@@ -51,13 +52,13 @@ async def fetch_all(keywords: List[str]) -> List[Dict]:
     #     all_items.extend(kj_items)
     # except Exception as e:
     #     log.warning(f"[worker] Kariera fetch failed: {e}")
-
-    # try:
-    #     sky_items = _skywalker_items(keywords)
-    #     log.info(f"[worker] Skywalker returned {len(sky_items)} items for keywords={keywords}")
-    #     all_items.extend(sky_items)
-    # except Exception as e:
-    #     log.warning(f"[worker] Skywalker fetch failed: {e}")
+    # 2) Skywalker
+     try:
+         sky_items = _skywalker_items(keywords)
+         log.info(f"[worker] Skywalker returned {len(sky_items)} items for keywords={keywords}")
+         all_items.extend(sky_items)
+     except Exception as e:
+         log.warning(f"[worker] Skywalker fetch failed: {e}")
 
     # try:
     #     cj_items = _careerjet_items(keywords)
