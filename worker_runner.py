@@ -9,6 +9,7 @@ from worker_stats_sidecar import incr as stats_incr, error as stats_error, publi
 import worker as _worker
 from sqlalchemy import text as _sql_text
 from db import get_session as _get_session
+from db_events import record_event
 from db_keywords import list_keywords as _list_keywords
 
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
@@ -275,16 +276,26 @@ async def amain():
         sent_total = 0
         try:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
+
             for tid in users:
                 kws = _fetch_user_keywords(tid)
                 items = await _worker.fetch_all(kws)
 
                 # μέτρηση raw items ανά feed πριν τα φίλτρα
+                per_feed_counts: Dict[str, int] = {}
                 for it in items:
                     src = (it.get("source") or "freelancer").lower()
                     stats_incr(src, 1)
+                    per_feed_counts[src] = per_feed_counts.get(src, 0) + 1
 
-                filtered = []
+                # γράφουμε ένα event ανά feed για αυτόν τον user/κύκλο
+                try:
+                    for src, cnt in per_feed_counts.items():
+                        record_event(src, {"count": cnt})
+                except Exception as e:
+                    log.warning("record_event failed: %s", e)
+
+                filtered: List[Dict] = []
                 for it in items:
                     mk = it.get("matched_keyword")
                     if not mk:
@@ -313,6 +324,18 @@ async def amain():
         except Exception as e:
             log.error(f"runner error: {e}")
             stats_error("worker", str(e))
+
+        # γράφουμε stats για τον τρέχοντα κύκλο
+        try:
+            elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
+            publish_stats(
+                cycle_seconds=elapsed,
+                sent_this_cycle=sent_total,
+            )
+        except Exception as e:
+            log.warning("publish_stats failed: %s", e)
+
+        await asyncio.sleep(interval)
 
         # γράφουμε stats για τον τρέχοντα κύκλο
         try:
