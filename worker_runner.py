@@ -270,7 +270,7 @@ async def amain():
 
     users = _fetch_all_users()
 
-        while True:
+    while True:
         cycle_start = datetime.now(timezone.utc)
         sent_total = 0
         try:
@@ -310,7 +310,7 @@ async def amain():
                     await _send_items(bot, tid, mixed, per_user_batch)
                     sent_total += min(len(mixed), per_user_batch)
 
-                except Exception as e:
+        except Exception as e:
             log.error(f"runner error: {e}")
             stats_error("worker", str(e))
 
