@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Set
 from html import escape as _esc
 from datetime import datetime, timezone, timedelta
 from currency_usd import usd_line
+from worker_stats_sidecar import publish_stats
 
 import worker as _worker
 from sqlalchemy import text as _sql_text
@@ -270,12 +271,27 @@ async def amain():
     users = _fetch_all_users()
 
     while True:
+        cycle_start = datetime.now(timezone.utc)
+        feeds_counts = {
+            "freelancer": {"raw": 0},
+            "skywalker": {"raw": 0},
+        }
+        sent_total = 0
+
         try:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
 
             for tid in users:
                 kws = _fetch_user_keywords(tid)
                 items = await _worker.fetch_all(kws)
+
+                # μετράμε πόσα items ήρθαν από κάθε feed ΠΡΙΝ τα φίλτρα
+                for it in items:
+                    src = (it.get("source") or "").lower()
+                    if src == "freelancer":
+                        feeds_counts["freelancer"]["raw"] += 1
+                    elif src == "skywalker":
+                        feeds_counts["skywalker"]["raw"] += 1
 
                 filtered = []
                 for it in items:
@@ -301,9 +317,21 @@ async def amain():
 
                 if mixed:
                     await _send_items(bot, tid, mixed, per_user_batch)
+                    sent_total += min(len(mixed), per_user_batch)
 
         except Exception as e:
             log.error(f"runner error: {e}")
+
+        # γράφουμε stats για τον τρέχοντα κύκλο
+        try:
+            elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
+            publish_stats(
+                feeds_counts=feeds_counts,
+                cycle_seconds=elapsed,
+                sent_this_cycle=sent_total,
+            )
+        except Exception as e:
+            log.warning("publish_stats failed: %s", e)
 
         await asyncio.sleep(interval)
 
