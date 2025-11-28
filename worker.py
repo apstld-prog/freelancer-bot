@@ -8,7 +8,7 @@ import logging
 from platform_freelancer import get_items as _freelancer_items
 from platform_skywalker import get_items as _skywalker_items
 from platform_peopleperhour_playwright import get_items as pph_items
-from platform_peopleperhour_playwright import get_items_async as pph_items_async
+from platform_peopleperhour_playwright import get_items as pph_items
 
 from worker_stats_sidecar import incr, error
 
@@ -51,10 +51,9 @@ async def fetch_all(keywords: List[str]) -> List[Dict]:
         error("skywalker", str(e))
         log.warning(f"[worker] Skywalker fetch failed: {e}")
     
-        # 3) PeoplePerHour
+    # 3) PeoplePerHour (μέσω proxy, sync HTTP)
     try:
-        # Κλήση της async έκδοσης, επειδή βρισκόμαστε ήδη μέσα σε event loop.
-        pph_jobs = await pph_items_async(keywords)
+        pph_jobs = pph_items(keywords)
         incr("peopleperhour", len(pph_jobs))
         log.info(f"[worker] PeoplePerHour returned {len(pph_jobs)} items")
         all_items.extend(pph_jobs)
