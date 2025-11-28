@@ -7,8 +7,7 @@ import logging
 
 from platform_freelancer import get_items as _freelancer_items
 from platform_skywalker import get_items as _skywalker_items
-from platform_peopleperhour_playwright import get_items as pph_items
-from platform_peopleperhour_playwright import get_items as pph_items
+from platform_peopleperhour_http import get_items as pph_items
 
 from worker_stats_sidecar import incr, error
 
