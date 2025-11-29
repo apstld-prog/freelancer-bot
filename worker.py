@@ -8,6 +8,7 @@ import logging
 from platform_freelancer import get_items as _freelancer_items
 from platform_skywalker import get_items as _skywalker_items
 from platform_peopleperhour_http import get_items as pph_items
+from platform_upwork_http import get_items as upwork_items
 
 from worker_stats_sidecar import incr, error
 
@@ -59,6 +60,16 @@ async def fetch_all(keywords: List[str]) -> List[Dict]:
     except Exception as e:
         error("peopleperhour", str(e))
         log.warning(f"[worker] PeoplePerHour fetch failed: {e}")
+    
+    # 4) Upwork (HTML + cookies)
+    try:
+        up_items = upwork_items(keywords)
+        incr("upwork", len(up_items))
+        log.info(f"[worker] Upwork returned {len(up_items)} items")
+        all_items.extend(up_items)
+    except Exception as e:
+        error("upwork", str(e))
+        log.warning(f"[worker] Upwork fetch failed: {e}")
 
     # 2) Άλλες πλατφόρμες (PPH, Kariera, Skywalker, Careerjet κ.λπ.)
     #    Όταν είναι έτοιμα τα get_items για αυτές, απλώς τα ξεσχολιάζεις:
