@@ -305,25 +305,25 @@ async def amain():
                                 mk = kw
                                 break
 
-    src = (it.get("source") or "unknown").lower()
-    title = it.get("title", "") or ""
+                    src = (it.get("source") or "unknown").lower()
+                    title = it.get("title", "") or ""
 
-    if not mk:
-        # DEBUG: δεν βρέθηκε καμία λέξη-κλειδί
-        log.info(f"[debug] NO MATCH | src={src} | title={title!r}")
-        continue
+                    if not mk:
+                        # DEBUG: δεν βρέθηκε καμία λέξη-κλειδί
+                        log.info(f"[debug] NO MATCH | src={src} | title={title!r}")
+                        continue
 
-    it["matched_keyword"] = mk
+                    it["matched_keyword"] = mk
 
-    dt = _extract_dt(it)
-    if not dt or dt < cutoff:
-        # DEBUG: αγγελία πολύ παλιά
-        log.info(f"[debug] TOO OLD | src={src} | title={title!r} | kw={mk!r}")
-        continue
+                    dt = _extract_dt(it)
+                    if not dt or dt < cutoff:
+                        # DEBUG: αγγελία πολύ παλιά
+                        log.info(f"[debug] TOO OLD | src={src} | title={title!r} | kw={mk!r}")
+                        continue
 
-    # DEBUG: περνάει φίλτρα και θα σταλθεί (αν δεν είναι already_sent)
-    log.info(f"[debug] OK | src={src} | title={title!r} | kw={mk!r}")
-    filtered.append(it)
+                    # DEBUG: περνάει φίλτρα και θα σταλθεί (αν δεν είναι already_sent)
+                    log.info(f"[debug] OK | src={src} | title={title!r} | kw={mk!r}")
+                    filtered.append(it)
 
                 filtered.sort(key=lambda x: _extract_dt(x) or cutoff, reverse=True)
                 mixed = interleave_by_source(filtered)
