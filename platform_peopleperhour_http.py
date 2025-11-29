@@ -102,10 +102,10 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
             )
             bmin, bmax, cur = _extract_budget(price_raw)
 
-            time_el = li.select_one(".card__footer-left span")
-            timeago = time_el.get_text(strip=True) if time_el else ""
-            
-    # μετατροπή "5 hours ago", "8 hours ago" κλπ. σε timestamp ISO
+        time_el = li.select_one(".card__footer-left span")
+        timeago = time_el.get_text(strip=True) if time_el else ""
+
+        # NEW: convert "5 hours ago" κλπ. σε ISO timestamp
         ts = None
         try:
             txt = timeago.lower()
