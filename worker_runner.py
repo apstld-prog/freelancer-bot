@@ -1,12 +1,12 @@
+# worker_runner.py
 import os, logging, asyncio, hashlib
 from typing import Dict, List, Optional, Set
 from html import escape as _esc
 from datetime import datetime, timezone, timedelta
 from currency_usd import usd_line
+from worker_stats_sidecar import incr as stats_incr, error as stats_error, publish_stats
 
-from worker_stats_sidecar import incr as stats_incr, error as stats_error, publish_stats, reset_counts
 import worker as _worker
-
 from sqlalchemy import text as _sql_text
 from db import get_session as _get_session
 from db_events import record_event
@@ -20,10 +20,8 @@ log = logging.getLogger("worker_runner")
 
 FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 
-
 def _h(s: str) -> str:
     return _esc((s or '').strip(), quote=False)
-
 
 def _ensure_sent_schema():
     with _get_session() as s:
@@ -38,7 +36,6 @@ def _ensure_sent_schema():
         """))
         s.commit()
 
-
 def _already_sent(user_id: int, job_key: str) -> bool:
     _ensure_sent_schema()
     with _get_session() as s:
@@ -47,14 +44,12 @@ def _already_sent(user_id: int, job_key: str) -> bool:
         ), {"u": user_id, "k": job_key}).fetchone()
         return row is not None
 
-
 def _mark_sent(user_id: int, job_key: str) -> None:
     with _get_session() as s:
         s.execute(_sql_text(
             "INSERT INTO sent_job (user_id, job_key) VALUES (:u, :k) ON CONFLICT DO NOTHING"
         ), {"u": user_id, "k": job_key})
         s.commit()
-
 
 def _fetch_all_users() -> List[int]:
     ids: Set[int] = set()
@@ -72,53 +67,48 @@ def _fetch_all_users() -> List[int]:
         if tid is None:
             continue
         if expiry is not None:
+            # βάλε timezone αν λείπει
             if getattr(expiry, "tzinfo", None) is None:
                 expiry = expiry.replace(tzinfo=timezone.utc)
             if expiry < now:
+                # trial/licence έχει λήξει → skip
                 continue
         ids.add(int(tid))
 
     return sorted(list(ids))
 
-
 def _fetch_user_keywords(telegram_id: int) -> List[str]:
     try:
         with _get_session() as s:
             row = s.execute(_sql_text('SELECT id FROM "user" WHERE telegram_id=:tid'), {"tid": telegram_id}).fetchone()
-            if not row:
-                return []
+            if not row: return []
             uid = int(row[0])
         kws = _list_keywords(uid) or []
         return [k.strip() for k in kws if k and k.strip()]
     except Exception:
         return []
 
-
 def _to_dt(val) -> Optional[datetime]:
     if val is None:
         return None
     try:
-        if isinstance(val, (int, float)):
-            sec = float(val)
-            if sec > 1e12:
-                sec /= 1000.0
-            return datetime.fromtimestamp(sec, tz=timezone.utc)
-
-        s = str(val).strip()
+        if isinstance(val,(int,float)):
+            sec=float(val)
+            if sec>1e12: sec/=1000.0
+            return datetime.fromtimestamp(sec,tz=timezone.utc)
+        s=str(val).strip()
         if s.isdigit():
-            sec = int(s)
-            if sec > 1e12:
-                sec /= 1000.0
-            return datetime.fromtimestamp(sec, tz=timezone.utc)
-
-        s2 = s.replace("Z", "+00:00")
+            sec=int(s)
+            if sec>1e12: sec/=1000.0
+            return datetime.fromtimestamp(sec,tz=timezone.utc)
+        s2=s.replace("Z","+00:00")
         for fmt in (
-            "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%z",
-            "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%dT%H:%M:%S", "%a, %d %b %Y %H:%M:%S %z"
+            "%Y-%m-%dT%H:%M:%S%z","%Y-%m-%d %H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S.%f%z","%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S","%a, %d %b %Y %H:%M:%S %z"
         ):
             try:
-                dt = datetime.strptime(s2, fmt)
+                dt=datetime.strptime(s2,fmt)
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 else:
@@ -130,20 +120,17 @@ def _to_dt(val) -> Optional[datetime]:
         return None
     return None
 
-
 def _extract_dt(it: Dict) -> Optional[datetime]:
-    for k in ("timestamp", "time_submitted", "posted_at", "created_at", "pub_date"):
+    for k in ("timestamp","time_submitted","posted_at","created_at","pub_date"):
         dt = _to_dt(it.get(k))
         if dt:
             return dt
     return None
 
-
 def _compose_message(it: Dict) -> str:
     title = (it.get("title") or "").strip() or "Untitled"
     desc = (it.get("description") or "").strip()
-    if len(desc) > 700:
-        desc = desc[:700] + "…"
+    if len(desc) > 700: desc = desc[:700] + "…"
 
     src = (it.get("source") or "Freelancer").strip()
 
@@ -153,21 +140,21 @@ def _compose_message(it: Dict) -> str:
 
     def _fmt(v):
         try:
-            f = float(v)
-            s = f"{f:.1f}"
+            f=float(v)
+            s=f"{f:.1f}"
             return s.rstrip("0").rstrip(".")
         except:
             return str(v)
 
+            orig = ""
     if budget_min is not None and budget_max is not None:
         orig = f"{_fmt(budget_min)}–{_fmt(budget_max)} {currency}"
     elif budget_min is not None:
         orig = f"from {_fmt(budget_min)} {currency}"
     elif budget_max is not None:
         orig = f"up to {_fmt(budget_max)} {currency}"
-    else:
-        orig = ""
 
+    # USD conversion
     usd = None
     try:
         usd = usd_line(budget_min, budget_max, currency)
@@ -208,13 +195,11 @@ def _compose_message(it: Dict) -> str:
 
     return "\n".join(lines)
 
-
 def _job_key(it: Dict) -> str:
     base = (it.get("url") or it.get("original_url") or "").strip()
     if not base:
         base = f"{it.get('source','')}::{(it.get('title') or '')[:200]}"
-    return hashlib.sha1(base.encode("utf-8", "ignore")).hexdigest()
-
+    return hashlib.sha1(base.encode("utf-8","ignore")).hexdigest()
 
 def _build_keyboard(links: Dict[str, Optional[str]]):
     row1 = [
@@ -227,7 +212,6 @@ def _build_keyboard(links: Dict[str, Optional[str]]):
     ]
     return InlineKeyboardMarkup([row1, row2])
 
-
 def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
     original = it.get("url") or it.get("original_url") or ""
     return {
@@ -235,7 +219,6 @@ def _resolve_links(it: Dict) -> Dict[str, Optional[str]]:
         "proposal": original,
         "affiliate": original
     }
-
 
 async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch: int):
     sent = 0
@@ -259,7 +242,6 @@ async def _send_items(bot: Bot, chat_id: int, items: List[Dict], per_user_batch:
         except Exception as e:
             log.warning(f"send_message failed for {chat_id}: {e}")
 
-
 def interleave_by_source(items: List[Dict]) -> List[Dict]:
     from collections import deque
     buckets = {}
@@ -278,14 +260,13 @@ def interleave_by_source(items: List[Dict]) -> List[Dict]:
             break
     return out
 
-
 async def amain():
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "") or os.getenv("BOT_TOKEN", "")
+    token = os.getenv("TELEGRAM_BOT_TOKEN","") or os.getenv("BOT_TOKEN","")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
 
-    interval = int(os.getenv("WORKER_INTERVAL", "120"))
-    per_user_batch = int(os.getenv("BATCH_PER_TICK", "5"))
+    interval = int(os.getenv("WORKER_INTERVAL","120"))
+    per_user_batch = int(os.getenv("BATCH_PER_TICK","5"))
     bot = Bot(token=token)
 
     users = _fetch_all_users()
@@ -293,10 +274,6 @@ async def amain():
     while True:
         cycle_start = datetime.now(timezone.utc)
         sent_total = 0
-
-        # ★★★ RESET FEED COUNTS ΓΙΑ ΝΑ ΣΟΡΩΝΟΥΝ ΣΤΟ FEEDSTATUS ★★★
-        reset_counts()
-
         try:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)
 
@@ -304,38 +281,37 @@ async def amain():
                 kws = _fetch_user_keywords(tid)
                 items = await _worker.fetch_all(kws)
 
-                # --- MEASURE RAW FEED COUNTS ---
+                # μέτρηση raw items ανά feed πριν τα φίλτρα
                 per_feed_counts: Dict[str, int] = {}
                 for it in items:
                     src = (it.get("source") or "freelancer").lower()
                     stats_incr(src, 1)
                     per_feed_counts[src] = per_feed_counts.get(src, 0) + 1
 
-                # DB event logs
+                # γράφουμε ένα event ανά feed για αυτόν τον user/κύκλο
                 try:
                     for src, cnt in per_feed_counts.items():
                         record_event(src, {"count": cnt})
                 except Exception as e:
                     log.warning("record_event failed: %s", e)
 
-                # FILTERING
                 filtered: List[Dict] = []
                 for it in items:
                     mk = it.get("matched_keyword")
                     if not mk:
-                        txt = (it.get("title", "") + " " + it.get("description", "")).lower()
+                        txt = (it.get("title","") + " " + it.get("description","")).lower()
                         for kw in kws:
                             if kw.lower() in txt:
                                 mk = kw
                                 break
                     if not mk:
                         continue
-
                     it["matched_keyword"] = mk
 
                     dt = _extract_dt(it)
                     if not dt or dt < cutoff:
                         continue
+
                     filtered.append(it)
 
                 filtered.sort(key=lambda x: _extract_dt(x) or cutoff, reverse=True)
@@ -349,7 +325,7 @@ async def amain():
             log.error(f"runner error: {e}")
             stats_error("worker", str(e))
 
-        # --- FINAL STATISTICS OUTPUT ---
+        # γράφουμε stats για τον τρέχοντα κύκλο
         try:
             elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
             publish_stats(
@@ -361,6 +337,17 @@ async def amain():
 
         await asyncio.sleep(interval)
 
+        # γράφουμε stats για τον τρέχοντα κύκλο
+        try:
+            elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
+            publish_stats(
+                cycle_seconds=elapsed,
+                sent_this_cycle=sent_total,
+            )
+        except Exception as e:
+            log.warning("publish_stats failed: %s", e)
+
+        await asyncio.sleep(interval)
 
 if __name__ == "__main__":
     asyncio.run(amain())
