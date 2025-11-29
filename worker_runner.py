@@ -18,7 +18,7 @@ from telegram.constants import ParseMode
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker_runner")
 
-FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "168"))  # 7 μέρες
+FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
 
 def _h(s: str) -> str:
     return _esc((s or '').strip(), quote=False)
@@ -316,10 +316,20 @@ async def amain():
                     it["matched_keyword"] = mk
 
                     dt = _extract_dt(it)
-                    if not dt or dt < cutoff:
-                        # DEBUG: αγγελία πολύ παλιά
-                        log.info(f"[debug] TOO OLD | src={src} | title={title!r} | kw={mk!r}")
+                    if not dt:
                         continue
+
+                    now_utc = datetime.now(timezone.utc)
+                    pph_cutoff = now_utc - timedelta(days=7)
+
+                    if src == "peopleperhour":
+                        if dt < pph_cutoff:
+                            log.info(f"[debug] TOO OLD_PPH7D | src={src} | title={title!r} | kw={mk!r}")
+                            continue
+                    else:
+                        if dt < cutoff:
+                            log.info(f"[debug] TOO OLD | src={src} | title={title!r} | kw={mk!r}")
+                            continue
 
                     # DEBUG: περνάει φίλτρα και θα σταλθεί (αν δεν είναι already_sent)
                     log.info(f"[debug] OK | src={src} | title={title!r} | kw={mk!r}")
