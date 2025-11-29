@@ -81,20 +81,20 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
     items: List[Dict] = []
 
-    # Πιάνουμε τα job cards με ευέλικτο selector
-    for li in soup.select("li[class*='list__item']"):
+    # Πιάνουμε τα job cards PeoplePerHour
+    for li in soup.select("li[class*='c-project-card']"):
         try:
-            title_el = li.select_one("h6[class*='item__title'] a")
+            title_el = li.select_one("h3 a, h2 a")
             title = title_el.get_text(strip=True) if title_el else ""
 
             link = title_el.get("href") if title_el else ""
             if link and link.startswith("/"):
                 link = BASE + link
 
-            desc_el = li.select_one("p[class*='item__desc']")
+            desc_el = li.select_one("p")
             desc = desc_el.get_text(strip=True) if desc_el else ""
 
-            price_el = li.select_one(".card__price span span")
+            price_el = li.select_one("[class*='c-project-card__price'] span span")
             price_raw = (
                 price_el.get_text(strip=True).replace("\u00A0", " ")
                 if price_el
@@ -102,7 +102,7 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
             )
             bmin, bmax, cur = _extract_budget(price_raw)
 
-            time_el = li.select_one(".card__footer-left span")
+            time_el = li.select_one("[class*='c-project-card__time']")
             timeago = time_el.get_text(strip=True) if time_el else ""
 
             # NEW: convert "5 hours ago" κλπ. σε ISO timestamp
