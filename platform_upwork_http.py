@@ -13,6 +13,7 @@ import os
 import time
 import math
 import datetime
+import random   # ΝΕΟ
 
 import httpx
 from bs4 import BeautifulSoup
@@ -157,11 +158,22 @@ def _normalize_job(card: BeautifulSoup) -> Optional[Dict]:
 
 def _build_headers() -> Dict[str, str]:
     cookies = os.environ.get("UPWORK_COOKIES", "").strip()
+
+    # Μπορείς αν θέλεις να βάλεις εδώ ακριβώς το User-Agent από τον browser σου
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/129.0.0.0 Safari/537.36"
+    )
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (UpworkFeedBot)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Connection": "keep-alive",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.upwork.com/ab/jobs/search/",  # κλασική σελίδα job search
     }
     if cookies:
         headers["Cookie"] = cookies
@@ -184,12 +196,16 @@ def fetch_html(keywords_query: str) -> List[Dict]:
     items: List[Dict] = []
 
     try:
+        # Μικρό τυχαίο delay 0.5–2.0 sec για να μη φαίνεται “ρομπότ”
+        time.sleep(random.uniform(0.5, 2.0))
+
         with httpx.Client(timeout=15.0, follow_redirects=True) as cli:
             r = cli.get(UPWORK_SEARCH_URL, params=params, headers=headers)
             r.raise_for_status()
             html = r.text
     except Exception:
         return []
+
 
     try:
         soup = BeautifulSoup(html, "html.parser")
