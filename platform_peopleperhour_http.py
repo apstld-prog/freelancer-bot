@@ -102,27 +102,27 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
             )
             bmin, bmax, cur = _extract_budget(price_raw)
 
-        time_el = li.select_one(".card__footer-left span")
-        timeago = time_el.get_text(strip=True) if time_el else ""
+            time_el = li.select_one(".card__footer-left span")
+            timeago = time_el.get_text(strip=True) if time_el else ""
 
-        # NEW: convert "5 hours ago" κλπ. σε ISO timestamp
-        ts = None
-        try:
-            txt = timeago.lower()
-            if "hour" in txt:
-                num = int(re.findall(r"\d+", txt)[0])
-                dt = datetime.utcnow() - timedelta(hours=num)
-                ts = dt.isoformat() + "Z"
-            elif "minute" in txt:
-                num = int(re.findall(r"\d+", txt)[0])
-                dt = datetime.utcnow() - timedelta(minutes=num)
-                ts = dt.isoformat() + "Z"
-            elif "day" in txt:
-                num = int(re.findall(r"\d+", txt)[0])
-                dt = datetime.utcnow() - timedelta(days=num)
-                ts = dt.isoformat() + "Z"
-        except Exception:
+            # NEW: convert "5 hours ago" κλπ. σε ISO timestamp
             ts = None
+            try:
+                txt = timeago.lower()
+                if "hour" in txt:
+                    num = int(re.findall(r"\d+", txt)[0])
+                    dt = datetime.utcnow() - timedelta(hours=num)
+                    ts = dt.isoformat() + "Z"
+                elif "minute" in txt:
+                    num = int(re.findall(r"\d+", txt)[0])
+                    dt = datetime.utcnow() - timedelta(minutes=num)
+                    ts = dt.isoformat() + "Z"
+                elif "day" in txt:
+                    num = int(re.findall(r"\d+", txt)[0])
+                    dt = datetime.utcnow() - timedelta(days=num)
+                    ts = dt.isoformat() + "Z"
+            except Exception:
+                ts = None
 
             items.append(
                 {
