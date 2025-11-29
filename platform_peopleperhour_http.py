@@ -82,7 +82,7 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
     items: List[Dict] = []
 
     # Πιάνουμε τα job cards PeoplePerHour
-    for li in soup.select("li[class*='c-project-card']"):
+    for li in soup.select("li"):
         try:
             title_el = li.select_one("h3 a, h2 a")
             title = title_el.get_text(strip=True) if title_el else ""
