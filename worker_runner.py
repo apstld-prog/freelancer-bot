@@ -18,7 +18,7 @@ from telegram.constants import ParseMode
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker_runner")
 
-FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
+FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "5"))
 
 def _h(s: str) -> str:
     return _esc((s or '').strip(), quote=False)
@@ -316,7 +316,7 @@ async def amain():
                     it["matched_keyword"] = mk
 
                     dt = _extract_dt(it)
-                    if not dt:
+                    if not dt or dt < cutoff:
                         continue
 
                     now_utc = datetime.now(timezone.utc)
