@@ -104,6 +104,25 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
 
             time_el = li.select_one(".card__footer-left span")
             timeago = time_el.get_text(strip=True) if time_el else ""
+            
+    # μετατροπή "5 hours ago", "8 hours ago" κλπ. σε timestamp ISO
+        ts = None
+        try:
+            txt = timeago.lower()
+            if "hour" in txt:
+                num = int(re.findall(r"\d+", txt)[0])
+                dt = datetime.utcnow() - timedelta(hours=num)
+                ts = dt.isoformat() + "Z"
+            elif "minute" in txt:
+                num = int(re.findall(r"\d+", txt)[0])
+                dt = datetime.utcnow() - timedelta(minutes=num)
+                ts = dt.isoformat() + "Z"
+            elif "day" in txt:
+                num = int(re.findall(r"\d+", txt)[0])
+                dt = datetime.utcnow() - timedelta(days=num)
+                ts = dt.isoformat() + "Z"
+        except Exception:
+            ts = None
 
             items.append(
                 {
@@ -114,8 +133,8 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
                     "budget_min": bmin,
                     "budget_max": bmax,
                     "original_currency": cur,
-                    "timestamp": None,
-                    "time_submitted": None,
+                    "timestamp": ts,
+                    "time_submitted": ts,
                     "original_url": link,
                     "proposal_url": link,
                     "price_raw": price_raw,

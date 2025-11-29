@@ -45,9 +45,10 @@ def fetch():
             pub  = e.publishDate.text.strip() if e.publishDate else ""
 
             try:
-                ts = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+                ts_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+                ts = ts_dt.isoformat()
             except:
-                ts = None
+                ts = ""
 
             items.append({
                 "title": title,
@@ -69,9 +70,10 @@ def fetch():
         pub   = item.pubDate.text.strip() if item.pubDate else ""
 
         try:
-            ts = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %z")
+            ts_dt = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %z")
+            ts = ts_dt.isoformat()
         except:
-            ts = None
+            ts = ""
 
         items.append({
             "title": title,
