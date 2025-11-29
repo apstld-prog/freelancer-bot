@@ -18,7 +18,7 @@ from telegram.constants import ParseMode
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("worker_runner")
 
-FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "48"))
+FRESH_HOURS = int(os.getenv("FRESH_WINDOW_HOURS", "168"))  # 7 μέρες
 
 def _h(s: str) -> str:
     return _esc((s or '').strip(), quote=False)
