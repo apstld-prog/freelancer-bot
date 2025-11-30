@@ -1,0 +1,4 @@
+PeoplePerHour scraping package
+
+- Placeholder endpoint: https://www.peopleperhour.com/search/projects
+- Replace with actual captured XHR URL.
