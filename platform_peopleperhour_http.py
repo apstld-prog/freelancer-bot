@@ -1,6 +1,7 @@
 import re
 import time
 from typing import List, Dict, Optional
+from datetime import datetime, timedelta
 
 import httpx
 from bs4 import BeautifulSoup
@@ -82,19 +83,22 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
     items: List[Dict] = []
 
     # Πιάνουμε τα job cards PeoplePerHour
-    for li in soup.select("li"):
+    for li in soup.select("li[data-qa='project-card']"):
         try:
-            title_el = li.select_one("h3 a, h2 a")
+            # Τίτλος + link
+            title_el = li.select_one("a[data-qa='project-title']")
             title = title_el.get_text(strip=True) if title_el else ""
 
             link = title_el.get("href") if title_el else ""
             if link and link.startswith("/"):
                 link = BASE + link
 
+            # Περιγραφή (αν υπάρχει μικρό snippet)
             desc_el = li.select_one("p")
             desc = desc_el.get_text(strip=True) if desc_el else ""
 
-            price_el = li.select_one("[class*='c-project-card__price'] span span")
+            # Τιμή
+            price_el = li.select_one("[data-qa='project-price'] span span")
             price_raw = (
                 price_el.get_text(strip=True).replace("\u00A0", " ")
                 if price_el
@@ -102,27 +106,35 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
             )
             bmin, bmax, cur = _extract_budget(price_raw)
 
-            time_el = li.select_one("[class*='c-project-card__time']")
+            # Χρόνος σε μορφή "X hours ago"
+            time_el = li.select_one("span[data-qa='project-time']")
             timeago = time_el.get_text(strip=True) if time_el else ""
 
-            # NEW: convert "5 hours ago" κλπ. σε ISO timestamp
+            # Προσπάθεια να διαβάσουμε ISO datetime από data-attribute ή JSON
             ts = None
-            try:
-                txt = timeago.lower()
-                if "hour" in txt:
-                    num = int(re.findall(r"\d+", txt)[0])
-                    dt = datetime.utcnow() - timedelta(hours=num)
-                    ts = dt.isoformat() + "Z"
-                elif "minute" in txt:
-                    num = int(re.findall(r"\d+", txt)[0])
-                    dt = datetime.utcnow() - timedelta(minutes=num)
-                    ts = dt.isoformat() + "Z"
-                elif "day" in txt:
-                    num = int(re.findall(r"\d+", txt)[0])
-                    dt = datetime.utcnow() - timedelta(days=num)
-                    ts = dt.isoformat() + "Z"
-            except Exception:
-                ts = None
+
+            # 1) Αν υπάρχει data attribute τύπου data-posted-at
+            if time_el and time_el.has_attr("data-posted-at"):
+                ts = time_el["data-posted-at"].strip() or None
+
+            # 2) Αν δεν βρέθηκε, κάνε περίπου conversion από time_ago
+            if not ts and timeago:
+                try:
+                    txt = timeago.lower()
+                    if "hour" in txt:
+                        num = int(re.findall(r"\d+", txt)[0])
+                        dt = datetime.utcnow() - timedelta(hours=num)
+                        ts = dt.isoformat() + "Z"
+                    elif "minute" in txt:
+                        num = int(re.findall(r"\d+", txt)[0])
+                        dt = datetime.utcnow() - timedelta(minutes=num)
+                        ts = dt.isoformat() + "Z"
+                    elif "day" in txt:
+                        num = int(re.findall(r"\d+", txt)[0])
+                        dt = datetime.utcnow() - timedelta(days=num)
+                        ts = dt.isoformat() + "Z"
+                except Exception:
+                    ts = None
 
             items.append(
                 {
@@ -133,7 +145,7 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
                     "budget_min": bmin,
                     "budget_max": bmax,
                     "original_currency": cur,
-                    "timestamp": ts,
+                    "timestamp": ts,          # ISO 8601 ή None
                     "time_submitted": ts,
                     "original_url": link,
                     "proposal_url": link,
@@ -146,7 +158,6 @@ def _scrape_search_keyword(keyword: str) -> List[Dict]:
             continue
 
     return items
-
 
 def _cache_key_for_keyword(keyword: str) -> str:
     return f"pph:search:{keyword.lower()}"
